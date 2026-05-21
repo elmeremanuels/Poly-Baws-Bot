@@ -106,5 +106,13 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state(f"coin_{coin}_enabled", str(CONFIG["coins"][coin]["enabled"]))
         await save_dashboard_state(f"coin_{coin}_max", str(CONFIG["coins"][coin]["max_parallel_positions"]))
 
+    elif command == "set_trade_size_eur":
+        eur = float(payload["eur"])
+        CONFIG["trading"]["entry_size_eur"] = eur
+        price = CONFIG["trading"]["entry_price_target"]
+        CONFIG["trading"]["entry_size_shares"] = max(1, int(eur / price))
+        await save_dashboard_state("trade_size_eur", str(eur))
+        log.info("trade_size_updated", eur=eur, shares=CONFIG["trading"]["entry_size_shares"])
+
     else:
         log.warning("unknown_command", command=command)

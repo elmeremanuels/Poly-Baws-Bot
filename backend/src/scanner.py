@@ -1,15 +1,22 @@
 """Multi-coin market scanner — discovers upcoming 5-min windows on Polymarket."""
 import asyncio
-import json
 from datetime import datetime, timezone, timedelta
-from typing import Any
 import httpx
 
 from .config_loader import CONFIG
 from .logger import log, write_event
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
-COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].items()}
+
+# Coin search terms: question/slug must contain one of these AND a 5-min indicator
+_COIN_VARIANTS: dict[str, list[str]] = {
+    "BTC":  ["btc", "bitcoin"],
+    "ETH":  ["eth", "ethereum", "ether"],
+    "SOL":  ["sol", "solana"],
+    "XRP":  ["xrp", "ripple"],
+    "DOGE": ["doge", "dogecoin"],
+}
+_TIME_VARIANTS = ["5 min", "5min", "5-min", "5 m"]
 
 # Cached markets: coin -> list of market dicts sorted by window_start asc
 _market_cache: dict[str, list[dict]] = {}
@@ -17,42 +24,66 @@ _last_refresh: dict[str, datetime] = {}
 _CACHE_TTL_SECONDS = 120
 
 
-async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
-    """Fetch upcoming markets from Gamma API filtered by slug fragment."""
-    params = {
+async def _fetch_markets_for_coin(coin: str) -> list[dict]:
+    """Multi-strategy fetch — tries several Gamma API search params until markets are found."""
+    variants = _COIN_VARIANTS.get(coin, [coin.lower()])
+
+    base_params = {
         "active": "true",
         "closed": "false",
-        "limit": 50,
+        "limit": 100,
         "order": "startDate",
         "ascending": "true",
     }
-    markets = []
+
+    # Try progressively broader queries; stop at first strategy that returns matches
+    strategies: list[dict] = [
+        {"tag": coin},
+        {"tag": coin.lower()},
+        {"tag": "crypto"},
+        {},  # no tag filter
+    ]
+
+    seen: set[str] = set()
+    markets: list[dict] = []
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Search by tag/slug pattern
-            resp = await client.get(
-                f"{GAMMA_URL}/markets",
-                params={**params, "tag": coin},
-            )
-            if resp.status_code == 200:
+            for extra in strategies:
+                resp = await client.get(f"{GAMMA_URL}/markets", params={**base_params, **extra})
+                if resp.status_code != 200:
+                    continue
+
                 data = resp.json()
                 raw = data if isinstance(data, list) else data.get("markets", [])
+
                 for m in raw:
-                    slug = (m.get("slug") or "").lower()
+                    mid = str(m.get("id") or m.get("conditionId") or "")
+                    if not mid or mid in seen:
+                        continue
                     q = (m.get("question") or "").lower()
-                    if filter_slug.lower() in slug or filter_slug.lower() in q:
+                    slug = (m.get("slug") or "").lower()
+                    text = q + " " + slug
+
+                    coin_hit = any(v in text for v in variants)
+                    time_hit = any(t in text for t in _TIME_VARIANTS)
+
+                    if coin_hit and time_hit:
+                        seen.add(mid)
                         markets.append(_normalize_market(coin, m))
+
+                if markets:
+                    log.info("scanner_strategy_hit", coin=coin, strategy=extra, count=len(markets))
+                    break
     except Exception as e:
         log.error("scanner_fetch_error", coin=coin, error=str(e))
+
     return markets
 
 
 def _normalize_market(coin: str, raw: dict) -> dict:
-    """Extract the fields we care about from a Gamma market object."""
-    # Gamma returns token arrays for YES/NO token IDs
     tokens = raw.get("tokens") or raw.get("clobTokenIds") or []
-    yes_token = None
-    no_token = None
+    yes_token = no_token = None
     if isinstance(tokens, list) and len(tokens) >= 2:
         yes_token = tokens[0]
         no_token = tokens[1]
@@ -63,9 +94,6 @@ def _normalize_market(coin: str, raw: dict) -> dict:
     start_str = raw.get("startDate") or raw.get("start_date")
     end_str = raw.get("endDate") or raw.get("end_date")
 
-    window_start = _parse_ts(start_str)
-    window_end = _parse_ts(end_str)
-
     return {
         "coin": coin,
         "market_id": raw.get("id") or raw.get("conditionId"),
@@ -74,8 +102,8 @@ def _normalize_market(coin: str, raw: dict) -> dict:
         "question": raw.get("question", ""),
         "yes_token": yes_token,
         "no_token": no_token,
-        "window_start": window_start,
-        "window_end": window_end,
+        "window_start": _parse_ts(start_str),
+        "window_end": _parse_ts(end_str),
         "status": raw.get("active", True),
     }
 
@@ -92,80 +120,39 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
 
 
 async def refresh_markets(coin: str | None = None) -> None:
-    """Refresh market cache for one or all coins."""
-    coins_to_refresh = [coin] if coin else list(COIN_FILTERS.keys())
-    tasks = []
-    for c in coins_to_refresh:
-        if not CONFIG["coins"][c]["enabled"]:
-            continue
-        tasks.append(_refresh_coin(c))
-    await asyncio.gather(*tasks)
+    coins_to_refresh = [coin] if coin else [
+        c for c in CONFIG["coins"] if CONFIG["coins"][c]["enabled"]
+    ]
+    await asyncio.gather(*[_refresh_coin(c) for c in coins_to_refresh])
 
 
 async def _refresh_coin(coin: str) -> None:
-    filter_slug = COIN_FILTERS[coin]
-    markets = await _fetch_markets_for_coin(coin, filter_slug)
+    markets = await _fetch_markets_for_coin(coin)
     now = datetime.now(timezone.utc)
-    # Only keep future markets
     upcoming = [m for m in markets if m["window_start"] and m["window_start"] > now - timedelta(minutes=5)]
     upcoming.sort(key=lambda m: m["window_start"])
     _market_cache[coin] = upcoming
     _last_refresh[coin] = now
     log.info("scanner_refreshed", coin=coin, count=len(upcoming))
-    await _healthcheck_coin(coin, filter_slug, upcoming)
 
-
-async def _healthcheck_coin(coin: str, filter_slug: str, markets: list[dict]) -> None:
-    """
-    Verify that the returned markets actually match our slug pattern.
-    Alerts (logs + persists event) if:
-    - Zero markets found for an enabled coin
-    - Any market slug doesn't contain the expected pattern (possible API structure change)
-    """
-    if not markets:
-        msg = f"No upcoming markets found for {coin} (filter={filter_slug!r}). Gamma API may have changed slugs."
-        log.warning("scanner_healthcheck_no_markets", coin=coin, filter=filter_slug, alert=True)
-        await write_event(None, "scanner_alert", coin, {"reason": "no_markets", "filter": filter_slug})
-        return
-
-    mismatched = [
-        m for m in markets
-        if filter_slug.lower() not in (m.get("slug") or "").lower()
-        and filter_slug.lower() not in (m.get("question") or "").lower()
-    ]
-    if mismatched:
-        slugs = [m.get("slug", "") for m in mismatched[:3]]
-        log.warning(
-            "scanner_healthcheck_slug_mismatch",
-            coin=coin,
-            filter=filter_slug,
-            mismatched_slugs=slugs,
-            alert=True,
-        )
-        await write_event(
-            None, "scanner_alert", coin,
-            {"reason": "slug_mismatch", "filter": filter_slug, "sample_slugs": slugs},
-        )
+    if not upcoming:
+        log.warning("scanner_no_markets", coin=coin)
+        await write_event(None, "scanner_alert", coin, {"reason": "no_markets"})
 
 
 def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:
-    """Return markets starting within `within_minutes` from now."""
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(minutes=within_minutes)
-    markets = _market_cache.get(coin, [])
-    return [m for m in markets if m["window_start"] and now <= m["window_start"] <= cutoff]
+    return [m for m in _market_cache.get(coin, []) if m["window_start"] and now <= m["window_start"] <= cutoff]
 
 
 def get_next_windows(coin: str, n: int = 3) -> list[dict]:
-    """Return the next n upcoming markets for a coin."""
     now = datetime.now(timezone.utc)
-    markets = _market_cache.get(coin, [])
-    future = [m for m in markets if m["window_start"] and m["window_start"] > now - timedelta(minutes=1)]
+    future = [m for m in _market_cache.get(coin, []) if m["window_start"] and m["window_start"] > now - timedelta(minutes=1)]
     return future[:n]
 
 
 def get_tradeable_market(coin: str) -> dict | None:
-    """Return the market that is within the entry window right now."""
     cfg = CONFIG["trading"]
     start_before = cfg["entry_start_minutes_before_window"]
     cutoff_before = cfg["entry_cutoff_minutes_before_window"]
@@ -182,7 +169,6 @@ def get_tradeable_market(coin: str) -> dict | None:
 
 
 async def scanner_loop(interval_seconds: int = 60) -> None:
-    """Background loop that keeps the market cache fresh."""
     while True:
         try:
             await refresh_markets()

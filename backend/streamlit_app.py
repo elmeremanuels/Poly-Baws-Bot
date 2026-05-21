@@ -140,6 +140,24 @@ with st.sidebar:
 
     st.divider()
 
+    st.markdown("**Trade size (EUR per leg)**")
+    saved_eur = get_state("trade_size_eur")
+    default_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("entry_size_eur", 1.0)
+    new_eur = st.number_input(
+        "eur_input",
+        min_value=0.10,
+        max_value=500.0,
+        value=default_eur,
+        step=0.10,
+        format="%.2f",
+        label_visibility="collapsed",
+    )
+    if abs(new_eur - default_eur) > 0.001:
+        write_command("set_trade_size_eur", {"eur": new_eur})
+        st.rerun()
+
+    st.divider()
+
     daily_pnl = get_daily_pnl()
     total_trades = get_today_trade_count()
     st.metric("Today's P&L", fmt_eur(daily_pnl))
