@@ -40,11 +40,9 @@ async def _fetch_all_5m_markets() -> dict[str, list[dict]]:
     """
     by_coin: dict[str, list[dict]] = {c: [] for c in _COIN_SLUG_PREFIX}
     params = {
-        "active": "true",
-        "closed": "false",
-        "limit": 200,
-        "order": "endDate",
-        "ascending": "true",
+        "limit": 500,
+        "order": "startDate",
+        "ascending": "false",
     }
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -136,9 +134,9 @@ async def refresh_markets(coin: str | None = None) -> None:
         if not CONFIG["coins"][c]["enabled"]:
             continue
         markets = all_markets.get(c, [])
-        # Keep markets whose prediction window hasn't ended yet
+        # Keep markets whose prediction window hasn't ended yet and is within 24h
         active = [m for m in markets
-                  if m["window_end"] is None or m["window_end"] > now - timedelta(minutes=1)]
+                  if m["window_end"] and now - timedelta(minutes=1) < m["window_end"] < now + timedelta(hours=25)]
         active.sort(key=lambda m: m["window_end"] or now)
         _market_cache[c] = active
         _last_refresh[c] = now
