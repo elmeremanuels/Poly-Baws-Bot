@@ -82,6 +82,24 @@ CREATE TABLE IF NOT EXISTS dashboard_state (
     value TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command TEXT NOT NULL,
+    payload TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now')),
+    executed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS hybrid_pending (
+    market_id TEXT PRIMARY KEY,
+    coin TEXT,
+    window_start TEXT,
+    question TEXT,
+    trade_id TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 

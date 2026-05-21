@@ -1,3 +1,17 @@
-your-domain.com {
-    reverse_proxy localhost:8000
+# Replace poly.yourdomain.com and alpaca.yourdomain.com with your real (sub)domains.
+# Caddy auto-provisions Let's Encrypt TLS — no cert management needed.
+# Generate hashed password with: caddy hash-password
+
+poly.yourdomain.com {
+    basicauth /* {
+        admin <CADDY_HASHED_PASSWORD>
+    }
+    reverse_proxy 127.0.0.1:8001
+}
+
+alpaca.yourdomain.com {
+    basicauth /* {
+        admin <CADDY_HASHED_PASSWORD>
+    }
+    reverse_proxy 127.0.0.1:8501
 }

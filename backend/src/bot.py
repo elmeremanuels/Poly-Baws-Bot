@@ -4,30 +4,25 @@ from datetime import datetime, timezone
 
 from . import scanner, ws_client, risk
 from .config_loader import CONFIG
-from .logger import log, write_event
+from .logger import log, write_event, save_dashboard_state
 from .state import (
     get_mode, is_paper_mode, is_auto_mode,
     get_active_count_by_coin, has_traded_window,
     create_trade_state, add_active_trade,
 )
 from .triggers import execute_entry
+from .commands import write_hybrid_pending, delete_hybrid_pending
 
 COINS = list(CONFIG["coins"].keys())
-_broadcast_fn = None
 _pending_hybrid_triggers: dict[str, asyncio.Event] = {}  # market_id -> Event
 
 
-def set_broadcast_fn(fn) -> None:
-    global _broadcast_fn
-    _broadcast_fn = fn
-
-
 def get_hybrid_pending() -> dict:
-    return {k: v for k, v in _pending_hybrid_triggers.items()}
+    return dict(_pending_hybrid_triggers)
 
 
 async def trigger_hybrid_entry(market_id: str) -> bool:
-    """Called by dashboard to trigger a hybrid entry."""
+    """Called by command queue to trigger a hybrid entry."""
     evt = _pending_hybrid_triggers.get(market_id)
     if evt:
         evt.set()
@@ -37,7 +32,6 @@ async def trigger_hybrid_entry(market_id: str) -> bool:
 
 
 async def _process_coin_window(coin: str, market: dict) -> None:
-    """Try to enter a trade for a given coin/window."""
     active_counts = get_active_count_by_coin()
     ok, reason = await risk.pre_trade_checks(coin, active_counts)
     if not ok:
@@ -54,24 +48,25 @@ async def _process_coin_window(coin: str, market: dict) -> None:
     trade_id = trade["trade_id"]
 
     if not is_auto_mode():
-        # Hybrid: register pending trigger and wait for user
         market_id = market.get("market_id") or market.get("condition_id")
         evt = asyncio.Event()
         _pending_hybrid_triggers[market_id] = evt
-        if _broadcast_fn:
-            await _broadcast_fn({
-                "event": "hybrid_window_ready",
-                "coin": coin,
-                "market_id": market_id,
-                "window_start": market["window_start"].isoformat() if market["window_start"] else None,
-                "trade_id": trade_id,
-            })
+
+        # Persist to DB so Streamlit can show the trigger button
+        write_hybrid_pending(
+            market_id=market_id,
+            coin=coin,
+            window_start=market["window_start"].isoformat() if market["window_start"] else "",
+            question=market.get("question", ""),
+            trade_id=trade_id,
+        )
+
         log.info("hybrid_waiting", coin=coin, trade_id=trade_id, market_id=market_id)
         try:
             window_start = market["window_start"]
             if window_start:
-                timeout = (window_start - datetime.now(timezone.utc)).total_seconds()
                 from datetime import timedelta
+                timeout = (window_start - datetime.now(timezone.utc)).total_seconds()
                 timeout -= CONFIG["trading"]["entry_cutoff_minutes_before_window"] * 60
             else:
                 timeout = 600
@@ -81,18 +76,20 @@ async def _process_coin_window(coin: str, market: dict) -> None:
             from .state import remove_active_trade
             remove_active_trade(trade_id)
             _pending_hybrid_triggers.pop(market_id, None)
+            delete_hybrid_pending(market_id)
             return
+
         _pending_hybrid_triggers.pop(market_id, None)
+        delete_hybrid_pending(market_id)
         trade["triggered_by"] = "user"
 
     await write_event(trade_id, "entry_initiated", coin, {"mode": mode})
-    success = await execute_entry(trade_id, broadcast_fn=_broadcast_fn)
+    success = await execute_entry(trade_id)
     if not success:
         log.info("entry_failed", coin=coin, trade_id=trade_id)
 
 
 async def _coin_loop(coin: str) -> None:
-    """Per-coin trading loop."""
     while True:
         if risk.is_killed():
             log.info("coin_loop_killed", coin=coin)
@@ -106,14 +103,22 @@ async def _coin_loop(coin: str) -> None:
         await asyncio.sleep(10)
 
 
+async def _heartbeat_loop() -> None:
+    """Write timestamp to DB every 5s so Streamlit can show bot-is-alive indicator."""
+    while True:
+        try:
+            await save_dashboard_state("heartbeat", datetime.now(timezone.utc).isoformat())
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
+
 async def run_bot() -> None:
-    """Start all coin loops and supporting tasks."""
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
     await scanner.refresh_markets()
     await ws_client.start()
 
-    # Subscribe all known token IDs to WS
     all_tokens = []
     for coin in COINS:
         for m in scanner._market_cache.get(coin, []):
@@ -127,6 +132,7 @@ async def run_bot() -> None:
     tasks = [
         asyncio.create_task(scanner.scanner_loop(60)),
         asyncio.create_task(risk.risk_monitor_loop(get_active_count_by_coin)),
+        asyncio.create_task(_heartbeat_loop()),
     ]
     for coin in COINS:
         if CONFIG["coins"][coin]["enabled"]:

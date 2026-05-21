@@ -1,16 +1,18 @@
 [Unit]
-Description=Poly-Baws-Bot Trading Bot
+Description=Poly-Baws-Bot — Trading Engine
 After=network.target
 
 [Service]
 Type=simple
-User=bot
+User=polybot
+Group=polybot
 WorkingDirectory=/opt/poly-baws-bot/backend
 Environment=PYTHONPATH=/opt/poly-baws-bot/backend
 EnvironmentFile=/opt/poly-baws-bot/backend/config/.env
 ExecStart=/opt/poly-baws-bot/venv/bin/python -m src.main
 Restart=on-failure
 RestartSec=5s
+MemoryMax=400M
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=poly-baws-bot

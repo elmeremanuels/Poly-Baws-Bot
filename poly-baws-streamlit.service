@@ -1,0 +1,25 @@
+[Unit]
+Description=Poly-Baws-Bot — Streamlit Dashboard
+After=network.target poly-baws-bot.service
+
+[Service]
+Type=simple
+User=polybot
+Group=polybot
+WorkingDirectory=/opt/poly-baws-bot/backend
+Environment=PYTHONPATH=/opt/poly-baws-bot/backend
+EnvironmentFile=/opt/poly-baws-bot/backend/config/.env
+ExecStart=/opt/poly-baws-bot/venv/bin/streamlit run streamlit_app.py \
+    --server.port=8001 \
+    --server.address=127.0.0.1 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false
+Restart=on-failure
+RestartSec=5s
+MemoryMax=300M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=poly-baws-streamlit
+
+[Install]
+WantedBy=multi-user.target
