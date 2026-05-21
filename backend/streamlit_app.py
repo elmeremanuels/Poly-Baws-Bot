@@ -1,7 +1,7 @@
 """Poly-Baws-Bot Streamlit dashboard."""
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +18,7 @@ from src.db_sync import (
     get_recent_events,
     get_recent_trades,
     get_scanner_alerts,
+    get_scanner_state,
     get_state,
     get_today_trade_count,
 )
@@ -72,6 +73,19 @@ st.markdown("""
     margin-bottom: 12px;
 }
 div[data-testid="stMetricValue"] { color: #e5e7eb; }
+.status-chip {
+    display: inline-block;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+.chip-wait  { background: rgba(55,65,81,0.6);  color: #9ca3af; }
+.chip-soon  { background: rgba(120,53,15,0.4); color: #fbbf24; }
+.chip-entry { background: rgba(6,78,59,0.5);   color: #34d399; }
+.chip-trade { background: rgba(30,58,138,0.5); color: #93c5fd; }
+.chip-none  { background: rgba(127,29,29,0.4); color: #fca5a5; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,6 +113,44 @@ def bot_status_html() -> str:
 
 def fmt_eur(v: float) -> str:
     return f"{'+'if v >= 0 else ''}€{v:.2f}"
+
+
+def _coin_status(coin: str, open_trades: list[dict]) -> tuple[str, str]:
+    """Return (chip_class, label) for a coin's current scanner/trade state."""
+    cfg = CONFIG["trading"]
+    start_before = cfg["entry_start_minutes_before_window"]
+    cutoff_before = cfg["entry_cutoff_minutes_before_window"]
+    now = datetime.now(timezone.utc)
+
+    in_trade = [t for t in open_trades if t.get("coin") == coin]
+    if in_trade:
+        return "chip-trade", f"🔵 In trade ({len(in_trade)})"
+
+    data = get_scanner_state(coin)
+    count = data.get("count", 0)
+    if count == 0:
+        return "chip-none", "🔴 Geen markten"
+
+    next_start = data.get("next_start")
+    if not next_start:
+        return "chip-wait", f"⏳ {count} markten"
+
+    try:
+        ws = datetime.fromisoformat(next_start)
+        mins = (ws - now).total_seconds() / 60
+    except Exception:
+        return "chip-wait", f"⏳ {count} markten"
+
+    if mins < 0:
+        return "chip-wait", "⏳ In window"
+    elif mins < cutoff_before:
+        return "chip-wait", f"⏳ Te laat ({mins:.0f}m)"
+    elif mins <= start_before:
+        return "chip-entry", f"🟢 ENTRY ({mins:.0f}m)"
+    else:
+        h, m = divmod(int(mins), 60)
+        label = f"⏳ {h}u {m:02d}m" if h else f"⏳ {m}m"
+        return "chip-wait", label
 
 
 def fmt_time(iso: str | None) -> str:
@@ -236,13 +288,14 @@ def _hybrid_panel() -> None:
 
 def _coin_grid() -> None:
     st.markdown("### Coins")
+    open_trades = get_open_trades()
     cols = st.columns(5)
     for i, coin in enumerate(COINS):
         with cols[i]:
-            _coin_card(coin)
+            _coin_card(coin, open_trades)
 
 
-def _coin_card(coin: str) -> None:
+def _coin_card(coin: str, open_trades: list[dict]) -> None:
     cfg = CONFIG["coins"][coin]
     pnl = get_daily_pnl(coin)
     count = get_today_trade_count(coin)
@@ -252,16 +305,16 @@ def _coin_card(coin: str) -> None:
     max_str = get_state(f"coin_{coin}_max")
     max_p = int(max_str) if max_str else cfg["max_parallel_positions"]
 
-    # Use session_state as write buffer so we don't re-send the same command
-    # every 5s refresh while the bot hasn't processed it yet
     ss_max_key = f"sent_max_{coin}"
     ss_en_key = f"sent_en_{coin}"
     display_max = st.session_state.get(ss_max_key, max_p)
     display_en = st.session_state.get(ss_en_key, enabled)
 
     pnl_color = "#34d399" if pnl >= 0 else "#f87171"
+    chip_cls, chip_label = _coin_status(coin, open_trades)
 
     st.markdown(f"#### {COIN_EMOJI.get(coin, '')} {coin}")
+    st.markdown(f'<div class="status-chip {chip_cls}">{chip_label}</div>', unsafe_allow_html=True)
 
     new_enabled = st.toggle("Enabled", value=display_en, key=f"en_{coin}")
     if new_enabled != display_en:

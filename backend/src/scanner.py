@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 import httpx
 
 from .config_loader import CONFIG
-from .logger import log, write_event
+from .logger import log, write_event, save_dashboard_state
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
 COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].items()}
@@ -127,9 +127,15 @@ async def _refresh_coin(coin: str) -> None:
                  slug=first["slug"], question=first["question"][:80],
                  window_start=str(first["window_start"]),
                  window_end=str(first["window_end"]))
+        await save_dashboard_state(f"scanner_{coin}", json.dumps({
+            "count": len(active),
+            "next_start": first["window_start"].isoformat() if first["window_start"] else None,
+            "next_end": first["window_end"].isoformat() if first["window_end"] else None,
+        }))
     else:
         log.warning("scanner_no_markets", coin=coin)
         await write_event(None, "scanner_alert", coin, {"reason": "no_markets"})
+        await save_dashboard_state(f"scanner_{coin}", json.dumps({"count": 0}))
 
 
 def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:

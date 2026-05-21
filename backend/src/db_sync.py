@@ -134,6 +134,17 @@ def get_events_for_trade(trade_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_scanner_state(coin: str) -> dict:
+    """Return latest scanner info for a coin: {count, next_start, next_end}."""
+    raw = get_state(f"scanner_{coin}")
+    if not raw:
+        return {"count": 0}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"count": 0}
+
+
 def get_scanner_alerts(limit: int = 5) -> list[dict]:
     if not _db_path.exists():
         return []
