@@ -146,10 +146,9 @@ async def _run_ws() -> None:
 
                 if _subscribed_assets:
                     sub_msg = json.dumps({
-                        "auth": {},
                         "type": "market",
-                        "markets": [],
                         "assets_ids": list(_subscribed_assets),
+                        "custom_feature_enabled": True,
                     })
                     await ws.send(sub_msg)
 
