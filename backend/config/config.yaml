@@ -1,0 +1,51 @@
+trading:
+  entry_size_shares: 2
+  entry_price_target: 0.50
+  entry_price_max_deviation: 0.02
+  trigger_threshold: 0.70
+  target_exit: 0.80
+  stop_exit: 0.60
+  entry_cutoff_minutes_before_window: 2
+  entry_start_minutes_before_window: 15
+
+coins:
+  BTC:
+    enabled: true
+    max_parallel_positions: 5
+    market_filter: "btc-up-or-down-5-minutes"
+  ETH:
+    enabled: true
+    max_parallel_positions: 5
+    market_filter: "eth-up-or-down-5-minutes"
+  SOL:
+    enabled: true
+    max_parallel_positions: 5
+    market_filter: "sol-up-or-down-5-minutes"
+  XRP:
+    enabled: true
+    max_parallel_positions: 5
+    market_filter: "xrp-up-or-down-5-minutes"
+  DOGE:
+    enabled: true
+    max_parallel_positions: 5
+    market_filter: "doge-up-or-down-5-minutes"
+
+risk:
+  daily_loss_limit_eur: 10.00
+  max_trades_per_day_total: 100
+  global_max_positions: 25
+
+polymarket:
+  clob_rest_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/v2/ws"
+  gamma_url: "https://gamma-api.polymarket.com"
+  chain_id: 137
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8000
+  auth_user: "admin"
+
+logging:
+  level: "INFO"
+  db_path: "data/trades.db"

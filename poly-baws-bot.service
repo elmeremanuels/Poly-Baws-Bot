@@ -1,0 +1,19 @@
+[Unit]
+Description=Poly-Baws-Bot Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/poly-baws-bot/backend
+Environment=PYTHONPATH=/opt/poly-baws-bot/backend
+EnvironmentFile=/opt/poly-baws-bot/backend/config/.env
+ExecStart=/opt/poly-baws-bot/venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=poly-baws-bot
+
+[Install]
+WantedBy=multi-user.target
