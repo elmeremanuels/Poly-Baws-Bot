@@ -17,16 +17,19 @@ _last_refresh: dict[str, datetime] = {}
 
 async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
     """Fetch upcoming events from Gamma API; extract nested markets."""
+    now = datetime.now(timezone.utc)
+    # 25-hour lookback: Polymarket creates 5M events up to ~24h before the window.
+    # Newest-first ordering ensures recently-created 5M events appear within limit=500.
+    start_min = (now - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
     results = []
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # No start_date_min — it filtered on listing date, not window start,
-            # causing markets listed >30 min ago to be excluded.
             params = {
                 "closed": "false",
                 "limit": 500,
-                "order": "endDate",
-                "ascending": "true",
+                "order": "startDate",
+                "ascending": "false",
+                "start_date_min": start_min,
             }
             resp = await client.get(f"{GAMMA_URL}/events", params=params)
             if resp.status_code == 200:
@@ -104,7 +107,9 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
 
 async def refresh_markets(coin: str | None = None) -> None:
     coins = [coin] if coin else [c for c in COIN_FILTERS if CONFIG["coins"][c]["enabled"]]
-    await asyncio.gather(*[_refresh_coin(c) for c in coins])
+    # Sequential — parallel gather caused 5 simultaneous DB writes → database is locked
+    for c in coins:
+        await _refresh_coin(c)
 
 
 async def _refresh_coin(coin: str) -> None:
