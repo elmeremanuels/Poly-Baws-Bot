@@ -16,7 +16,8 @@ from .logger import log, save_dashboard_state, _db_path
 # ── Sync write (called from Streamlit) ───────────────────────────────────────
 
 def write_command(command: str, payload: dict | None = None) -> None:
-    with sqlite3.connect(_db_path) as conn:
+    with sqlite3.connect(_db_path, timeout=10) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             "INSERT INTO commands (command, payload) VALUES (?, ?)",
             (command, json.dumps(payload or {})),

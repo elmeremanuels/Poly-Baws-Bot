@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS hybrid_pending (
 
 async def init_db() -> None:
     async with aiosqlite.connect(_db_path) as db:
+        # WAL mode allows concurrent reads + 1 writer without blocking
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=10000")
         await db.executescript(SCHEMA)
         await db.commit()
     log.info("database_initialized", path=str(_db_path))

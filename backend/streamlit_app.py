@@ -234,19 +234,27 @@ def _coin_card(coin: str) -> None:
     max_str = get_state(f"coin_{coin}_max")
     max_p = int(max_str) if max_str else cfg["max_parallel_positions"]
 
+    # Use session_state as write buffer so we don't re-send the same command
+    # every 5s refresh while the bot hasn't processed it yet
+    ss_max_key = f"sent_max_{coin}"
+    ss_en_key = f"sent_en_{coin}"
+    display_max = st.session_state.get(ss_max_key, max_p)
+    display_en = st.session_state.get(ss_en_key, enabled)
+
     pnl_color = "#34d399" if pnl >= 0 else "#f87171"
 
-    st.markdown(
-        f"#### {COIN_EMOJI.get(coin, '')} {coin}"
-    )
-    new_enabled = st.toggle("Enabled", value=enabled, key=f"en_{coin}")
-    if new_enabled != enabled:
+    st.markdown(f"#### {COIN_EMOJI.get(coin, '')} {coin}")
+
+    new_enabled = st.toggle("Enabled", value=display_en, key=f"en_{coin}")
+    if new_enabled != display_en:
         write_command("set_coin_config", {"coin": coin, "enabled": new_enabled})
+        st.session_state[ss_en_key] = new_enabled
         st.rerun()
 
-    new_max = st.slider("Max pos.", 0, 5, max_p, key=f"mx_{coin}")
-    if new_max != max_p:
+    new_max = st.slider("Max pos.", 0, 5, display_max, key=f"mx_{coin}")
+    if new_max != display_max:
         write_command("set_coin_config", {"coin": coin, "max_parallel": new_max})
+        st.session_state[ss_max_key] = new_max
 
     st.markdown(
         f'<p style="color:{pnl_color};margin:4px 0">{fmt_eur(pnl)}</p>'

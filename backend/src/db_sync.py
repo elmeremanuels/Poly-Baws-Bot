@@ -13,7 +13,8 @@ _db_path = Path(__file__).parent.parent / CONFIG["logging"]["db_path"]
 
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path)
+    conn = sqlite3.connect(_db_path, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
 
