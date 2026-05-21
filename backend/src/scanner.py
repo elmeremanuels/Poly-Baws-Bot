@@ -8,7 +8,6 @@ from .logger import log, write_event
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
 
-# Coin search terms: question/slug must contain one of these AND a 5-min indicator
 _COIN_VARIANTS: dict[str, list[str]] = {
     "BTC":  ["btc", "bitcoin"],
     "ETH":  ["eth", "ethereum", "ether"],
@@ -16,32 +15,32 @@ _COIN_VARIANTS: dict[str, list[str]] = {
     "XRP":  ["xrp", "ripple"],
     "DOGE": ["doge", "dogecoin"],
 }
-_TIME_VARIANTS = ["5 min", "5min", "5-min", "5 m"]
+_TIME_VARIANTS = ["5 min", "5min", "5-min", "5 m", "5m"]
 
-# Cached markets: coin -> list of market dicts sorted by window_start asc
 _market_cache: dict[str, list[dict]] = {}
 _last_refresh: dict[str, datetime] = {}
-_CACHE_TTL_SECONDS = 120
 
 
 async def _fetch_markets_for_coin(coin: str) -> list[dict]:
-    """Multi-strategy fetch — tries several Gamma API search params until markets are found."""
+    """
+    Multi-strategy fetch. Tries /events (grouped recurring series) then /markets,
+    with progressively broader tag filters. Stops at first strategy that finds results.
+    """
     variants = _COIN_VARIANTS.get(coin, [coin.lower()])
 
-    base_params = {
-        "active": "true",
-        "closed": "false",
-        "limit": 100,
-        "order": "startDate",
-        "ascending": "true",
-    }
+    base = {"active": "true", "closed": "false", "limit": 100,
+            "order": "startDate", "ascending": "true"}
 
-    # Try progressively broader queries; stop at first strategy that returns matches
-    strategies: list[dict] = [
-        {"tag": coin},
-        {"tag": coin.lower()},
-        {"tag": "crypto"},
-        {},  # no tag filter
+    strategies = [
+        # (endpoint, extra_params)
+        ("/events",  {"tag": coin}),
+        ("/events",  {"tag": coin.lower()}),
+        ("/events",  {"tag": "crypto"}),
+        ("/events",  {}),
+        ("/markets", {"tag": coin}),
+        ("/markets", {"tag": coin.lower()}),
+        ("/markets", {"tag": "crypto"}),
+        ("/markets", {}),
     ]
 
     seen: set[str] = set()
@@ -49,31 +48,41 @@ async def _fetch_markets_for_coin(coin: str) -> list[dict]:
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for extra in strategies:
-                resp = await client.get(f"{GAMMA_URL}/markets", params={**base_params, **extra})
+            for endpoint, extra in strategies:
+                resp = await client.get(f"{GAMMA_URL}{endpoint}", params={**base, **extra})
                 if resp.status_code != 200:
                     continue
 
                 data = resp.json()
-                raw = data if isinstance(data, list) else data.get("markets", [])
+                raw = data if isinstance(data, list) else data.get("markets") or data.get("events") or []
 
-                for m in raw:
-                    mid = str(m.get("id") or m.get("conditionId") or "")
-                    if not mid or mid in seen:
-                        continue
-                    q = (m.get("question") or "").lower()
-                    slug = (m.get("slug") or "").lower()
-                    text = q + " " + slug
+                for item in raw:
+                    # Events contain child markets; markets are direct
+                    child_markets = item.get("markets") or [item]
+                    event_text = (
+                        (item.get("title") or item.get("question") or "")
+                        + " "
+                        + (item.get("slug") or "")
+                    ).lower()
 
-                    coin_hit = any(v in text for v in variants)
-                    time_hit = any(t in text for t in _TIME_VARIANTS)
+                    for m in child_markets:
+                        mid = str(m.get("id") or m.get("conditionId") or "")
+                        if not mid or mid in seen:
+                            continue
+                        q = (m.get("question") or "").lower()
+                        slug = (m.get("slug") or "").lower()
+                        text = q + " " + slug + " " + event_text
 
-                    if coin_hit and time_hit:
-                        seen.add(mid)
-                        markets.append(_normalize_market(coin, m))
+                        coin_hit = any(v in text for v in variants)
+                        time_hit = any(t in text for t in _TIME_VARIANTS)
+
+                        if coin_hit and time_hit:
+                            seen.add(mid)
+                            markets.append(_normalize_market(coin, m))
 
                 if markets:
-                    log.info("scanner_strategy_hit", coin=coin, strategy=extra, count=len(markets))
+                    log.info("scanner_strategy_hit", coin=coin,
+                             endpoint=endpoint, extra=extra, count=len(markets))
                     break
     except Exception as e:
         log.error("scanner_fetch_error", coin=coin, error=str(e))
@@ -91,9 +100,6 @@ def _normalize_market(coin: str, raw: dict) -> dict:
         yes_token = tokens.get("yes") or tokens.get("YES")
         no_token = tokens.get("no") or tokens.get("NO")
 
-    start_str = raw.get("startDate") or raw.get("start_date")
-    end_str = raw.get("endDate") or raw.get("end_date")
-
     return {
         "coin": coin,
         "market_id": raw.get("id") or raw.get("conditionId"),
@@ -102,8 +108,8 @@ def _normalize_market(coin: str, raw: dict) -> dict:
         "question": raw.get("question", ""),
         "yes_token": yes_token,
         "no_token": no_token,
-        "window_start": _parse_ts(start_str),
-        "window_end": _parse_ts(end_str),
+        "window_start": _parse_ts(raw.get("startDate") or raw.get("start_date")),
+        "window_end": _parse_ts(raw.get("endDate") or raw.get("end_date")),
         "status": raw.get("active", True),
     }
 
@@ -120,16 +126,15 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
 
 
 async def refresh_markets(coin: str | None = None) -> None:
-    coins_to_refresh = [coin] if coin else [
-        c for c in CONFIG["coins"] if CONFIG["coins"][c]["enabled"]
-    ]
-    await asyncio.gather(*[_refresh_coin(c) for c in coins_to_refresh])
+    coins = [coin] if coin else [c for c in CONFIG["coins"] if CONFIG["coins"][c]["enabled"]]
+    await asyncio.gather(*[_refresh_coin(c) for c in coins])
 
 
 async def _refresh_coin(coin: str) -> None:
     markets = await _fetch_markets_for_coin(coin)
     now = datetime.now(timezone.utc)
-    upcoming = [m for m in markets if m["window_start"] and m["window_start"] > now - timedelta(minutes=5)]
+    upcoming = [m for m in markets
+                if m["window_start"] and m["window_start"] > now - timedelta(minutes=5)]
     upcoming.sort(key=lambda m: m["window_start"])
     _market_cache[coin] = upcoming
     _last_refresh[coin] = now
@@ -143,13 +148,14 @@ async def _refresh_coin(coin: str) -> None:
 def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(minutes=within_minutes)
-    return [m for m in _market_cache.get(coin, []) if m["window_start"] and now <= m["window_start"] <= cutoff]
+    return [m for m in _market_cache.get(coin, [])
+            if m["window_start"] and now <= m["window_start"] <= cutoff]
 
 
 def get_next_windows(coin: str, n: int = 3) -> list[dict]:
     now = datetime.now(timezone.utc)
-    future = [m for m in _market_cache.get(coin, []) if m["window_start"] and m["window_start"] > now - timedelta(minutes=1)]
-    return future[:n]
+    return [m for m in _market_cache.get(coin, [])
+            if m["window_start"] and m["window_start"] > now - timedelta(minutes=1)][:n]
 
 
 def get_tradeable_market(coin: str) -> dict | None:

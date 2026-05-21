@@ -5,6 +5,7 @@ bot executes them via aiosqlite (async, polling every 1s).
 import asyncio
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import aiosqlite
@@ -15,34 +16,50 @@ from .logger import log, save_dashboard_state, _db_path
 
 # ── Sync write (called from Streamlit) ───────────────────────────────────────
 
-def _sync_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path, timeout=15)
-    conn.execute("PRAGMA busy_timeout=15000")
-    return conn
+def _sync_write(sql: str, params: tuple = ()) -> None:
+    """
+    Execute a single write statement with BEGIN IMMEDIATE for reliable WAL locking.
+    Retries up to 8 times with exponential backoff before raising.
+    """
+    for attempt in range(8):
+        conn = sqlite3.connect(str(_db_path), isolation_level=None, timeout=30)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(sql, params)
+            conn.execute("COMMIT")
+            return
+        except sqlite3.OperationalError as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            if "locked" not in str(exc) or attempt == 7:
+                raise
+            time.sleep(0.05 * (2 ** attempt))  # 50 100 200 400 800 1600 3200ms
+        finally:
+            conn.close()
 
 
 def write_command(command: str, payload: dict | None = None) -> None:
-    with _sync_conn() as conn:
-        conn.execute(
-            "INSERT INTO commands (command, payload) VALUES (?, ?)",
-            (command, json.dumps(payload or {})),
-        )
-        conn.commit()
+    _sync_write(
+        "INSERT INTO commands (command, payload) VALUES (?, ?)",
+        (command, json.dumps(payload or {})),
+    )
 
 
 def write_hybrid_pending(market_id: str, coin: str, window_start: str, question: str, trade_id: str) -> None:
-    with _sync_conn() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO hybrid_pending (market_id, coin, window_start, question, trade_id) VALUES (?, ?, ?, ?, ?)",
-            (market_id, coin, window_start, question, trade_id),
-        )
-        conn.commit()
+    _sync_write(
+        "INSERT OR REPLACE INTO hybrid_pending (market_id, coin, window_start, question, trade_id) VALUES (?, ?, ?, ?, ?)",
+        (market_id, coin, window_start, question, trade_id),
+    )
 
 
 def delete_hybrid_pending(market_id: str) -> None:
-    with _sync_conn() as conn:
-        conn.execute("DELETE FROM hybrid_pending WHERE market_id = ?", (market_id,))
-        conn.commit()
+    _sync_write(
+        "DELETE FROM hybrid_pending WHERE market_id = ?",
+        (market_id,),
+    )
 
 
 # ── Async execution (called from bot process) ─────────────────────────────────
@@ -58,8 +75,8 @@ async def command_poll_loop() -> None:
 
 
 async def _execute_pending() -> None:
-    async with aiosqlite.connect(_db_path) as db:
-        await db.execute("PRAGMA busy_timeout=15000")
+    async with aiosqlite.connect(str(_db_path)) as db:
+        await db.execute("PRAGMA busy_timeout=30000")
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM commands WHERE status = 'pending' ORDER BY id ASC LIMIT 20"
