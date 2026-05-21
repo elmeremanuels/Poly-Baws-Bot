@@ -13,23 +13,23 @@ coins:
   BTC:
     enabled: true
     max_parallel_positions: 5
-    market_filter: "btc-up-or-down-5-minutes"
+    market_filter: "btc-updown-5m"
   ETH:
     enabled: true
     max_parallel_positions: 5
-    market_filter: "eth-up-or-down-5-minutes"
+    market_filter: "eth-updown-5m"
   SOL:
     enabled: true
     max_parallel_positions: 5
-    market_filter: "sol-up-or-down-5-minutes"
+    market_filter: "sol-updown-5m"
   XRP:
     enabled: true
     max_parallel_positions: 5
-    market_filter: "xrp-up-or-down-5-minutes"
+    market_filter: "xrp-updown-5m"
   DOGE:
     enabled: true
     max_parallel_positions: 5
-    market_filter: "doge-up-or-down-5-minutes"
+    market_filter: "doge-updown-5m"
 
 fees:
   # Taker fee peaks at peak_rate_pct near 50¢ probability, scales to 0 at 0¢/100¢.
