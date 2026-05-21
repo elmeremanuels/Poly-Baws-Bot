@@ -30,6 +30,14 @@ coins:
     max_parallel_positions: 5
     market_filter: "doge-up-or-down-5-minutes"
 
+fees:
+  # Taker fee peaks at peak_rate_pct near 50¢ probability, scales to 0 at 0¢/100¢.
+  # Formula: rate(p) = peak_rate_pct/100 * min(p, 1-p) / 0.5
+  # Maker orders (passive limit fills) pay zero fee.
+  peak_rate_pct: 1.80      # % at p=0.50 — 1.80% for Polymarket crypto markets
+  maker_rate_pct: 0.00
+  paper_slippage_per_share: 0.005   # 0.5¢ per share extra pessimism in paper mode
+
 risk:
   daily_loss_limit_eur: 10.00
   max_trades_per_day_total: 100

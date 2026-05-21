@@ -13,6 +13,7 @@ from .config_loader import CONFIG, get_env
 from .logger import (
     log, get_daily_pnl, get_today_trade_count, get_recent_trades,
     get_open_trades, get_events_for_trade, save_dashboard_state, load_dashboard_state,
+    get_scanner_alerts,
 )
 from . import risk, scanner, ws_client
 from .state import (
@@ -110,6 +111,7 @@ async def _build_full_state() -> dict:
         "hybrid_pending": [
             k for k in bot_module.get_hybrid_pending().keys()
         ],
+        "scanner_alerts": await get_scanner_alerts(),
     }
 
 

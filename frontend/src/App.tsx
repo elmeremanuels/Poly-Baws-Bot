@@ -78,6 +78,30 @@ function Dashboard() {
         </div>
       )}
 
+      {/* Scanner alert banners */}
+      {(state.scanner_alerts ?? []).length > 0 && (
+        <div className="flex flex-col gap-1">
+          {state.scanner_alerts.slice(0, 3).map((a) => {
+            let parsed: Record<string, unknown> = {}
+            try { parsed = JSON.parse(a.data) } catch { /* ignore */ }
+            const reason = String(parsed.reason ?? 'unknown')
+            const filter = String(parsed.filter ?? '')
+            return (
+              <div
+                key={a.id}
+                className="bg-red-950/40 border border-red-800/60 rounded-lg px-4 py-2 text-red-300 text-xs flex items-center gap-2"
+              >
+                <span className="font-semibold">[SCANNER ALERT]</span>
+                <span className="font-mono">{a.coin ?? '?'}</span>
+                <span className="text-red-400">{reason}</span>
+                {filter && <span className="text-red-600">filter={filter}</span>}
+                <span className="ml-auto text-red-800">{a.ts.slice(0, 19)}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {/* Global controls */}
       <GlobalControls state={state} onRefresh={refresh} />
 

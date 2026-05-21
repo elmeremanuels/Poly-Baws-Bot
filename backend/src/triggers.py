@@ -197,7 +197,7 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
 
     await write_event(trade_id, "loser_sold", coin, {"side": loser_side, "price": loser_price})
 
-    # Step 2: place OCO on winner (limit @ target and stop @ stop_exit simultaneously)
+    # Step 2: single resting target order + stop-market via price monitoring
     asyncio.create_task(_winner_exit_oco(trade_id, winner_token, size, paper, broadcast_fn))
 
     current_fees = trade.get("fees_paid") or 0.0
@@ -215,7 +215,14 @@ async def _winner_exit_oco(
     paper: bool,
     broadcast_fn,
 ) -> None:
-    """Monitor winner for 80¢ target or 60¢ stop. Simulates OCO behavior."""
+    """
+    Single resting limit sell @ TARGET_EXIT (80¢) + stop-market trigger at STOP_EXIT (60¢).
+
+    Only ONE order rests in the book at a time to avoid share-locking issues and short-position
+    risk. The 60¢ stop is implemented as a price trigger → cancel limit → market sell, not as a
+    second resting limit order. This guarantees exit even on gappy price moves (stop-market
+    semantics), at the cost of possible sub-60¢ fill on fast drops.
+    """
     trade = get_active_trades().get(trade_id)
     if not trade:
         return
@@ -223,35 +230,115 @@ async def _winner_exit_oco(
     window_end = trade.get("window_end_ts")
     window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc) if window_end else None
 
+    if paper:
+        await _winner_exit_paper(trade_id, winner_token, size, window_end_dt, broadcast_fn)
+    else:
+        await _winner_exit_live(trade_id, winner_token, size, window_end_dt, broadcast_fn)
+
+
+async def _winner_exit_paper(
+    trade_id: str,
+    winner_token: str,
+    size: float,
+    window_end_dt: datetime | None,
+    broadcast_fn,
+) -> None:
+    """Paper mode: simulate single resting 80¢ limit; stop-market if mid ≤ 60¢."""
     while True:
         now = datetime.now(timezone.utc)
+
         if window_end_dt and now >= window_end_dt:
             await _close_trade(trade_id, None, "resolution", broadcast_fn)
             return
 
-        if paper:
-            target_result = await paper_trader.simulate_limit_sell(winner_token, TARGET_EXIT, size)
-            if target_result["filled"]:
-                await _close_trade(trade_id, target_result["fill_price"], "target_80", broadcast_fn)
-                return
+        # Target: check if limit sell @ 80¢ would fill (best bid >= target)
+        target_result = await paper_trader.simulate_limit_sell(winner_token, TARGET_EXIT, size)
+        if target_result["filled"]:
+            await _close_trade(trade_id, target_result["fill_price"], "target_80", broadcast_fn)
+            return
 
-            stop_result = await paper_trader.simulate_limit_sell(winner_token, STOP_EXIT, size)
-            if stop_result["filled"]:
-                await _close_trade(trade_id, stop_result["fill_price"], "stop_60", broadcast_fn)
+        # Stop: if mid price has dropped to ≤ 60¢, execute stop-market sell immediately
+        mid = ws_client.get_mid_price(winner_token)
+        if mid is not None and mid <= STOP_EXIT:
+            stop_result = await paper_trader.simulate_market_sell(winner_token, size)
+            fill_price = stop_result.get("fill_price")
+            log.info("stop_market_triggered_paper", trade_id=trade_id, mid=mid, fill=fill_price)
+            await _close_trade(trade_id, fill_price, "stop_60", broadcast_fn)
+            return
+
+        await asyncio.sleep(0.5)
+
+
+async def _winner_exit_live(
+    trade_id: str,
+    winner_token: str,
+    size: float,
+    window_end_dt: datetime | None,
+    broadcast_fn,
+) -> None:
+    """
+    Live mode:
+    1. Place single resting limit sell @ 80¢.
+    2. Poll WS price every 0.5s; if mid ≤ 60¢: cancel limit → market sell (stop-market).
+    3. Poll order status via REST every 5s to catch fills the price-check missed.
+    4. On window expiry: cancel order → log resolution (Polymarket settles on-chain).
+    """
+    # Place the single target order
+    limit_resp = await orders.place_limit_order(winner_token, "SELL", TARGET_EXIT, size)
+    target_order_id = limit_resp["order_id"] if limit_resp else None
+    if not target_order_id:
+        # Fallback: can't place order → market sell now and log as stop
+        log.error("winner_limit_order_failed", trade_id=trade_id)
+        resp = await orders.place_market_order(winner_token, "SELL", size)
+        await _close_trade(trade_id, None, "stop_60", broadcast_fn)
+        return
+
+    log.info("winner_limit_placed", trade_id=trade_id, order_id=target_order_id, price=TARGET_EXIT)
+
+    last_status_check = asyncio.get_event_loop().time()
+    STATUS_POLL_INTERVAL = 5.0
+
+    while True:
+        now = datetime.now(timezone.utc)
+        loop_time = asyncio.get_event_loop().time()
+
+        if window_end_dt and now >= window_end_dt:
+            await orders.cancel_order(target_order_id)
+            await _close_trade(trade_id, None, "resolution", broadcast_fn)
+            return
+
+        # Fast path: WS price check for stop trigger
+        mid = ws_client.get_mid_price(winner_token)
+        if mid is not None and mid <= STOP_EXIT:
+            cancelled = await orders.cancel_order(target_order_id)
+            if cancelled:
+                # Limit order successfully cancelled; market sell all shares
+                log.info("stop_market_triggered_live", trade_id=trade_id, mid=mid)
+                resp = await orders.place_market_order(winner_token, "SELL", size)
+                actual_price = mid  # Best estimate; real fill may differ
+                await _close_trade(trade_id, actual_price, "stop_60", broadcast_fn)
+            else:
+                # Cancel failed → order may have just filled at target; check status
+                order = await orders.get_order(target_order_id)
+                if order and order.get("status") in ("MATCHED", "FILLED"):
+                    fill = float(order.get("average_price") or TARGET_EXIT)
+                    await _close_trade(trade_id, fill, "target_80", broadcast_fn)
+                else:
+                    # Unknown state: force market sell to guarantee exit
+                    log.warning("cancel_failed_forcing_market_sell", trade_id=trade_id)
+                    await orders.place_market_order(winner_token, "SELL", size)
+                    await _close_trade(trade_id, mid, "stop_60", broadcast_fn)
+            return
+
+        # Periodic REST poll to catch target fills
+        if loop_time - last_status_check >= STATUS_POLL_INTERVAL:
+            order = await orders.get_order(target_order_id)
+            last_status_check = loop_time
+            if order and order.get("status") in ("MATCHED", "FILLED"):
+                fill = float(order.get("average_price") or TARGET_EXIT)
+                log.info("target_order_filled", trade_id=trade_id, fill=fill)
+                await _close_trade(trade_id, fill, "target_80", broadcast_fn)
                 return
-        else:
-            mid = ws_client.get_mid_price(winner_token)
-            if mid:
-                if mid >= TARGET_EXIT:
-                    resp = await orders.place_market_order(winner_token, "SELL", size)
-                    fill_price = TARGET_EXIT if resp else None
-                    await _close_trade(trade_id, fill_price, "target_80", broadcast_fn)
-                    return
-                elif mid <= STOP_EXIT:
-                    resp = await orders.place_market_order(winner_token, "SELL", size)
-                    fill_price = STOP_EXIT if resp else None
-                    await _close_trade(trade_id, fill_price, "stop_60", broadcast_fn)
-                    return
 
         await asyncio.sleep(0.5)
 

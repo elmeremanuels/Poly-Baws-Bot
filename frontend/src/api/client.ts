@@ -33,6 +33,13 @@ export const api = {
   pnlSummary: () => request('/api/pnl/summary'),
 }
 
+export interface ScannerAlert {
+  id: number
+  coin: string | null
+  data: string
+  ts: string
+}
+
 export interface BotState {
   mode: string
   killed: boolean
@@ -43,6 +50,7 @@ export interface BotState {
   recent_trades: Trade[]
   coins: Record<string, CoinData>
   hybrid_pending: string[]
+  scanner_alerts: ScannerAlert[]
 }
 
 export interface CoinData {

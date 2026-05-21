@@ -217,3 +217,15 @@ async def get_events_for_trade(trade_id: str) -> list[dict]:
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_scanner_alerts(limit: int = 10) -> list[dict]:
+    """Return most recent scanner alert events (slug mismatches, no-markets warnings)."""
+    async with aiosqlite.connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM events WHERE event_type = 'scanner_alert' ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]

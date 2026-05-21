@@ -7,8 +7,19 @@ from . import ws_client
 from .config_loader import CONFIG
 from .logger import log
 
-POLYMARKET_FEE_RATE = 0.02  # 2% taker fee (check docs; update if changed)
-SLIPPAGE_BUFFER = 0.005     # 0.5¢ per share extra pessimism in paper mode
+_FEES_CFG = CONFIG["fees"]
+SLIPPAGE_BUFFER: float = _FEES_CFG["paper_slippage_per_share"]
+
+
+def taker_fee_rate(fill_price: float) -> float:
+    """
+    Dynamic taker fee rate based on fill probability.
+    Peaks at CONFIG fees.peak_rate_pct near p=0.50, scales linearly to 0 at p=0 and p=1.
+    Maker orders are zero fee — this function is only called for taker (market / crossing) orders.
+    """
+    p = max(0.0, min(1.0, fill_price))
+    peak = _FEES_CFG["peak_rate_pct"] / 100.0
+    return peak * min(p, 1.0 - p) / 0.5
 
 
 def _walk_book(levels: list[tuple[float, float]], size_needed: float) -> tuple[float | None, float]:
@@ -49,7 +60,7 @@ async def simulate_limit_buy(token_id: str, limit_price: float, size: float) -> 
     if filled_size < size:
         return {"filled": False, "fill_price": avg_price, "filled_size": filled_size, "partial": True}
 
-    fees = filled_size * avg_price * POLYMARKET_FEE_RATE + filled_size * SLIPPAGE_BUFFER
+    fees = filled_size * avg_price * taker_fee_rate(avg_price) + filled_size * SLIPPAGE_BUFFER
     return {
         "filled": True,
         "fill_price": avg_price,
@@ -74,7 +85,7 @@ async def simulate_limit_sell(token_id: str, limit_price: float, size: float) ->
     if filled_size < size:
         return {"filled": False, "fill_price": avg_price, "filled_size": filled_size, "partial": True}
 
-    fees = filled_size * avg_price * POLYMARKET_FEE_RATE + filled_size * SLIPPAGE_BUFFER
+    fees = filled_size * avg_price * taker_fee_rate(avg_price) + filled_size * SLIPPAGE_BUFFER
     return {
         "filled": True,
         "fill_price": avg_price,
@@ -95,7 +106,7 @@ async def simulate_market_sell(token_id: str, size: float) -> dict:
         return {"filled": False, "fill_price": None, "filled_size": 0.0}
 
     avg_price, filled_size = _walk_book(bids, size)
-    fees = filled_size * avg_price * POLYMARKET_FEE_RATE + filled_size * SLIPPAGE_BUFFER
+    fees = filled_size * avg_price * taker_fee_rate(avg_price or 0.5) + filled_size * SLIPPAGE_BUFFER
     return {
         "filled": filled_size >= size * 0.95,
         "fill_price": avg_price,

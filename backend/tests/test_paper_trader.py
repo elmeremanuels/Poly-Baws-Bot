@@ -2,6 +2,7 @@
 import pytest
 import asyncio
 from unittest.mock import patch
+import math
 
 # Minimal orderbook fixture
 MOCK_BOOK = {
@@ -55,6 +56,19 @@ def test_check_trigger_no_trigger():
     from src.paper_trader import check_trigger
     winner, price = check_trigger("y", "n", 0.70)
     assert winner is None
+
+
+def test_taker_fee_rate_peaks_at_50c():
+    from src.paper_trader import taker_fee_rate
+    # Rate at 50¢ should equal the configured peak (1.80%)
+    rate_mid = taker_fee_rate(0.50)
+    assert rate_mid == pytest.approx(0.018, rel=1e-6)
+    # Rate at 0¢ and 100¢ should be 0
+    assert taker_fee_rate(0.0) == 0.0
+    assert taker_fee_rate(1.0) == 0.0
+    # Rate at 30¢ and 70¢ should be equal and less than peak
+    assert taker_fee_rate(0.30) == pytest.approx(taker_fee_rate(0.70))
+    assert taker_fee_rate(0.30) < rate_mid
 
 
 def test_check_trigger_yes_wins():

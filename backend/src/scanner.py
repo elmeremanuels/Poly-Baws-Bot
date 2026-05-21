@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from .config_loader import CONFIG
-from .logger import log
+from .logger import log, write_event
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
 COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].items()}
@@ -112,6 +112,40 @@ async def _refresh_coin(coin: str) -> None:
     _market_cache[coin] = upcoming
     _last_refresh[coin] = now
     log.info("scanner_refreshed", coin=coin, count=len(upcoming))
+    await _healthcheck_coin(coin, filter_slug, upcoming)
+
+
+async def _healthcheck_coin(coin: str, filter_slug: str, markets: list[dict]) -> None:
+    """
+    Verify that the returned markets actually match our slug pattern.
+    Alerts (logs + persists event) if:
+    - Zero markets found for an enabled coin
+    - Any market slug doesn't contain the expected pattern (possible API structure change)
+    """
+    if not markets:
+        msg = f"No upcoming markets found for {coin} (filter={filter_slug!r}). Gamma API may have changed slugs."
+        log.warning("scanner_healthcheck_no_markets", coin=coin, filter=filter_slug, alert=True)
+        await write_event(None, "scanner_alert", coin, {"reason": "no_markets", "filter": filter_slug})
+        return
+
+    mismatched = [
+        m for m in markets
+        if filter_slug.lower() not in (m.get("slug") or "").lower()
+        and filter_slug.lower() not in (m.get("question") or "").lower()
+    ]
+    if mismatched:
+        slugs = [m.get("slug", "") for m in mismatched[:3]]
+        log.warning(
+            "scanner_healthcheck_slug_mismatch",
+            coin=coin,
+            filter=filter_slug,
+            mismatched_slugs=slugs,
+            alert=True,
+        )
+        await write_event(
+            None, "scanner_alert", coin,
+            {"reason": "slug_mismatch", "filter": filter_slug, "sample_slugs": slugs},
+        )
 
 
 def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:
