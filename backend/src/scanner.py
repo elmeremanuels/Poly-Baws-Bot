@@ -1,6 +1,7 @@
 """Multi-coin market scanner — discovers upcoming 5-min windows on Polymarket."""
 import asyncio
 import json
+import re
 from datetime import datetime, timezone, timedelta
 import httpx
 
@@ -16,18 +17,16 @@ _last_refresh: dict[str, datetime] = {}
 
 async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
     """Fetch upcoming events from Gamma API; extract nested markets."""
-    now = datetime.now(timezone.utc)
-    start_min = (now - timedelta(minutes=30)).isoformat()
-
     results = []
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
+            # No start_date_min — it filtered on listing date, not window start,
+            # causing markets listed >30 min ago to be excluded.
             params = {
                 "closed": "false",
                 "limit": 500,
-                "order": "startDate",
+                "order": "endDate",
                 "ascending": "true",
-                "start_date_min": start_min,
             }
             resp = await client.get(f"{GAMMA_URL}/events", params=params)
             if resp.status_code == 200:
@@ -59,18 +58,37 @@ def _normalize_event_market(coin: str, event: dict, market: dict) -> dict | None
     if not clob_tokens or len(clob_tokens) < 2:
         return None
 
+    slug = event.get("slug", "")
+    window_end = _parse_ts(event.get("endDate") or market.get("endDate"))
+    # The slug encodes the window start as a unix timestamp: {coin}-updown-5m-{epoch}
+    # This is the actual prediction window start, not the event listing date.
+    window_start = _window_start_from_slug(slug) or (
+        (window_end - timedelta(minutes=5)) if window_end else None
+    )
+
     return {
         "coin": coin,
         "market_id": market.get("id") or market.get("conditionId"),
         "condition_id": market.get("conditionId"),
-        "slug": event.get("slug", ""),
+        "slug": slug,
         "question": market.get("question") or event.get("title", ""),
         "yes_token": clob_tokens[0],
         "no_token": clob_tokens[1],
-        "window_start": _parse_ts(event.get("startDate") or market.get("startDate")),
-        "window_end": _parse_ts(event.get("endDate") or market.get("endDate")),
+        "window_start": window_start,
+        "window_end": window_end,
         "status": event.get("active", True),
     }
+
+
+def _window_start_from_slug(slug: str) -> datetime | None:
+    """Extract window start from slug like 'btc-updown-5m-1779489600'."""
+    m = re.search(r"-(\d{9,10})$", slug)
+    if m:
+        try:
+            return datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
+        except Exception:
+            pass
+    return None
 
 
 def _parse_ts(ts_str: str | None) -> datetime | None:
