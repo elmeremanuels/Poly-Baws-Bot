@@ -192,13 +192,15 @@ with st.sidebar:
     st.divider()
 
     killed = is_killed()
+    st.markdown("### Bot Power")
     if killed:
-        if st.button("✅ RESUME BOT", use_container_width=True, type="primary"):
+        st.error("⛔ BOT OFF — Geen trades worden geplaatst")
+        if st.button("🟢 TURN ON", use_container_width=True, type="primary"):
             write_command("reset_kill")
             st.rerun()
-        st.warning("Bot is KILLED — no new trades.")
     else:
-        if st.button("🛑 KILL SWITCH", use_container_width=True, type="secondary"):
+        st.success("🟢 BOT ON — Trading actief")
+        if st.button("🔴 TURN OFF", use_container_width=True, type="secondary"):
             write_command("kill")
             st.rerun()
 
