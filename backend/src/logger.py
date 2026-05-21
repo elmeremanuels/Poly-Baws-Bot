@@ -1,6 +1,7 @@
 import logging
 import structlog
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 import aiosqlite
@@ -103,6 +104,14 @@ CREATE TABLE IF NOT EXISTS hybrid_pending (
 """
 
 
+@asynccontextmanager
+async def _db():
+    """Open an aiosqlite connection with busy_timeout pre-set."""
+    async with aiosqlite.connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=10000")
+        yield db
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(_db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL")
@@ -118,7 +127,7 @@ async def write_trade(trade: dict) -> None:
     cols = ", ".join(trade.keys())
     placeholders = ", ".join(f":{k}" for k in trade.keys())
     sql = f"INSERT OR REPLACE INTO trades ({cols}) VALUES ({placeholders})"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         await db.execute(sql, trade)
         await db.commit()
 
@@ -126,14 +135,14 @@ async def write_trade(trade: dict) -> None:
 async def update_trade(trade_id: str, updates: dict) -> None:
     sets = ", ".join(f"{k} = :{k}" for k in updates.keys())
     sql = f"UPDATE trades SET {sets} WHERE trade_id = :trade_id"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         await db.execute(sql, {**updates, "trade_id": trade_id})
         await db.commit()
 
 
 async def write_event(trade_id: str | None, event_type: str, coin: str | None, data: Any) -> None:
     import json
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         await db.execute(
             "INSERT INTO events (trade_id, event_type, coin, data) VALUES (?, ?, ?, ?)",
             (trade_id, event_type, coin, json.dumps(data) if not isinstance(data, str) else data),
@@ -143,7 +152,7 @@ async def write_event(trade_id: str | None, event_type: str, coin: str | None, d
 
 async def write_snapshot(trade_id: str, market_id: str, side: str, best_bid: float, best_ask: float, snapshot: dict) -> None:
     import json
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         await db.execute(
             "INSERT INTO orderbook_snapshots (trade_id, market_id, side, best_bid, best_ask, snapshot) VALUES (?, ?, ?, ?, ?, ?)",
             (trade_id, market_id, side, best_bid, best_ask, json.dumps(snapshot)),
@@ -152,7 +161,7 @@ async def write_snapshot(trade_id: str, market_id: str, side: str, best_bid: flo
 
 
 async def get_trade(trade_id: str) -> dict | None:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM trades WHERE trade_id = ?", (trade_id,)) as cursor:
             row = await cursor.fetchone()
@@ -160,7 +169,7 @@ async def get_trade(trade_id: str) -> dict | None:
 
 
 async def get_open_trades() -> list[dict]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM trades WHERE status NOT IN ('closed', 'aborted', 'resolved')"
@@ -170,7 +179,7 @@ async def get_open_trades() -> list[dict]:
 
 
 async def get_recent_trades(limit: int = 20) -> list[dict]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM trades ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -181,7 +190,7 @@ async def get_recent_trades(limit: int = 20) -> list[dict]:
 
 async def get_daily_pnl(coin: str | None = None) -> float:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         if coin:
             async with db.execute(
                 "SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE date(created_at) = ? AND coin = ? AND status = 'closed'",
@@ -199,7 +208,7 @@ async def get_daily_pnl(coin: str | None = None) -> float:
 
 async def get_today_trade_count(coin: str | None = None) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         if coin:
             async with db.execute(
                 "SELECT COUNT(*) FROM trades WHERE date(created_at) = ? AND coin = ?",
@@ -216,7 +225,7 @@ async def get_today_trade_count(coin: str | None = None) -> int:
 
 
 async def save_dashboard_state(key: str, value: str) -> None:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO dashboard_state (key, value, updated_at) VALUES (?, ?, datetime('now'))",
             (key, value),
@@ -225,14 +234,14 @@ async def save_dashboard_state(key: str, value: str) -> None:
 
 
 async def load_dashboard_state(key: str) -> str | None:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         async with db.execute("SELECT value FROM dashboard_state WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
 
 
 async def get_events_for_trade(trade_id: str) -> list[dict]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM events WHERE trade_id = ? ORDER BY ts ASC", (trade_id,)
@@ -243,7 +252,7 @@ async def get_events_for_trade(trade_id: str) -> list[dict]:
 
 async def get_scanner_alerts(limit: int = 10) -> list[dict]:
     """Return most recent scanner alert events (slug mismatches, no-markets warnings)."""
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM events WHERE event_type = 'scanner_alert' ORDER BY ts DESC LIMIT ?",
