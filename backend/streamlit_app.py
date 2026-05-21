@@ -86,6 +86,7 @@ div[data-testid="stMetricValue"] { color: #e5e7eb; }
 .chip-entry { background: rgba(6,78,59,0.5);   color: #34d399; }
 .chip-trade { background: rgba(30,58,138,0.5); color: #93c5fd; }
 .chip-none  { background: rgba(127,29,29,0.4); color: #fca5a5; }
+.chip-warn  { background: rgba(120,53,15,0.4); color: #fbbf24; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,19 +104,27 @@ def is_killed() -> bool:
 def bot_status_html() -> str:
     age = get_bot_heartbeat_age()
     if is_killed():
-        return '<span class="status-err">🛑 KILLED</span>'
+        return '<span class="status-err">🛑 KILLED — geen trades</span>'
     if age is None:
-        return '<span class="status-warn">? Unknown</span>'
+        return '<span class="status-warn">⚠ Bot niet gestart</span>'
     if age < 15:
-        return f'<span class="status-ok">● Running</span>'
-    return f'<span class="status-warn">⚠ Stale ({age:.0f}s ago)</span>'
+        return '<span class="status-ok">● Actief</span>'
+    mins = int(age // 60)
+    secs = int(age % 60)
+    since = f"{mins}m {secs}s" if mins else f"{secs}s"
+    return f'<span class="status-err">⚠ Bot gestopt ({since} geleden)</span>'
+
+
+def bot_is_online() -> bool:
+    age = get_bot_heartbeat_age()
+    return age is not None and age < 30
 
 
 def fmt_eur(v: float) -> str:
     return f"{'+'if v >= 0 else ''}€{v:.2f}"
 
 
-def _coin_status(coin: str, open_trades: list[dict]) -> tuple[str, str]:
+def _coin_status(coin: str, open_trades: list[dict], online: bool = True) -> tuple[str, str]:
     """Return (chip_class, label) for a coin's current scanner/trade state."""
     cfg = CONFIG["trading"]
     start_before = cfg["entry_start_minutes_before_window"]
@@ -125,6 +134,9 @@ def _coin_status(coin: str, open_trades: list[dict]) -> tuple[str, str]:
     in_trade = [t for t in open_trades if t.get("coin") == coin]
     if in_trade:
         return "chip-trade", f"🔵 In trade ({len(in_trade)})"
+
+    if not online:
+        return "chip-warn", "⚠ Bot offline"
 
     data = get_scanner_state(coin)
     count = data.get("count", 0)
@@ -237,22 +249,31 @@ def dashboard() -> None:
 
 
 def _scanner_alerts() -> None:
-    alerts = get_scanner_alerts(3)
+    alerts = get_scanner_alerts(5)
+    now = datetime.now(timezone.utc)
+    shown = 0
     for a in alerts:
+        ts_str = a.get("ts") or ""
+        try:
+            ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
+            if (now - ts_dt).total_seconds() > 1800:  # ignore alerts older than 30 min
+                continue
+        except Exception:
+            continue
         try:
             data = json.loads(a.get("data") or "{}")
         except Exception:
             data = {}
         coin = a.get("coin") or "?"
         reason = data.get("reason", "unknown")
-        flt = data.get("filter", "")
-        ts = (a.get("ts") or "")[:19]
         st.markdown(
             f'<div class="alert-banner">🔴 <b>SCANNER ALERT</b> — {coin}: {reason}'
-            f'{f" (filter={flt})" if flt else ""}'
-            f' <span style="color:#7f1d1d;float:right">{ts}</span></div>',
+            f' <span style="color:#7f1d1d;float:right">{ts_str[:19]}</span></div>',
             unsafe_allow_html=True,
         )
+        shown += 1
+        if shown >= 3:
+            break
 
 
 def _hybrid_panel() -> None:
@@ -289,13 +310,14 @@ def _hybrid_panel() -> None:
 def _coin_grid() -> None:
     st.markdown("### Coins")
     open_trades = get_open_trades()
+    online = bot_is_online()
     cols = st.columns(5)
     for i, coin in enumerate(COINS):
         with cols[i]:
-            _coin_card(coin, open_trades)
+            _coin_card(coin, open_trades, online)
 
 
-def _coin_card(coin: str, open_trades: list[dict]) -> None:
+def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     cfg = CONFIG["coins"][coin]
     pnl = get_daily_pnl(coin)
     count = get_today_trade_count(coin)
@@ -311,7 +333,7 @@ def _coin_card(coin: str, open_trades: list[dict]) -> None:
     display_en = st.session_state.get(ss_en_key, enabled)
 
     pnl_color = "#34d399" if pnl >= 0 else "#f87171"
-    chip_cls, chip_label = _coin_status(coin, open_trades)
+    chip_cls, chip_label = _coin_status(coin, open_trades, online)
 
     st.markdown(f"#### {COIN_EMOJI.get(coin, '')} {coin}")
     st.markdown(f'<div class="status-chip {chip_cls}">{chip_label}</div>', unsafe_allow_html=True)
