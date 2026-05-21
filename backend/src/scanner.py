@@ -8,106 +8,82 @@ from .logger import log, write_event
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
 
-_COIN_VARIANTS: dict[str, list[str]] = {
-    "BTC":  ["btc", "bitcoin"],
-    "ETH":  ["eth", "ethereum", "ether"],
-    "SOL":  ["sol", "solana"],
-    "XRP":  ["xrp", "ripple"],
-    "DOGE": ["doge", "dogecoin"],
+# Slug prefix for each coin: Polymarket uses "{prefix}-updown-5m-{unix_ts}"
+_COIN_SLUG_PREFIX: dict[str, list[str]] = {
+    "BTC":  ["btc-"],
+    "ETH":  ["eth-"],
+    "SOL":  ["sol-"],
+    "XRP":  ["xrp-"],
+    "DOGE": ["doge-"],
 }
-_TIME_VARIANTS = ["5 min", "5min", "5-min", "5 m", "5m", "/5m"]
+
+# Fallback: coin keyword in question text (case-insensitive)
+_COIN_QUESTION_VARIANTS: dict[str, list[str]] = {
+    "BTC":  ["bitcoin"],
+    "ETH":  ["ethereum", "ether"],
+    "SOL":  ["solana"],
+    "XRP":  ["xrp", "ripple"],
+    "DOGE": ["dogecoin", "doge"],
+}
 
 _market_cache: dict[str, list[dict]] = {}
 _last_refresh: dict[str, datetime] = {}
 
+_5M_SLUG_MARKER = "updown-5m"
 
-async def _fetch_markets_for_coin(coin: str) -> list[dict]:
+
+async def _fetch_all_5m_markets() -> dict[str, list[dict]]:
     """
-    Multi-strategy fetch across /events and /markets with progressively broader
-    filters. Each strategy is tried in order; stops at the first that returns results.
-    The last group of strategies drops the 5-min keyword requirement as a fallback.
+    Single broad API call — no tag filter (Polymarket 5M markets have no tags).
+    Identifies 5M markets by 'updown-5m' in slug, then assigns coin by slug prefix.
+    Returns a dict coin -> list of normalised markets.
     """
-    variants = _COIN_VARIANTS.get(coin, [coin.lower()])
-
-    base = {"active": "true", "closed": "false", "limit": 100,
-            "order": "startDate", "ascending": "true"}
-
-    # (endpoint, extra_params, require_time_keyword)
-    strategies = [
-        ("/events",  {"tag": coin},      True),
-        ("/events",  {"tag": coin.lower()}, True),
-        ("/events",  {"tag": "crypto"},  True),
-        ("/events",  {},                 True),
-        ("/markets", {"tag": coin},      True),
-        ("/markets", {"tag": coin.lower()}, True),
-        ("/markets", {"tag": "crypto"},  True),
-        ("/markets", {},                 True),
-        # Coin-only fallback (no time keyword) — catches markets that don't say "5m"
-        ("/events",  {"tag": "crypto"},  False),
-        ("/events",  {},                 False),
-        ("/markets", {"tag": "crypto"},  False),
-    ]
-
-    seen: set[str] = set()
-    markets: list[dict] = []
-
+    by_coin: dict[str, list[dict]] = {c: [] for c in _COIN_SLUG_PREFIX}
+    params = {
+        "active": "true",
+        "closed": "false",
+        "limit": 200,
+        "order": "endDate",
+        "ascending": "true",
+    }
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for endpoint, extra, require_time in strategies:
-                resp = await client.get(f"{GAMMA_URL}{endpoint}", params={**base, **extra})
-                if resp.status_code != 200:
+            resp = await client.get(f"{GAMMA_URL}/markets", params=params)
+            if resp.status_code != 200:
+                log.error("scanner_api_error", status=resp.status_code)
+                return by_coin
+
+            data = resp.json()
+            raw_list = data if isinstance(data, list) else data.get("markets", [])
+            log.info("scanner_api_raw", total=len(raw_list))
+
+            for m in raw_list:
+                slug = (m.get("slug") or "").lower()
+                question = (m.get("question") or "").lower()
+
+                if _5M_SLUG_MARKER not in slug:
                     continue
 
-                data = resp.json()
-                raw = data if isinstance(data, list) else (
-                    data.get("markets") or data.get("events") or []
-                )
+                coin = _match_coin(slug, question)
+                if coin and CONFIG["coins"][coin]["enabled"]:
+                    by_coin[coin].append(_normalize_market(coin, m))
 
-                for item in raw:
-                    child_markets = item.get("markets") or [item]
-                    # Parent event title/slug enriches the matching context
-                    event_text = (
-                        (item.get("title") or item.get("question") or "")
-                        + " "
-                        + (item.get("slug") or "")
-                    ).lower()
-
-                    for m in child_markets:
-                        mid = str(m.get("id") or m.get("conditionId") or "")
-                        if not mid or mid in seen:
-                            continue
-                        q = (m.get("question") or "").lower()
-                        slug = (m.get("slug") or "").lower()
-                        text = q + " " + slug + " " + event_text
-
-                        coin_hit = any(v in text for v in variants)
-                        time_hit = any(t in text for t in _TIME_VARIANTS)
-
-                        if coin_hit and (time_hit or not require_time):
-                            seen.add(mid)
-                            norm = _normalize_market(coin, m)
-                            markets.append(norm)
-                            # Debug: log the first new market so we can inspect the API shape
-                            if len(markets) == 1:
-                                log.info(
-                                    "scanner_first_match",
-                                    coin=coin,
-                                    endpoint=endpoint,
-                                    require_time=require_time,
-                                    slug=norm["slug"],
-                                    question=norm["question"][:80],
-                                    window_start=str(norm["window_start"]),
-                                    window_end=str(norm["window_end"]),
-                                )
-
-                if markets:
-                    log.info("scanner_strategy_hit", coin=coin, endpoint=endpoint,
-                             require_time=require_time, count=len(markets))
-                    break
     except Exception as e:
-        log.error("scanner_fetch_error", coin=coin, error=str(e))
+        log.error("scanner_fetch_error", error=str(e))
 
-    return markets
+    return by_coin
+
+
+def _match_coin(slug: str, question: str) -> str | None:
+    """Return the coin key whose slug prefix matches, or None."""
+    for coin, prefixes in _COIN_SLUG_PREFIX.items():
+        if any(slug.startswith(p) for p in prefixes):
+            return coin
+    # Fallback: question keyword match
+    for coin, variants in _COIN_QUESTION_VARIANTS.items():
+        if any(v in question for v in variants):
+            return coin
+    return None
 
 
 def _normalize_market(coin: str, raw: dict) -> dict:
@@ -120,6 +96,11 @@ def _normalize_market(coin: str, raw: dict) -> dict:
         yes_token = tokens.get("yes") or tokens.get("YES")
         no_token = tokens.get("no") or tokens.get("NO")
 
+    # endDate = when the prediction window closes/resolves
+    # window_start = endDate - 5 minutes (Polymarket 5M convention)
+    window_end = _parse_ts(raw.get("endDate") or raw.get("end_date"))
+    window_start = (window_end - timedelta(minutes=5)) if window_end else None
+
     return {
         "coin": coin,
         "market_id": raw.get("id") or raw.get("conditionId"),
@@ -128,8 +109,8 @@ def _normalize_market(coin: str, raw: dict) -> dict:
         "question": raw.get("question", ""),
         "yes_token": yes_token,
         "no_token": no_token,
-        "window_start": _parse_ts(raw.get("startDate") or raw.get("start_date")),
-        "window_end": _parse_ts(raw.get("endDate") or raw.get("end_date")),
+        "window_start": window_start,
+        "window_end": window_end,
         "status": raw.get("active", True),
     }
 
@@ -146,30 +127,33 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
 
 
 async def refresh_markets(coin: str | None = None) -> None:
-    coins = [coin] if coin else [c for c in CONFIG["coins"] if CONFIG["coins"][c]["enabled"]]
-    await asyncio.gather(*[_refresh_coin(c) for c in coins])
-
-
-async def _refresh_coin(coin: str) -> None:
-    markets = await _fetch_markets_for_coin(coin)
+    """Refresh the market cache. One API call fetches all coins at once."""
+    all_markets = await _fetch_all_5m_markets()
     now = datetime.now(timezone.utc)
 
-    # Keep markets that haven't ended yet (or whose end time is unknown).
-    # Fine-grained timing (entry window, cutoff) is handled by get_tradeable_market().
-    # We deliberately do NOT filter on window_start here — Polymarket's recurring
-    # event series has a startDate equal to when the series was created (months ago).
-    active = [
-        m for m in markets
-        if m["window_end"] is None or m["window_end"] > now - timedelta(minutes=1)
-    ]
-    active.sort(key=lambda m: m["window_start"] or now)
-    _market_cache[coin] = active
-    _last_refresh[coin] = now
-    log.info("scanner_refreshed", coin=coin, found=len(markets), active=len(active))
+    coins = [coin] if coin else list(_COIN_SLUG_PREFIX.keys())
+    for c in coins:
+        if not CONFIG["coins"][c]["enabled"]:
+            continue
+        markets = all_markets.get(c, [])
+        # Keep markets whose prediction window hasn't ended yet
+        active = [m for m in markets
+                  if m["window_end"] is None or m["window_end"] > now - timedelta(minutes=1)]
+        active.sort(key=lambda m: m["window_end"] or now)
+        _market_cache[c] = active
+        _last_refresh[c] = now
+        log.info("scanner_refreshed", coin=c, active=len(active))
 
-    if not active:
-        log.warning("scanner_no_markets", coin=coin)
-        await write_event(None, "scanner_alert", coin, {"reason": "no_markets"})
+        if active:
+            # Log first match to verify slug/question shape
+            first = active[0]
+            log.info("scanner_first_market", coin=c,
+                     slug=first["slug"], question=first["question"][:80],
+                     window_start=str(first["window_start"]),
+                     window_end=str(first["window_end"]))
+        else:
+            log.warning("scanner_no_markets", coin=c)
+            await write_event(None, "scanner_alert", c, {"reason": "no_markets"})
 
 
 def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:
@@ -182,10 +166,11 @@ def get_upcoming_markets(coin: str, within_minutes: int = 30) -> list[dict]:
 def get_next_windows(coin: str, n: int = 3) -> list[dict]:
     now = datetime.now(timezone.utc)
     return [m for m in _market_cache.get(coin, [])
-            if m["window_start"] and m["window_start"] > now - timedelta(minutes=1)][:n]
+            if m["window_end"] and m["window_end"] > now][:n]
 
 
 def get_tradeable_market(coin: str) -> dict | None:
+    """Return the market whose entry window is open right now."""
     cfg = CONFIG["trading"]
     start_before = cfg["entry_start_minutes_before_window"]
     cutoff_before = cfg["entry_cutoff_minutes_before_window"]
