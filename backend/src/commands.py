@@ -15,9 +15,14 @@ from .logger import log, save_dashboard_state, _db_path
 
 # ── Sync write (called from Streamlit) ───────────────────────────────────────
 
+def _sync_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_db_path, timeout=15)
+    conn.execute("PRAGMA busy_timeout=15000")
+    return conn
+
+
 def write_command(command: str, payload: dict | None = None) -> None:
-    with sqlite3.connect(_db_path, timeout=10) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
+    with _sync_conn() as conn:
         conn.execute(
             "INSERT INTO commands (command, payload) VALUES (?, ?)",
             (command, json.dumps(payload or {})),
@@ -26,7 +31,7 @@ def write_command(command: str, payload: dict | None = None) -> None:
 
 
 def write_hybrid_pending(market_id: str, coin: str, window_start: str, question: str, trade_id: str) -> None:
-    with sqlite3.connect(_db_path) as conn:
+    with _sync_conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO hybrid_pending (market_id, coin, window_start, question, trade_id) VALUES (?, ?, ?, ?, ?)",
             (market_id, coin, window_start, question, trade_id),
@@ -35,7 +40,7 @@ def write_hybrid_pending(market_id: str, coin: str, window_start: str, question:
 
 
 def delete_hybrid_pending(market_id: str) -> None:
-    with sqlite3.connect(_db_path) as conn:
+    with _sync_conn() as conn:
         conn.execute("DELETE FROM hybrid_pending WHERE market_id = ?", (market_id,))
         conn.commit()
 
@@ -54,6 +59,7 @@ async def command_poll_loop() -> None:
 
 async def _execute_pending() -> None:
     async with aiosqlite.connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=15000")
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM commands WHERE status = 'pending' ORDER BY id ASC LIMIT 20"
