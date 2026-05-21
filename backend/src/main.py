@@ -17,8 +17,8 @@ async def _run() -> None:
     await init_db()
 
     if risk.is_killed():
-        log.critical("kill_flag_present_on_startup_aborting")
-        return
+        log.warning("kill_flag_present_on_startup_trades_paused")
+        # Do not abort — command_poll_loop must run so the dashboard can reset the flag
 
     await recover_state()
 
