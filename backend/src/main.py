@@ -29,6 +29,13 @@ async def _run() -> None:
         except ValueError:
             pass
 
+    saved_trade_size = await load_dashboard_state("trade_size_eur")
+    if saved_trade_size:
+        try:
+            CONFIG["trading"]["trade_size_eur"] = float(saved_trade_size)
+        except ValueError:
+            pass
+
     log.info("startup_complete", mode=risk.get_kill_reason() or "ok")
 
     await asyncio.gather(

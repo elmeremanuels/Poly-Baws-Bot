@@ -1,5 +1,5 @@
 trading:
-  entry_size_eur: 1.00
+  trade_size_eur: 1.00
   entry_size_shares: 2
   entry_price_target: 0.50
   entry_price_max_deviation: 0.02

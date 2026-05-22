@@ -32,7 +32,9 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     coin = trade["coin"]
     yes_token = trade["condition_id_yes"]
     no_token = trade["condition_id_no"]
-    size = trade["entry_size"]
+    trade_size_eur = CONFIG["trading"].get("trade_size_eur", 1.0)
+    size = round(trade_size_eur / ENTRY_PRICE, 2)
+    update_trade_field(trade_id, "entry_size", size)
     paper = is_paper_mode()
 
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
