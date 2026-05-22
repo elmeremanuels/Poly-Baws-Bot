@@ -92,8 +92,8 @@ async def _process_coin_window(coin: str, market: dict) -> None:
 async def _coin_loop(coin: str) -> None:
     while True:
         if risk.is_killed():
-            log.info("coin_loop_killed", coin=coin)
-            break
+            await asyncio.sleep(5)
+            continue
         try:
             market = scanner.get_tradeable_market(coin)
             if market:
