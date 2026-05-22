@@ -92,6 +92,7 @@ async def _execute_pending() -> None:
                     "UPDATE commands SET status='done', executed_at=datetime('now') WHERE id=?",
                     (row["id"],),
                 )
+                await db.commit()
                 log.info("command_executed", command=cmd, id=row["id"])
             except Exception as e:
                 log.error("command_error", command=cmd, error=str(e))
@@ -99,7 +100,7 @@ async def _execute_pending() -> None:
                     "UPDATE commands SET status='error', executed_at=datetime('now') WHERE id=?",
                     (row["id"],),
                 )
-        await db.commit()
+                await db.commit()
 
 
 async def _run_command(command: str, payload: dict) -> None:
