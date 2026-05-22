@@ -282,29 +282,29 @@ async def _winner_exit_paper(
             await _close_trade(trade_id, target_result["fill_price"], "target_trailing", broadcast_fn)
             return
 
-        bid = ws_client.get_best_bid(winner_token)
-        if bid is not None:
-            if bid > peak_bid:
-                peak_bid = bid
+        mid = ws_client.get_mid_price(winner_token)
+        if mid is not None:
+            if mid > peak_bid:
+                peak_bid = mid
 
-            if bid <= trigger_price - es["stop_buffer"]:
+            if mid <= trigger_price - es["stop_buffer"]:
                 result = await paper_trader.simulate_market_sell(winner_token, size)
                 _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
                 await _close_trade(trade_id, result.get("fill_price"), "stop_hard", broadcast_fn)
                 return
 
             initial_target = trigger_price + es["initial_target_offset"]
-            if peak_bid > initial_target and (peak_bid - bid) >= es["trailing_giveback"]:
+            if peak_bid > initial_target and (peak_bid - mid) >= es["trailing_giveback"]:
                 result = await paper_trader.simulate_market_sell(winner_token, size)
                 _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
                 await _close_trade(trade_id, result.get("fill_price"), "stop_trailing", broadcast_fn)
                 return
 
-            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and bid > current_limit:
-                new_limit = round(bid + es["ratchet_step"], 2)
+            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and mid > current_limit:
+                new_limit = round(mid + es["ratchet_step"], 2)
                 if new_limit > current_limit:
                     await write_event(trade_id, "limit_ratcheted", coin, {
-                        "from": current_limit, "to": new_limit, "bid": bid,
+                        "from": current_limit, "to": new_limit, "mid": mid,
                     })
                     current_limit = new_limit
                     ratchet_count += 1
@@ -354,34 +354,34 @@ async def _winner_exit_live(
             seconds_left = (window_end_dt - now_dt).total_seconds()
             if seconds_left <= es["force_exit_seconds"]:
                 await orders.cancel_order(current_order_id)
-                bid_now = ws_client.get_best_bid(winner_token)
+                mid_now = ws_client.get_mid_price(winner_token)
                 await orders.place_market_order(winner_token, "SELL", size)
                 _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, bid_now, "force_exit_window_end", broadcast_fn)
+                await _close_trade(trade_id, mid_now, "force_exit_window_end", broadcast_fn)
                 return
 
-        bid = ws_client.get_best_bid(winner_token)
-        if bid is not None:
-            if bid > peak_bid:
-                peak_bid = bid
+        mid = ws_client.get_mid_price(winner_token)
+        if mid is not None:
+            if mid > peak_bid:
+                peak_bid = mid
 
-            if bid <= trigger_price - es["stop_buffer"]:
+            if mid <= trigger_price - es["stop_buffer"]:
                 await orders.cancel_order(current_order_id)
                 await orders.place_market_order(winner_token, "SELL", size)
                 _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, bid, "stop_hard", broadcast_fn)
+                await _close_trade(trade_id, mid, "stop_hard", broadcast_fn)
                 return
 
             initial_target = trigger_price + es["initial_target_offset"]
-            if peak_bid > initial_target and (peak_bid - bid) >= es["trailing_giveback"]:
+            if peak_bid > initial_target and (peak_bid - mid) >= es["trailing_giveback"]:
                 await orders.cancel_order(current_order_id)
                 await orders.place_market_order(winner_token, "SELL", size)
                 _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, bid, "stop_trailing", broadcast_fn)
+                await _close_trade(trade_id, mid, "stop_trailing", broadcast_fn)
                 return
 
-            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and bid > current_limit_price:
-                new_limit_price = round(bid + es["ratchet_step"], 2)
+            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and mid > current_limit_price:
+                new_limit_price = round(mid + es["ratchet_step"], 2)
                 if new_limit_price > current_limit_price:
                     cancelled = await orders.cancel_order(current_order_id)
                     if cancelled:
@@ -389,7 +389,7 @@ async def _winner_exit_live(
                         if new_resp and new_resp.get("order_id"):
                             current_order_id = new_resp["order_id"]
                             await write_event(trade_id, "limit_ratcheted", coin, {
-                                "from": current_limit_price, "to": new_limit_price, "bid": bid,
+                                "from": current_limit_price, "to": new_limit_price, "mid": mid,
                             })
                             current_limit_price = new_limit_price
                             ratchet_count += 1
@@ -397,7 +397,7 @@ async def _winner_exit_live(
                             log.warning("ratchet_reissue_failed_market_exit", trade_id=trade_id)
                             await orders.place_market_order(winner_token, "SELL", size)
                             _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                            await _close_trade(trade_id, bid, "stop_hard", broadcast_fn)
+                            await _close_trade(trade_id, mid, "stop_hard", broadcast_fn)
                             return
                     else:
                         order = await orders.get_order(current_order_id)
