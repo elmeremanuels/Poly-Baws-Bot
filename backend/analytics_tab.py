@@ -12,7 +12,7 @@ from src.db_sync import (
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-_RANGE_DAYS = {"Today": 1, "7 days": 7, "30 days": 30, "All time": None}
+_RANGE_DAYS = {"All time": None, "30 days": 30, "7 days": 7, "Today": 1}
 
 
 def analytics_panel() -> None:
@@ -80,19 +80,24 @@ def analytics_panel() -> None:
 def _key_metrics(df: pd.DataFrame) -> None:
     st.markdown("### Key Metrics")
     total = len(df)
-    winners = int((df["net_pnl"] > 0).sum())
-    win_rate = winners / total * 100 if total else 0
-    net_pnl = float(df["net_pnl"].sum())
-    avg_pnl = float(df["net_pnl"].mean())
-    cum = df.sort_values("created_at")["net_pnl"].cumsum()
+    triggered = df[df["trigger_hit"] == 1] if "trigger_hit" in df.columns else df
+    aborted = df[df["status"].isin(["aborted"])] if "status" in df.columns else pd.DataFrame()
+    closed = df[df["status"] == "closed"] if "status" in df.columns else df
+
+    winners = int((closed["net_pnl"] > 0).sum()) if not closed.empty else 0
+    win_rate = winners / len(closed) * 100 if len(closed) else 0
+    net_pnl = float(closed["net_pnl"].sum()) if not closed.empty else 0.0
+    avg_pnl = float(closed["net_pnl"].mean()) if not closed.empty else 0.0
+    cum = closed.sort_values("created_at")["net_pnl"].cumsum() if not closed.empty else pd.Series([0])
     max_dd = float((cum - cum.cummax()).min())
 
-    c = st.columns(5)
+    c = st.columns(6)
     c[0].metric("Total Trades", total)
-    c[1].metric("Win Rate", f"{win_rate:.1f}%")
-    c[2].metric("Net P&L", f"€{net_pnl:+.2f}")
-    c[3].metric("Avg P&L/Trade", f"€{avg_pnl:+.4f}")
-    c[4].metric("Max Drawdown", f"€{abs(max_dd):.2f}")
+    c[1].metric("Triggered", len(triggered))
+    c[2].metric("Aborted", len(aborted))
+    c[3].metric("Win Rate", f"{win_rate:.1f}%")
+    c[4].metric("Net P&L", f"€{net_pnl:+.2f}")
+    c[5].metric("Avg P&L/Trade", f"€{avg_pnl:+.4f}")
 
 
 def _exit_breakdown(coin: str | None, days: int | None) -> None:
@@ -190,16 +195,16 @@ def _hourly_analysis(coin: str | None, days: int | None) -> None:
 
 
 def _trade_history(df: pd.DataFrame) -> None:
-    with st.expander("📋 Full Trade History", expanded=False):
+    with st.expander(f"📋 Full Trade History ({len(df)} trades)", expanded=False):
         display_cols = [
-            "created_at", "coin", "mode", "triggered_by",
+            "created_at", "coin", "status", "mode", "triggered_by",
             "entry_yes_price", "entry_no_price",
             "loser_exit_price", "winner_exit_price", "winner_exit_reason",
             "peak_bid", "ratchet_count", "time_in_trail_seconds",
             "fees_paid", "net_pnl",
         ]
         available = [c for c in display_cols if c in df.columns]
-        show = df[available].copy().sort_values("created_at", ascending=False)
+        show = df[available].copy().sort_values("created_at", ascending=False).head(500)
         if "created_at" in show.columns:
             show["created_at"] = pd.to_datetime(show["created_at"]).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)

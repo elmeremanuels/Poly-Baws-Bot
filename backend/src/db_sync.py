@@ -159,10 +159,10 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
 def get_analytics_trades(coin: str | None = None, days: int | None = None) -> list[dict]:
-    """Closed triggered trades, optionally filtered by coin and date range."""
+    """All trades, optionally filtered by coin and date range. No trigger/status filter."""
     if not _db_path.exists():
         return []
-    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    conditions: list[str] = []
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -170,10 +170,10 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None) -> li
     if days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
-    where = " AND ".join(conditions)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     with _conn() as conn:
         rows = conn.execute(
-            f"SELECT * FROM trades WHERE {where} ORDER BY created_at ASC",
+            f"SELECT * FROM trades {where} ORDER BY created_at ASC",
             params,
         ).fetchall()
     return [dict(r) for r in rows]
