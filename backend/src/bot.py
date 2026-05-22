@@ -17,6 +17,34 @@ COINS = list(CONFIG["coins"].keys())
 _pending_hybrid_triggers: dict[str, asyncio.Event] = {}  # market_id -> Event
 
 
+def _should_enter(market: dict) -> tuple[bool, str]:
+    """Upgrade 3: reject entries with unfavourable combined cost or wide token spreads."""
+    entry_cfg = CONFIG.get("entry", {})
+    max_cost = entry_cfg.get("max_combined_cost", 1.03)
+    max_spread = entry_cfg.get("max_token_spread", 0.06)
+
+    yes_token = market.get("yes_token", "")
+    no_token = market.get("no_token", "")
+    yes_ask = ws_client.get_best_ask(yes_token)
+    no_ask = ws_client.get_best_ask(no_token)
+    yes_bid = ws_client.get_best_bid(yes_token)
+    no_bid = ws_client.get_best_bid(no_token)
+
+    if yes_ask is None or no_ask is None:
+        return False, "no_orderbook_data"
+
+    combined = yes_ask + no_ask
+    if combined > max_cost:
+        return False, f"combined_cost_too_high:{combined:.4f}"
+
+    if yes_bid is not None and (yes_ask - yes_bid) > max_spread:
+        return False, f"yes_spread_too_wide:{yes_ask - yes_bid:.4f}"
+    if no_bid is not None and (no_ask - no_bid) > max_spread:
+        return False, f"no_spread_too_wide:{no_ask - no_bid:.4f}"
+
+    return True, "ok"
+
+
 def get_hybrid_pending() -> dict:
     return dict(_pending_hybrid_triggers)
 
@@ -82,6 +110,13 @@ async def _process_coin_window(coin: str, market: dict) -> None:
         _pending_hybrid_triggers.pop(market_id, None)
         delete_hybrid_pending(market_id)
         trade["triggered_by"] = "user"
+
+    ok_entry, entry_reason = _should_enter(market)
+    if not ok_entry:
+        log.info("trade_skipped_spread", coin=coin, reason=entry_reason)
+        from .state import remove_active_trade
+        remove_active_trade(trade_id)
+        return
 
     await write_event(trade_id, "entry_initiated", coin, {"mode": mode})
     success = await execute_entry(trade_id)

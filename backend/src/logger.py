@@ -104,6 +104,17 @@ CREATE TABLE IF NOT EXISTS hybrid_pending (
     trade_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS fill_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id TEXT,
+    token_id TEXT,
+    side TEXT,
+    limit_price REAL,
+    filled INTEGER DEFAULT 0,
+    fill_price REAL,
+    ts TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -134,6 +145,14 @@ async def init_db() -> None:
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+        await db.commit()
+        # Migration: create fill_history table if missing
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS fill_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT, token_id TEXT, "
+            "side TEXT, limit_price REAL, filled INTEGER DEFAULT 0, fill_price REAL, "
+            "ts TEXT DEFAULT (datetime('now')))"
+        )
         await db.commit()
     log.info("database_initialized", path=str(_db_path))
 

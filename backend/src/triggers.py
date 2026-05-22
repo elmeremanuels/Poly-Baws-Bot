@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from . import orders, paper_trader, ws_client
+from . import fill_tracker, orders, paper_trader, ws_client
 from .config_loader import CONFIG
 from .logger import log, write_event, update_trade
 from .state import (
@@ -242,6 +242,69 @@ def _store_trail_metrics(trade_id: str, peak_bid: float, ratchet_count: int, tim
     update_trade_field(trade_id, "time_in_trail_seconds", round(time_in_trail, 2))
 
 
+# ── Peg-Cross Exit Engine ─────────────────────────────────────────────────────
+
+def compute_cross_score(
+    mid: float,
+    peak_mid: float,
+    current_limit: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    seconds_left: float,
+    cfg: dict,
+) -> float:
+    """
+    Returns 0–1 score; when score ≥ cross_threshold the bot converts the
+    resting limit to a market sell ("peg_cross").
+
+    Components:
+      0.35 time_urgency    — increases as window end approaches
+      0.25 spread_tightness — tight spread = cheap to cross
+      0.25 mid_decay       — mid dropped from peak → momentum reversed
+      0.15 fill_unlikely   — limit above best ask → passive fill impossible
+    """
+    urgency_window = cfg.get("time_urgency_window", 120)
+    time_urgency = max(0.0, min(1.0, 1.0 - seconds_left / urgency_window))
+
+    spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else 0.06
+    spread_tightness = max(0.0, min(1.0, 1.0 - spread / 0.06))
+
+    decay = max(0.0, peak_mid - mid)
+    mid_decay = min(1.0, decay / 0.03)
+
+    if best_ask is not None:
+        fill_unlikely = 1.0 if current_limit > best_ask + 0.005 else 0.0
+    else:
+        fill_unlikely = 1.0
+
+    return round(
+        0.35 * time_urgency
+        + 0.25 * spread_tightness
+        + 0.25 * mid_decay
+        + 0.15 * fill_unlikely,
+        4,
+    )
+
+
+def get_exit_phase(seconds_left: float) -> str:
+    if seconds_left > 90:
+        return "patient"
+    elif seconds_left > 30:
+        return "urgent"
+    return "force"
+
+
+def get_phase_params(phase: str, cfg: dict) -> dict:
+    base_threshold = cfg["cross_threshold"]
+    base_interval = cfg["check_interval_seconds"]
+    base_buffer = cfg["ratchet_buffer"]
+    if phase == "patient":
+        return {"cross_threshold": base_threshold, "check_interval": base_interval, "ratchet_buffer": base_buffer}
+    elif phase == "urgent":
+        return {"cross_threshold": 0.50, "check_interval": max(0.5, base_interval / 2), "ratchet_buffer": base_buffer}
+    return {"cross_threshold": 0.0, "check_interval": 0.2, "ratchet_buffer": 0.0}
+
+
 async def _winner_exit_paper(
     trade_id: str,
     winner_token: str,
@@ -249,14 +312,13 @@ async def _winner_exit_paper(
     window_end_dt: datetime | None,
     broadcast_fn,
 ) -> None:
-    """Paper mode: simulate trailing limit + stop-market exit via bid polling."""
-    es = CONFIG["trading"]["exit_strategy"]
+    """Paper mode: peg-cross exit engine — resting limit + dynamic market conversion."""
+    es = CONFIG["exit"]
     trigger_price = TRADING_CFG["trigger_threshold"]
-    current_limit = round(trigger_price + es["initial_target_offset"], 2)
-    peak_bid = trigger_price
+    current_limit = round(trigger_price + es["initial_offset"], 2)
+    peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
-    last_ratchet = trail_start
 
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
@@ -267,50 +329,55 @@ async def _winner_exit_paper(
     while True:
         now_dt = datetime.now(timezone.utc)
         loop_time = asyncio.get_event_loop().time()
+        seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
-        if window_end_dt:
-            seconds_left = (window_end_dt - now_dt).total_seconds()
-            if seconds_left <= es["force_exit_seconds"]:
-                result = await paper_trader.simulate_market_sell(winner_token, size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, result.get("fill_price"), "force_exit_window_end", broadcast_fn)
-                return
+        if seconds_left <= es["force_exit_seconds"]:
+            result = await paper_trader.simulate_market_sell(winner_token, size)
+            _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+            await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+            await _close_trade(trade_id, result.get("fill_price"), "force_exit_window_end", broadcast_fn)
+            return
+
+        phase = get_exit_phase(seconds_left)
+        params = get_phase_params(phase, es)
 
         target_result = await paper_trader.simulate_limit_sell(winner_token, current_limit, size)
         if target_result["filled"]:
-            _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-            await _close_trade(trade_id, target_result["fill_price"], "target_trailing", broadcast_fn)
+            _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+            await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, target_result["fill_price"])
+            await _close_trade(trade_id, target_result["fill_price"], "limit_filled", broadcast_fn)
             return
 
         mid = ws_client.get_mid_price(winner_token)
+        best_bid = ws_client.get_best_bid(winner_token)
+        best_ask = ws_client.get_best_ask(winner_token)
+
         if mid is not None:
-            if mid > peak_bid:
-                peak_bid = mid
+            if mid > peak_mid:
+                peak_mid = mid
 
-            if mid <= trigger_price - es["stop_buffer"]:
+            score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
+
+            if score >= params["cross_threshold"]:
                 result = await paper_trader.simulate_market_sell(winner_token, size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, result.get("fill_price"), "stop_hard", broadcast_fn)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                await write_event(trade_id, "peg_cross_triggered", coin, {
+                    "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                })
+                await _close_trade(trade_id, result.get("fill_price"), "peg_cross", broadcast_fn)
                 return
 
-            initial_target = trigger_price + es["initial_target_offset"]
-            if peak_bid > initial_target and (peak_bid - mid) >= es["trailing_giveback"]:
-                result = await paper_trader.simulate_market_sell(winner_token, size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, result.get("fill_price"), "stop_trailing", broadcast_fn)
-                return
-
-            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and mid > current_limit:
-                new_limit = round(mid + es["ratchet_step"], 2)
+            if mid > current_limit:
+                new_limit = round(mid + params["ratchet_buffer"], 2)
                 if new_limit > current_limit:
                     await write_event(trade_id, "limit_ratcheted", coin, {
                         "from": current_limit, "to": new_limit, "mid": mid,
                     })
                     current_limit = new_limit
                     ratchet_count += 1
-                last_ratchet = loop_time
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(params["check_interval"])
 
 
 async def _winner_exit_live(
@@ -320,104 +387,107 @@ async def _winner_exit_live(
     window_end_dt: datetime | None,
     broadcast_fn,
 ) -> None:
-    """Live mode: real order placement with trailing limit + stop-market semantics."""
-    es = CONFIG["trading"]["exit_strategy"]
+    """Live mode: peg-cross exit engine — real limit order + dynamic market conversion."""
+    es = CONFIG["exit"]
     trigger_price = TRADING_CFG["trigger_threshold"]
-    current_limit_price = round(trigger_price + es["initial_target_offset"], 2)
-    peak_bid = trigger_price
+    current_limit = round(trigger_price + es["initial_offset"], 2)
+    peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
-    last_ratchet = trail_start
     last_status_check = trail_start
 
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
 
-    limit_resp = await orders.place_limit_order(winner_token, "SELL", current_limit_price, size)
+    limit_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
     current_order_id = limit_resp["order_id"] if limit_resp else None
     if not current_order_id:
         log.error("winner_initial_limit_failed", trade_id=trade_id)
         await orders.place_market_order(winner_token, "SELL", size)
-        _store_trail_metrics(trade_id, peak_bid, 0, 0)
-        await _close_trade(trade_id, None, "stop_hard", broadcast_fn)
+        _store_trail_metrics(trade_id, peak_mid, 0, 0)
+        await _close_trade(trade_id, None, "peg_cross", broadcast_fn)
         return
 
     await write_event(trade_id, "trailing_started", coin, {
-        "initial_limit": current_limit_price, "trigger_price": trigger_price,
+        "initial_limit": current_limit, "trigger_price": trigger_price,
     })
 
     while True:
         now_dt = datetime.now(timezone.utc)
         loop_time = asyncio.get_event_loop().time()
+        seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
-        if window_end_dt:
-            seconds_left = (window_end_dt - now_dt).total_seconds()
-            if seconds_left <= es["force_exit_seconds"]:
-                await orders.cancel_order(current_order_id)
-                mid_now = ws_client.get_mid_price(winner_token)
-                await orders.place_market_order(winner_token, "SELL", size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, mid_now, "force_exit_window_end", broadcast_fn)
-                return
+        if seconds_left <= es["force_exit_seconds"]:
+            await orders.cancel_order(current_order_id)
+            await orders.place_market_order(winner_token, "SELL", size)
+            _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+            await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+            await _close_trade(trade_id, ws_client.get_mid_price(winner_token), "force_exit_window_end", broadcast_fn)
+            return
+
+        phase = get_exit_phase(seconds_left)
+        params = get_phase_params(phase, es)
 
         mid = ws_client.get_mid_price(winner_token)
+        best_bid = ws_client.get_best_bid(winner_token)
+        best_ask = ws_client.get_best_ask(winner_token)
+
         if mid is not None:
-            if mid > peak_bid:
-                peak_bid = mid
+            if mid > peak_mid:
+                peak_mid = mid
 
-            if mid <= trigger_price - es["stop_buffer"]:
+            score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
+
+            if score >= params["cross_threshold"]:
                 await orders.cancel_order(current_order_id)
                 await orders.place_market_order(winner_token, "SELL", size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, mid, "stop_hard", broadcast_fn)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                await write_event(trade_id, "peg_cross_triggered", coin, {
+                    "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                })
+                await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
                 return
 
-            initial_target = trigger_price + es["initial_target_offset"]
-            if peak_bid > initial_target and (peak_bid - mid) >= es["trailing_giveback"]:
-                await orders.cancel_order(current_order_id)
-                await orders.place_market_order(winner_token, "SELL", size)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, mid, "stop_trailing", broadcast_fn)
-                return
-
-            if loop_time - last_ratchet >= es["ratchet_interval_seconds"] and mid > current_limit_price:
-                new_limit_price = round(mid + es["ratchet_step"], 2)
-                if new_limit_price > current_limit_price:
+            if mid > current_limit:
+                new_limit = round(mid + params["ratchet_buffer"], 2)
+                if new_limit > current_limit:
                     cancelled = await orders.cancel_order(current_order_id)
                     if cancelled:
-                        new_resp = await orders.place_limit_order(winner_token, "SELL", new_limit_price, size)
+                        new_resp = await orders.place_limit_order(winner_token, "SELL", new_limit, size)
                         if new_resp and new_resp.get("order_id"):
                             current_order_id = new_resp["order_id"]
                             await write_event(trade_id, "limit_ratcheted", coin, {
-                                "from": current_limit_price, "to": new_limit_price, "mid": mid,
+                                "from": current_limit, "to": new_limit, "mid": mid,
                             })
-                            current_limit_price = new_limit_price
+                            current_limit = new_limit
                             ratchet_count += 1
                         else:
                             log.warning("ratchet_reissue_failed_market_exit", trade_id=trade_id)
                             await orders.place_market_order(winner_token, "SELL", size)
-                            _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                            await _close_trade(trade_id, mid, "stop_hard", broadcast_fn)
+                            _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                            await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
                             return
                     else:
                         order = await orders.get_order(current_order_id)
                         if order and order.get("status") in ("MATCHED", "FILLED"):
-                            fill = float(order.get("average_price") or current_limit_price)
-                            _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                            await _close_trade(trade_id, fill, "target_trailing", broadcast_fn)
+                            fill = float(order.get("average_price") or current_limit)
+                            _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                            await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, fill)
+                            await _close_trade(trade_id, fill, "limit_filled", broadcast_fn)
                             return
-                last_ratchet = loop_time
 
         if loop_time - last_status_check >= 5.0:
             order = await orders.get_order(current_order_id)
             last_status_check = loop_time
             if order and order.get("status") in ("MATCHED", "FILLED"):
-                fill = float(order.get("average_price") or current_limit_price)
-                _store_trail_metrics(trade_id, peak_bid, ratchet_count, loop_time - trail_start)
-                await _close_trade(trade_id, fill, "target_trailing", broadcast_fn)
+                fill = float(order.get("average_price") or current_limit)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, fill)
+                await _close_trade(trade_id, fill, "limit_filled", broadcast_fn)
                 return
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(params["check_interval"])
 
 
 async def _close_trade(trade_id: str, fill_price: float | None, reason: str, broadcast_fn) -> None:

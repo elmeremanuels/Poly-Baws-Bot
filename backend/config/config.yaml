@@ -8,13 +8,21 @@ trading:
   stop_exit: 0.60
   entry_cutoff_minutes_before_window: 2
   entry_start_minutes_before_window: 15
-  exit_strategy:
-    initial_target_offset: 0.05
-    ratchet_interval_seconds: 15
-    ratchet_step: 0.02
-    trailing_giveback: 0.03
-    stop_buffer: 0.03
-    force_exit_seconds: 30
+  # legacy exit_strategy removed — see top-level exit: block
+
+exit:
+  # Peg-Cross exit engine (Höschler/Bulthuis V2)
+  cross_threshold: 0.70        # score to trigger market-sell conversion
+  initial_offset: 0.05         # limit starts trigger_price + offset above trigger
+  ratchet_buffer: 0.02         # limit stays this far above mid when ratcheting
+  check_interval_seconds: 1.5  # polling interval in patient phase
+  time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
+  spread_avg_window: 60        # reserved for future spread averaging
+  force_exit_seconds: 30       # market-sell with this many seconds left
+
+entry:
+  max_combined_cost: 1.03      # YES ask + NO ask must be ≤ this
+  max_token_spread: 0.06       # per-token bid/ask spread must be ≤ this
 
 coins:
   BTC:

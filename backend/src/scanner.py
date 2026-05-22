@@ -6,6 +6,7 @@ import httpx
 
 from .config_loader import CONFIG
 from .logger import log, write_event, save_dashboard_state
+from . import volatility
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
 COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].items()}
@@ -125,6 +126,16 @@ async def _refresh_coin(coin: str) -> None:
     active.sort(key=lambda m: m["window_end"] or now)
     _market_cache[coin] = active
     _last_refresh[coin] = now
+
+    tokens = []
+    for m in active:
+        if m.get("yes_token"):
+            tokens.append(m["yes_token"])
+        if m.get("no_token"):
+            tokens.append(m["no_token"])
+    if tokens:
+        volatility.register_tokens(tokens)
+
     log.info("scanner_refreshed", coin=coin, count=len(active))
 
     if active:

@@ -9,6 +9,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .config_loader import CONFIG
 from .logger import log, write_event
+from . import volatility
 
 WS_URL = CONFIG["polymarket"]["clob_ws_url"]
 
@@ -82,6 +83,10 @@ async def _apply_book_update(asset_id: str, changes: list[dict]) -> None:
         else:
             target[price_key] = size_f
 
+    mid = get_mid_price(asset_id)
+    if mid is not None:
+        volatility.on_price_update(asset_id, mid)
+
     # Notify listeners
     for cb in _listeners[asset_id]:
         try:
@@ -119,6 +124,9 @@ async def _handle_single(data: dict) -> None:
             s = float(entry.get("size", 0))
             if s > 0:
                 _orderbooks[asset_id]["asks"][p] = s
+        mid = get_mid_price(asset_id)
+        if mid is not None:
+            volatility.on_price_update(asset_id, mid)
         for cb in _listeners[asset_id]:
             try:
                 await cb(asset_id, _orderbooks[asset_id])
