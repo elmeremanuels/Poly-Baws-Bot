@@ -107,13 +107,13 @@ CREATE TABLE IF NOT EXISTS hybrid_pending (
 @asynccontextmanager
 async def _db():
     """Open an aiosqlite connection with busy_timeout pre-set."""
-    async with aiosqlite.connect(_db_path) as db:
+    async with aiosqlite.connect(_db_path, timeout=10.0) as db:
         await db.execute("PRAGMA busy_timeout=10000")
         yield db
 
 
 async def init_db() -> None:
-    async with aiosqlite.connect(_db_path) as db:
+    async with aiosqlite.connect(_db_path, timeout=10.0) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA busy_timeout=10000")

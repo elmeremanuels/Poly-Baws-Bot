@@ -75,7 +75,7 @@ async def command_poll_loop() -> None:
 
 
 async def _execute_pending() -> None:
-    async with aiosqlite.connect(str(_db_path)) as db:
+    async with aiosqlite.connect(str(_db_path), timeout=10.0) as db:
         await db.execute("PRAGMA busy_timeout=30000")
         db.row_factory = aiosqlite.Row
         async with db.execute(

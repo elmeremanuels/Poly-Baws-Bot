@@ -108,8 +108,8 @@ async def _heartbeat_loop() -> None:
     while True:
         try:
             await save_dashboard_state("heartbeat", datetime.now(timezone.utc).isoformat())
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("heartbeat_write_failed", error=str(e))
         await asyncio.sleep(5)
 
 

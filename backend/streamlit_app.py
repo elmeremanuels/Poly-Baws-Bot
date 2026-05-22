@@ -191,16 +191,25 @@ with st.sidebar:
 
     st.divider()
 
+    heartbeat_age = get_bot_heartbeat_age()
+    process_alive = heartbeat_age is not None and heartbeat_age < 15
     killed = is_killed()
+
     st.markdown("### Bot Power")
-    if killed:
-        st.error("⛔ BOT OFF — Geen trades worden geplaatst")
-        if st.button("🟢 TURN ON", use_container_width=True, type="primary"):
+    if not process_alive:
+        if heartbeat_age is not None:
+            st.error(f"❌ BOT GESTOPT — laatste heartbeat {heartbeat_age:.0f}s geleden")
+        else:
+            st.error("❌ BOT NOOIT GESTART")
+        st.caption("Check: sudo systemctl status poly-baws-bot")
+    elif killed:
+        st.warning("⏸ BOT GEPAUZEERD — draait maar handelt niet")
+        if st.button("▶ RESUME TRADING", use_container_width=True, type="primary"):
             write_command("reset_kill")
             st.rerun()
     else:
-        st.success("🟢 BOT ON — Trading actief")
-        if st.button("🔴 TURN OFF", use_container_width=True, type="secondary"):
+        st.success("🟢 BOT LIVE — trading actief")
+        if st.button("⏸ PAUSE TRADING", use_container_width=True, type="secondary"):
             write_command("kill")
             st.rerun()
 
