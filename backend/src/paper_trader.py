@@ -60,7 +60,7 @@ async def simulate_limit_buy(token_id: str, limit_price: float, size: float) -> 
     if filled_size < size:
         return {"filled": False, "fill_price": avg_price, "filled_size": filled_size, "partial": True}
 
-    fees = filled_size * avg_price * taker_fee_rate(avg_price) + filled_size * SLIPPAGE_BUFFER
+    fees = filled_size * SLIPPAGE_BUFFER  # maker order: 0% taker fee
     return {
         "filled": True,
         "fill_price": avg_price,
@@ -85,7 +85,7 @@ async def simulate_limit_sell(token_id: str, limit_price: float, size: float) ->
     if filled_size < size:
         return {"filled": False, "fill_price": avg_price, "filled_size": filled_size, "partial": True}
 
-    fees = filled_size * avg_price * taker_fee_rate(avg_price) + filled_size * SLIPPAGE_BUFFER
+    fees = filled_size * SLIPPAGE_BUFFER  # maker order: 0% taker fee
     return {
         "filled": True,
         "fill_price": avg_price,
