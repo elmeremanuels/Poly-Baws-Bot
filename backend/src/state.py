@@ -113,6 +113,13 @@ def remove_active_trade(trade_id: str) -> None:
     _active_trades.pop(trade_id, None)
 
 
+def reset_state() -> None:
+    """Wipe all in-memory trade state (used for paper trading reset)."""
+    _active_trades.clear()
+    _window_registry.clear()
+    log.info("in_memory_state_reset")
+
+
 def update_trade_field(trade_id: str, field: str, value: Any) -> None:
     if trade_id in _active_trades:
         _active_trades[trade_id][field] = value

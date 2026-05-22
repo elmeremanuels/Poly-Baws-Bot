@@ -189,6 +189,14 @@ with st.sidebar:
         write_command("set_mode", {"mode": new_mode})
         st.rerun()
 
+    if mode.startswith("paper"):
+        confirmed = st.checkbox("Bevestig reset", key="reset_confirm")
+        if st.button("🗑 Reset paper data", use_container_width=True, disabled=not confirmed):
+            write_command("reset_paper")
+            st.session_state.pop("reset_confirm", None)
+            st.toast("Paper data gereset.", icon="🗑")
+            st.rerun()
+
     st.divider()
 
     heartbeat_age = get_bot_heartbeat_age()

@@ -255,6 +255,16 @@ async def load_dashboard_state(key: str) -> str | None:
             return row[0] if row else None
 
 
+async def reset_paper_data() -> None:
+    """Delete all trades, events and snapshots — used when resetting paper trading state."""
+    async with _db() as db:
+        await db.execute("DELETE FROM trades")
+        await db.execute("DELETE FROM events")
+        await db.execute("DELETE FROM orderbook_snapshots")
+        await db.commit()
+    log.info("paper_data_reset")
+
+
 async def get_events_for_trade(trade_id: str) -> list[dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row

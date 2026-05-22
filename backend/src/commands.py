@@ -105,7 +105,8 @@ async def _execute_pending() -> None:
 
 async def _run_command(command: str, payload: dict) -> None:
     from . import risk
-    from .state import set_mode
+    from .state import set_mode, reset_state
+    from .logger import reset_paper_data
 
     if command == "set_mode":
         set_mode(payload["mode"])
@@ -116,6 +117,10 @@ async def _run_command(command: str, payload: dict) -> None:
 
     elif command == "reset_kill":
         risk.reset_kill()
+
+    elif command == "reset_paper":
+        reset_state()
+        await reset_paper_data()
 
     elif command == "trigger_hybrid":
         from . import bot as bot_module
