@@ -48,7 +48,7 @@ fees:
 
 risk:
   daily_loss_limit_eur: 10.00
-  max_trades_per_day_total: 100
+  max_trades_per_day_total: 8000
   global_max_positions: 25
 
 polymarket:
