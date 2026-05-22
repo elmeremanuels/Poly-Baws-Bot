@@ -1,7 +1,6 @@
 """Multi-coin market scanner — discovers upcoming 5-min windows on Polymarket."""
 import asyncio
 import json
-import re
 from datetime import datetime, timezone, timedelta
 import httpx
 
@@ -16,20 +15,19 @@ _last_refresh: dict[str, datetime] = {}
 
 
 async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
-    """Fetch upcoming events from Gamma API; extract nested markets."""
+    """Fetch currently-tradeable events from Gamma API; extract nested markets."""
     now = datetime.now(timezone.utc)
-    # 25-hour lookback: Polymarket creates 5M events up to ~24h before the window.
-    # Newest-first ordering ensures recently-created 5M events appear within limit=500.
-    start_min = (now - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_min = now.isoformat()
+
     results = []
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             params = {
                 "closed": "false",
                 "limit": 500,
-                "order": "startDate",
-                "ascending": "false",
-                "start_date_min": start_min,
+                "order": "endDate",
+                "ascending": "true",
+                "end_date_min": end_min,
             }
             resp = await client.get(f"{GAMMA_URL}/events", params=params)
             if resp.status_code == 200:
@@ -50,7 +48,9 @@ async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
 
 
 def _normalize_event_market(coin: str, event: dict, market: dict) -> dict | None:
-    """Combine event metadata with nested market data."""
+    """Combine event metadata with nested market data. Window start is parsed from the slug
+    epoch suffix because Gamma's startDate field is the event creation time (~23h before
+    the actual 5M window opens), not the window opening time."""
     clob_tokens = market.get("clobTokenIds")
     if isinstance(clob_tokens, str):
         try:
@@ -62,12 +62,23 @@ def _normalize_event_market(coin: str, event: dict, market: dict) -> dict | None
         return None
 
     slug = event.get("slug", "")
-    window_end = _parse_ts(event.get("endDate") or market.get("endDate"))
-    # The slug encodes the window start as a unix timestamp: {coin}-updown-5m-{epoch}
-    # This is the actual prediction window start, not the event listing date.
-    window_start = _window_start_from_slug(slug) or (
-        (window_end - timedelta(minutes=5)) if window_end else None
-    )
+
+    # Parse window_start from slug. Pattern: {coin}-updown-5m-{unix_epoch}
+    window_start = None
+    window_end = None
+    parts = slug.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        try:
+            window_start = datetime.fromtimestamp(int(parts[1]), tz=timezone.utc)
+            window_end = window_start + timedelta(minutes=5)
+        except (ValueError, OSError):
+            pass
+
+    # Fallback to event.endDate if slug parsing failed
+    if window_end is None:
+        window_end = _parse_ts(event.get("endDate"))
+        if window_end:
+            window_start = window_end - timedelta(minutes=5)
 
     return {
         "coin": coin,
@@ -82,16 +93,6 @@ def _normalize_event_market(coin: str, event: dict, market: dict) -> dict | None
         "status": event.get("active", True),
     }
 
-
-def _window_start_from_slug(slug: str) -> datetime | None:
-    """Extract window start from slug like 'btc-updown-5m-1779489600'."""
-    m = re.search(r"-(\d{9,10})$", slug)
-    if m:
-        try:
-            return datetime.fromtimestamp(int(m.group(1)), tz=timezone.utc)
-        except Exception:
-            pass
-    return None
 
 
 def _parse_ts(ts_str: str | None) -> datetime | None:
