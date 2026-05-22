@@ -24,6 +24,7 @@ from src.db_sync import (
 )
 from src.commands import write_command, delete_hybrid_pending
 from src.risk import KILL_FLAG_PATH
+from analytics_tab import analytics_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -441,4 +442,8 @@ def _event_log() -> None:
             st.caption("No events.")
 
 
-dashboard()
+tab_live, tab_analytics = st.tabs(["🔴 Live", "📊 Analytics"])
+with tab_live:
+    dashboard()
+with tab_analytics:
+    analytics_panel()

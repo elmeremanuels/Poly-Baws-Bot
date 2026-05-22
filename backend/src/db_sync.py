@@ -154,3 +154,117 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+def get_analytics_trades(coin: str | None = None, days: int | None = None) -> list[dict]:
+    """Closed triggered trades, optionally filtered by coin and date range."""
+    if not _db_path.exists():
+        return []
+    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM trades WHERE {where} ORDER BY created_at ASC",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> list[dict]:
+    """Aggregate stats grouped by winner_exit_reason."""
+    if not _db_path.exists():
+        return []
+    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                winner_exit_reason,
+                COUNT(*) as count,
+                ROUND(AVG(net_pnl), 4) as avg_pnl,
+                ROUND(SUM(net_pnl), 4) as total_pnl,
+                ROUND(AVG(peak_bid), 4) as avg_peak_bid,
+                ROUND(AVG(ratchet_count), 1) as avg_ratchets,
+                ROUND(AVG(time_in_trail_seconds), 1) as avg_trail_time
+            FROM trades
+            WHERE {where}
+            GROUP BY winner_exit_reason
+            ORDER BY count DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_coin_comparison(days: int | None = None) -> list[dict]:
+    """Per-coin aggregated stats for closed triggered trades."""
+    if not _db_path.exists():
+        return []
+    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    params: list = []
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                coin,
+                COUNT(*) as trades,
+                ROUND(SUM(CASE WHEN net_pnl > 0 THEN 1.0 ELSE 0.0 END) / COUNT(*) * 100, 1) as win_rate,
+                ROUND(SUM(net_pnl), 4) as total_pnl,
+                ROUND(AVG(net_pnl), 4) as avg_pnl,
+                ROUND(AVG(peak_bid), 4) as avg_peak_bid,
+                ROUND(AVG(time_in_trail_seconds), 1) as avg_trail_time,
+                ROUND(AVG(fees_paid), 4) as avg_fees
+            FROM trades
+            WHERE {where}
+            GROUP BY coin
+            ORDER BY total_pnl DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dict]:
+    """Average P&L by hour of day (UTC)."""
+    if not _db_path.exists():
+        return []
+    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                CAST(strftime('%H', created_at) AS INTEGER) as hour_utc,
+                COUNT(*) as trades,
+                ROUND(AVG(net_pnl), 4) as avg_pnl,
+                ROUND(SUM(net_pnl), 4) as total_pnl
+            FROM trades
+            WHERE {where}
+            GROUP BY hour_utc
+            ORDER BY hour_utc""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
