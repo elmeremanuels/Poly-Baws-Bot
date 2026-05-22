@@ -95,6 +95,9 @@ def create_trade_state(
         "gross_pnl": None,
         "net_pnl": None,
         "notes": "",
+        "peak_bid": None,
+        "ratchet_count": 0,
+        "time_in_trail_seconds": None,
     }
     return state
 
@@ -127,6 +130,7 @@ async def persist_trade(trade_id: str) -> None:
         "entry_size", "trigger_hit", "trigger_ts", "winner_side",
         "loser_exit_price", "loser_exit_ts", "winner_exit_price", "winner_exit_ts",
         "winner_exit_reason", "fees_paid", "gross_pnl", "net_pnl", "status", "notes",
+        "peak_bid", "ratchet_count", "time_in_trail_seconds",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)

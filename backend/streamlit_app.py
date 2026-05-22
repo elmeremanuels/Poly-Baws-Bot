@@ -398,11 +398,13 @@ def _recent_trades() -> None:
     rows = []
     for t in trades:
         pnl = t.get("net_pnl")
+        peak = t.get("peak_bid")
         rows.append({
             "Coin": t.get("coin", ""),
             "Exit": t.get("winner_exit_reason") or t.get("status", ""),
+            "Peak bid": f"{peak:.2f}" if peak is not None else "—",
+            "Ratchets": t.get("ratchet_count") or 0,
             "Mode": (t.get("mode") or "").replace("_", " "),
-            "By": t.get("triggered_by", ""),
             "Net P&L": f"{'+' if (pnl or 0) >= 0 else ''}€{pnl:.4f}" if pnl is not None else "—",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)

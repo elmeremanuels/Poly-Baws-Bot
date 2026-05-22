@@ -8,6 +8,13 @@ trading:
   stop_exit: 0.60
   entry_cutoff_minutes_before_window: 2
   entry_start_minutes_before_window: 15
+  exit_strategy:
+    initial_target_offset: 0.05
+    ratchet_interval_seconds: 15
+    ratchet_step: 0.02
+    trailing_giveback: 0.03
+    stop_buffer: 0.03
+    force_exit_seconds: 30
 
 coins:
   BTC:

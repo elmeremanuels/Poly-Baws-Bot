@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS trades (
     net_pnl REAL,
     status TEXT DEFAULT 'pending',
     notes TEXT,
+    peak_bid REAL,
+    ratchet_count INTEGER DEFAULT 0,
+    time_in_trail_seconds REAL,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -119,6 +122,18 @@ async def init_db() -> None:
         await db.execute("PRAGMA busy_timeout=10000")
         await db.commit()
         await db.executescript(SCHEMA)
+        await db.commit()
+        # Migration: add trailing-strategy columns if missing
+        async with db.execute("PRAGMA table_info(trades)") as cur:
+            cols = await cur.fetchall()
+        existing = {row[1] for row in cols}
+        for col_name, col_type in [
+            ("peak_bid", "REAL"),
+            ("ratchet_count", "INTEGER DEFAULT 0"),
+            ("time_in_trail_seconds", "REAL"),
+        ]:
+            if col_name not in existing:
+                await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
         await db.commit()
     log.info("database_initialized", path=str(_db_path))
 

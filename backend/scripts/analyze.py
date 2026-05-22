@@ -113,6 +113,27 @@ def _max_consecutive_losses(df: pd.DataFrame) -> int:
     return max_streak
 
 
+def exit_strategy_breakdown(df: pd.DataFrame) -> None:
+    if "winner_exit_reason" not in df.columns:
+        return
+    print_section("EXIT STRATEGY BREAKDOWN")
+    grouped = df.groupby("winner_exit_reason").agg(
+        count=("net_pnl", "size"),
+        total_pnl=("net_pnl", "sum"),
+        mean_pnl=("net_pnl", "mean"),
+        win_rate=("net_pnl", lambda x: (x > 0).mean() * 100),
+    ).round(4)
+    print(grouped.to_string())
+
+    if "peak_bid" in df.columns and "time_in_trail_seconds" in df.columns:
+        print("\nTrailing phase stats:")
+        trail_df = df[df["winner_exit_reason"].isin(["target_trailing", "stop_trailing"])]
+        if not trail_df.empty:
+            print(f"  Avg peak bid:       {trail_df['peak_bid'].mean():.4f}")
+            print(f"  Avg time in trail:  {trail_df['time_in_trail_seconds'].mean():.1f}s")
+            print(f"  Avg ratchet count:  {trail_df['ratchet_count'].mean():.1f}")
+
+
 def main():
     db_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DB_PATH
     if not db_path.exists():
@@ -128,6 +149,7 @@ def main():
     per_coin_stats(df)
     daily_pnl(df)
     mode_comparison(df)
+    exit_strategy_breakdown(df)
 
 
 if __name__ == "__main__":
