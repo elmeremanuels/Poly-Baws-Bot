@@ -12,6 +12,23 @@ CHAIN_ID = CONFIG["polymarket"]["chain_id"]
 _client = None
 
 
+def _sig_type(proxy: str | None) -> int:
+    """Resolve the EIP-712 signature type for the deposit wallet.
+
+    Polymarket wallet types:
+      0 = EOA            (no proxy; signing key holds the funds directly)
+      1 = POLY_PROXY     (email/Magic login deposit wallet)
+      2 = POLY_GNOSIS_SAFE (browser-wallet / MetaMask login deposit wallet)
+
+    Override via POLYMARKET_SIGNATURE_TYPE. Default: 2 when a proxy is set
+    (browser-wallet deposit wallets are Gnosis Safes), else 0.
+    """
+    explicit = get_env("POLYMARKET_SIGNATURE_TYPE")
+    if explicit is not None and explicit.strip() != "":
+        return int(explicit)
+    return 2 if proxy else 0
+
+
 def _build_client():
     from py_clob_client_v2.client import ClobClient
     from py_clob_client_v2.clob_types import ApiCreds
@@ -20,6 +37,8 @@ def _build_client():
     proxy = get_env("POLYMARKET_PROXY_ADDRESS")
     if not pk:
         raise RuntimeError("POLYMARKET_PRIVATE_KEY not set")
+
+    sig_type = _sig_type(proxy)
 
     # Prefer explicit API credentials from environment
     api_key = get_env("POLYMARKET_API_KEY")
@@ -32,24 +51,24 @@ def _build_client():
             api_secret=api_secret,
             api_passphrase=api_passphrase,
         )
-        log.info("clob_client_level2_explicit")
+        log.info("clob_client_level2_explicit", signature_type=sig_type)
     else:
         # Derive Level 2 credentials from the private key (deterministic, no manual setup needed)
         l1 = ClobClient(
             host=CLOB_REST,
             chain_id=CHAIN_ID,
             key=pk,
-            signature_type=1 if proxy else 0,
+            signature_type=sig_type,
             funder=proxy,
         )
         creds = l1.create_or_derive_api_key()
-        log.info("clob_client_level2_derived")
+        log.info("clob_client_level2_derived", signature_type=sig_type)
 
     return ClobClient(
         host=CLOB_REST,
         chain_id=CHAIN_ID,
         key=pk,
-        signature_type=1 if proxy else 0,
+        signature_type=sig_type,
         funder=proxy,
         creds=creds,
     )
@@ -84,7 +103,7 @@ async def check_credentials() -> bool:
                  eoa=eoa,
                  proxy=proxy or "(not set)",
                  maker_address=proxy if proxy else eoa,
-                 signature_type=1 if proxy else 0)
+                 signature_type=_sig_type(proxy))
         client = get_client()
         await _run_sync(client.get_ok)
         return True
