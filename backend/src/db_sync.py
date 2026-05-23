@@ -260,7 +260,12 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dic
                 CAST(strftime('%H', created_at) AS INTEGER) as hour_utc,
                 COUNT(*) as trades,
                 ROUND(AVG(net_pnl), 4) as avg_pnl,
-                ROUND(SUM(net_pnl), 4) as total_pnl
+                ROUND(SUM(net_pnl), 4) as total_pnl,
+                ROUND(
+                    SUM(CASE WHEN actual_winner = winner_side AND trigger_hit = 1 THEN 1.0 ELSE 0.0 END)
+                    / NULLIF(SUM(CASE WHEN trigger_hit = 1 AND actual_winner IS NOT NULL THEN 1 ELSE 0 END), 0)
+                    * 100, 1
+                ) as direction_accuracy
             FROM trades
             WHERE {where}
             GROUP BY hour_utc
@@ -360,6 +365,42 @@ def get_cycle_stats(cycle_id: int) -> dict:
         "total_trades": total[0] if total else 0,
         "overall_avg_pnl": total[1] if total else None,
     }
+
+
+def get_latest_manual_analysis() -> dict | None:
+    """Return the most recent manual Claude analysis (phase='manual') from analytics tab."""
+    if not _db_path.exists():
+        return None
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM learning_cycles WHERE phase = 'manual' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def save_manual_analysis_to_db(result: dict) -> None:
+    """Save a manual Claude analysis as a learning cycle record so apply-learnings can use it."""
+    if not _db_path.exists():
+        return
+    import json
+    with _conn() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(cycle_number), 0) FROM learning_cycles").fetchone()
+        next_cycle = (row[0] if row else 0) + 1
+        conn.execute(
+            """INSERT INTO learning_cycles
+               (cycle_number, phase, phase_started_at, started_at, ended_at,
+                claude_analysis, claude_params, confidence_score)
+               VALUES (?, 'manual', datetime('now'), datetime('now'), datetime('now'), ?, ?, ?)""",
+            (
+                next_cycle,
+                result.get("reasoning", ""),
+                json.dumps(result),
+                result.get("confidence_score", 0.0),
+            ),
+        )
 
 
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:

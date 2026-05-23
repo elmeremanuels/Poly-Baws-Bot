@@ -17,6 +17,7 @@ from src.db_sync import (
     get_daily_pnl,
     get_hybrid_pending,
     get_latest_completed_cycle,
+    get_latest_manual_analysis,
     get_open_trades,
     get_phase_stats,
     get_recent_events,
@@ -518,7 +519,30 @@ def _learning_panel() -> None:
                     pnl = stats.get("total_pnl")
                     cs[3].metric("Total P&L", f"€{pnl:+.2f}" if pnl is not None else "—")
 
-    # Claude's analysis
+    # Last manual Claude analysis from analytics tab
+    manual = get_latest_manual_analysis()
+    if manual and manual.get("claude_analysis"):
+        with st.expander("🤖 Laatste handmatige Claude-analyse (analytics tab)"):
+            st.markdown(manual["claude_analysis"][:3000])
+            if manual.get("claude_params"):
+                try:
+                    params = json.loads(manual["claude_params"])
+                    coin_p = params.get("coin_params", {})
+                    if coin_p:
+                        rows = []
+                        for coin, cp in coin_p.items():
+                            rows.append({
+                                "Coin": coin,
+                                "Trigger": cp.get("trigger_threshold", "—"),
+                                "Cross": cp.get("cross_threshold", "—"),
+                                "Offset": cp.get("initial_offset", "—"),
+                                "Buffer": cp.get("ratchet_buffer", "—"),
+                            })
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                except Exception:
+                    pass
+
+    # Claude's analysis (from learning cycle)
     if cycle.get("claude_analysis"):
         with st.expander("Claude's latest reasoning"):
             st.markdown(cycle["claude_analysis"][:3000])

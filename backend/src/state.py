@@ -108,6 +108,7 @@ def create_trade_state(
         "cycle_id": None,
         "param_snapshot": None,
         "break_even_price": None,
+        "actual_winner": None,
     }
     return state
 
@@ -151,6 +152,7 @@ async def persist_trade(trade_id: str) -> None:
         "mid_at_trigger", "spread_at_trigger", "mid_velocity_at_trigger",
         "yes_depth_at_trigger", "no_depth_at_trigger", "time_since_window_start",
         "phase", "cycle_id", "param_snapshot",
+        "break_even_price", "actual_winner",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)

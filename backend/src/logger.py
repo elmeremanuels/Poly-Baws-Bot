@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS trades (
     ratchet_count INTEGER DEFAULT 0,
     time_in_trail_seconds REAL,
     break_even_price REAL,
+    actual_winner TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -158,6 +159,7 @@ async def init_db() -> None:
             ("ratchet_count", "INTEGER DEFAULT 0"),
             ("time_in_trail_seconds", "REAL"),
             ("break_even_price", "REAL"),
+            ("actual_winner", "TEXT"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

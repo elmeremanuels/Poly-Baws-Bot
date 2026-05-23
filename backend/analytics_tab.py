@@ -3,12 +3,15 @@ import pandas as pd
 import streamlit as st
 
 from src.config_loader import CONFIG
+from src.commands import write_command
 from src.db_sync import (
     get_analytics_trades,
     get_coin_comparison,
     get_exit_reason_stats,
     get_hourly_pnl,
+    save_manual_analysis_to_db,
 )
+from src.claude_analyzer import analyze_trades_sync
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -73,6 +76,9 @@ def analytics_panel() -> None:
 
     # ── Full Trade History ────────────────────────────────────────────────────
     _trade_history(df)
+
+    # ── Claude Analysis ───────────────────────────────────────────────────────
+    _claude_analysis_section(df, coin_filter, days)
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
@@ -192,7 +198,17 @@ def _hourly_analysis(coin: str | None, days: int | None) -> None:
         st.caption("Not enough data yet (needs 100+ trades for reliable signal).")
         return
     hdf = pd.DataFrame(hourly).set_index("hour_utc")
-    st.bar_chart(hdf[["avg_pnl"]])
+    col_pnl, col_acc = st.columns(2)
+    with col_pnl:
+        st.caption("Avg P&L per hour")
+        st.bar_chart(hdf[["avg_pnl"]])
+    with col_acc:
+        st.caption("Direction accuracy % per hour")
+        acc = hdf[["direction_accuracy"]].dropna()
+        if not acc.empty:
+            st.bar_chart(acc)
+        else:
+            st.caption("No direction accuracy data yet.")
 
 
 def _trade_history(df: pd.DataFrame) -> None:
@@ -201,7 +217,7 @@ def _trade_history(df: pd.DataFrame) -> None:
             "created_at", "coin", "status", "mode", "triggered_by",
             "entry_yes_price", "entry_no_price",
             "loser_exit_price", "winner_exit_price", "winner_exit_reason",
-            "peak_bid", "ratchet_count", "time_in_trail_seconds",
+            "actual_winner", "peak_bid", "ratchet_count", "time_in_trail_seconds",
             "fees_paid", "net_pnl",
         ]
         available = [c for c in display_cols if c in df.columns]
@@ -209,3 +225,71 @@ def _trade_history(df: pd.DataFrame) -> None:
         if "created_at" in show.columns:
             show["created_at"] = pd.to_datetime(show["created_at"]).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+def _build_current_params() -> dict:
+    return {
+        "coins": {
+            coin: {
+                "trigger_threshold": cfg.get("trigger_threshold", CONFIG["trading"]["trigger_threshold"]),
+                "enabled": cfg.get("enabled", True),
+            }
+            for coin, cfg in CONFIG["coins"].items()
+        },
+        "exit": {
+            "cross_threshold": CONFIG["exit"]["cross_threshold"],
+            "initial_offset": CONFIG["exit"]["initial_offset"],
+            "ratchet_buffer": CONFIG["exit"]["ratchet_buffer"],
+        },
+        "entry": {
+            "max_combined_cost": CONFIG["entry"]["max_combined_cost"],
+            "max_token_spread": CONFIG["entry"]["max_token_spread"],
+        },
+    }
+
+
+def _claude_analysis_section(df: pd.DataFrame, coin: str | None, days: int | None) -> None:
+    st.markdown("### 🤖 Claude Analyse")
+
+    if st.button("Analyseer met Claude", key="an_claude_btn"):
+        try:
+            with st.spinner("Claude analyseert..."):
+                params = _build_current_params()
+                result = analyze_trades_sync(df.to_dict("records"), params)
+            st.session_state["manual_analysis"] = result
+            st.success("Analyse klaar!")
+        except Exception as exc:
+            st.error(f"Analyse mislukt: {exc}")
+
+    result = st.session_state.get("manual_analysis")
+    if not result:
+        return
+
+    conf = result.get("confidence_score", 0)
+    st.metric("Vertrouwen", f"{conf * 100:.0f}%")
+    reasoning = result.get("reasoning", "")
+    if reasoning:
+        st.markdown(reasoning)
+
+    coin_params = result.get("coin_params", {})
+    if coin_params:
+        rows = []
+        for c, cp in coin_params.items():
+            rows.append({
+                "Coin": c,
+                "Trigger": cp.get("trigger_threshold", "—"),
+                "Cross": cp.get("cross_threshold", "—"),
+                "Offset": cp.get("initial_offset", "—"),
+                "Buffer": cp.get("ratchet_buffer", "—"),
+                "Enabled": cp.get("enabled", True),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if st.button("✅ Toepassen op live_auto", key="an_apply_btn"):
+        try:
+            save_manual_analysis_to_db(result)
+            write_command("toggle_learned_params", {"enabled": True})
+            st.success("Parameters opgeslagen en toegepast op live_auto!")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Opslaan mislukt: {exc}")

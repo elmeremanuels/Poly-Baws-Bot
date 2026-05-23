@@ -239,6 +239,7 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     loser_proceeds = loser_price * size
     be_price = max(0.0, min(1.0, round((total_cost - loser_proceeds) / size, 4)))
     update_trade_field(trade_id, "break_even_price", be_price)
+    update_trade_field(trade_id, "actual_winner", winner)
     await write_event(trade_id, "break_even_computed", coin, {"break_even_price": be_price})
 
     # Step 2: single resting target order + stop-market via price monitoring
@@ -281,6 +282,11 @@ def _store_trail_metrics(trade_id: str, peak_bid: float, ratchet_count: int, tim
     update_trade_field(trade_id, "peak_bid", round(peak_bid, 4))
     update_trade_field(trade_id, "ratchet_count", ratchet_count)
     update_trade_field(trade_id, "time_in_trail_seconds", round(time_in_trail, 2))
+
+
+def _add_winner_fees(trade_id: str, fees: float) -> None:
+    current = (get_active_trades().get(trade_id) or {}).get("fees_paid") or 0.0
+    update_trade_field(trade_id, "fees_paid", round(current + fees, 6))
 
 
 # ── Peg-Cross Exit Engine ─────────────────────────────────────────────────────
@@ -379,18 +385,21 @@ async def _winner_exit_paper(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
-            hold_threshold = es.get("hold_for_resolution_mid_threshold", 1.1)
+            hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.90)
+            if break_even_price and break_even_price > 0:
+                hold_threshold = min(hold_threshold, break_even_price)
             mid_check = ws_client.get_mid_price(winner_token)
             if mid_check is not None and mid_check >= hold_threshold:
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await write_event(trade_id, "held_for_resolution", coin, {
                     "mid": mid_check, "seconds_left": round(seconds_left, 1),
                 })
-                await _close_trade(trade_id, 1.00, "held_for_resolution", broadcast_fn)
+                await _close_trade(trade_id, mid_check, "held_for_resolution", broadcast_fn)
                 return
             result = await paper_trader.simulate_market_sell(winner_token, size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+            _add_winner_fees(trade_id, result.get("fees", 0.0))
             await _close_trade(trade_id, result.get("fill_price"), "force_exit_window_end", broadcast_fn)
             return
 
@@ -401,6 +410,7 @@ async def _winner_exit_paper(
         if target_result["filled"]:
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, target_result["fill_price"])
+            _add_winner_fees(trade_id, target_result.get("fees", 0.0))
             await _close_trade(trade_id, target_result["fill_price"], "limit_filled", broadcast_fn)
             return
 
@@ -423,6 +433,7 @@ async def _winner_exit_paper(
                     result = await paper_trader.simulate_market_sell(winner_token, size)
                     _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                     await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                    _add_winner_fees(trade_id, result.get("fees", 0.0))
                     await write_event(trade_id, "peg_cross_triggered", coin, {
                         "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
                     })
@@ -482,7 +493,9 @@ async def _winner_exit_live(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
-            hold_threshold = es.get("hold_for_resolution_mid_threshold", 1.1)
+            hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.90)
+            if break_even_price and break_even_price > 0:
+                hold_threshold = min(hold_threshold, break_even_price)
             mid_check = ws_client.get_mid_price(winner_token)
             await orders.cancel_order(current_order_id)
             if mid_check is not None and mid_check >= hold_threshold:
@@ -491,11 +504,12 @@ async def _winner_exit_live(
                     "mid": mid_check, "seconds_left": round(seconds_left, 1),
                     "note": "winner_tokens_need_redemption_in_polymarket_wallet",
                 })
-                await _close_trade(trade_id, 1.00, "held_for_resolution", broadcast_fn)
+                await _close_trade(trade_id, mid_check, "held_for_resolution", broadcast_fn)
                 return
             await orders.place_market_order(winner_token, "SELL", size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+            _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid_check or 0.5) * size)
             await _close_trade(trade_id, mid_check, "force_exit_window_end", broadcast_fn)
             return
 
@@ -520,6 +534,7 @@ async def _winner_exit_live(
                     await orders.place_market_order(winner_token, "SELL", size)
                     _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                     await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                    _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
                     await write_event(trade_id, "peg_cross_triggered", coin, {
                         "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
                     })
@@ -543,6 +558,7 @@ async def _winner_exit_live(
                             log.warning("ratchet_reissue_failed_market_exit", trade_id=trade_id)
                             await orders.place_market_order(winner_token, "SELL", size)
                             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                            _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
                             await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
                             return
                     else:
@@ -551,6 +567,7 @@ async def _winner_exit_live(
                             fill = float(order.get("average_price") or current_limit)
                             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, fill)
+                            _add_winner_fees(trade_id, paper_trader.SLIPPAGE_BUFFER * size)
                             await _close_trade(trade_id, fill, "limit_filled", broadcast_fn)
                             return
 
@@ -561,6 +578,7 @@ async def _winner_exit_live(
                 fill = float(order.get("average_price") or current_limit)
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, True, fill)
+                _add_winner_fees(trade_id, paper_trader.SLIPPAGE_BUFFER * size)
                 await _close_trade(trade_id, fill, "limit_filled", broadcast_fn)
                 return
 

@@ -57,6 +57,9 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
         if window_end_dt and now >= window_end_dt:
             log.info("monitor_window_expired", trade_id=trade_id)
             update_trade_field(trade_id, "winner_exit_reason", "resolution")
+            yes_mid_final = ws_client.get_mid_price(yes_token)
+            if yes_mid_final is not None:
+                update_trade_field(trade_id, "actual_winner", "YES" if yes_mid_final >= 0.5 else "NO")
             await on_trigger_callback(trade_id, "RESOLUTION", None)
             break
 

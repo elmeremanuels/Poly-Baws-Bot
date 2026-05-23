@@ -126,6 +126,70 @@ async def analyze_cycle(cycle_id: int) -> dict:
     return params
 
 
+def analyze_trades_sync(trades: list[dict], current_params: dict) -> dict:
+    """Synchronous Claude analysis for direct use in Streamlit."""
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
+        raise ValueError("ANTHROPIC_API_KEY not set — cannot run analysis")
+
+    model = CONFIG.get("claude", {}).get("model", "claude-sonnet-4-6")
+    max_tokens = CONFIG.get("claude", {}).get("max_tokens", 4096)
+
+    triggered = [t for t in trades if t.get("trigger_hit")]
+    wins = [t for t in triggered if (t.get("net_pnl") or 0) > 0]
+    stats = {
+        "total_trades": len(trades),
+        "triggered": len(triggered),
+        "win_rate": round(len(wins) / max(len(triggered), 1) * 100, 1),
+        "avg_pnl": round(sum(t.get("net_pnl") or 0 for t in triggered) / max(len(triggered), 1), 4),
+        "total_pnl": round(sum(t.get("net_pnl") or 0 for t in trades), 4),
+    }
+
+    schema = """{
+  "confidence_score": 0.0-1.0,
+  "reasoning": "...",
+  "coin_params": {
+    "BTC": {"trigger_threshold": float, "cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "enabled": bool},
+    "ETH": { ... }, "SOL": { ... }, "XRP": { ... }, "DOGE": { ... }
+  },
+  "global_params": {"max_entry_cost": float, "max_token_spread": float}
+}"""
+
+    sample = trades[-50:] if len(trades) > 50 else trades
+    user_prompt = _build_prompt(sample, stats, current_params) + f"\n\nReturn this exact JSON structure:\n{schema}"
+
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(
+            _CLAUDE_URL,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "prompt-caching-2024-07-31",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": [
+                    {
+                        "type": "text",
+                        "text": _SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["content"][0]["text"]
+
+    params = _parse_response(content)
+    log.info("manual_claude_analysis_done",
+             confidence=params["confidence_score"],
+             reasoning=params.get("reasoning", "")[:120])
+    return params
+
+
 def _parse_response(text: str) -> dict:
     """Extract, validate and safety-clamp the JSON params from Claude's response."""
     match = re.search(r'\{[\s\S]*\}', text)
