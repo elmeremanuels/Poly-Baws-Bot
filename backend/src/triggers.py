@@ -228,11 +228,21 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
 
     await write_event(trade_id, "loser_sold", coin, {"side": loser_side, "price": loser_price})
 
+    current_fees = trade.get("fees_paid") or 0.0
+    total_fees_so_far = current_fees + loser_fees
+    update_trade_field(trade_id, "fees_paid", total_fees_so_far)
+
+    # Compute break-even winner price: the minimum winner sell that recovers total cost
+    entry_yes = trade.get("entry_yes_price") or ENTRY_PRICE
+    entry_no = trade.get("entry_no_price") or ENTRY_PRICE
+    total_cost = (entry_yes + entry_no) * size + total_fees_so_far
+    loser_proceeds = loser_price * size
+    be_price = max(0.0, min(1.0, round((total_cost - loser_proceeds) / size, 4)))
+    update_trade_field(trade_id, "break_even_price", be_price)
+    await write_event(trade_id, "break_even_computed", coin, {"break_even_price": be_price})
+
     # Step 2: single resting target order + stop-market via price monitoring
     asyncio.create_task(_winner_exit_oco(trade_id, winner_token, size, paper, broadcast_fn))
-
-    current_fees = trade.get("fees_paid") or 0.0
-    update_trade_field(trade_id, "fees_paid", current_fees + loser_fees)
     update_trade_field(trade_id, "status", "exiting")
     await persist_trade(trade_id)
     if broadcast_fn:
@@ -348,13 +358,19 @@ async def _winner_exit_paper(
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
     trigger_price = _get_trigger_threshold(coin)
-    current_limit = round(trigger_price + es["initial_offset"], 2)
+    break_even_price = trade.get("break_even_price") if trade else None
+    # Initial limit is at least break_even + 1¢ so we never rest below profitability
+    raw_limit = round(trigger_price + es["initial_offset"], 2)
+    if break_even_price is not None and break_even_price > 0:
+        raw_limit = max(raw_limit, round(break_even_price + 0.01, 2))
+    current_limit = raw_limit
     peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
 
     await write_event(trade_id, "trailing_started", coin, {
         "initial_limit": current_limit, "trigger_price": trigger_price,
+        "break_even_price": break_even_price,
     })
 
     while True:
@@ -363,6 +379,15 @@ async def _winner_exit_paper(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
+            hold_threshold = es.get("hold_for_resolution_mid_threshold", 1.1)
+            mid_check = ws_client.get_mid_price(winner_token)
+            if mid_check is not None and mid_check >= hold_threshold:
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await write_event(trade_id, "held_for_resolution", coin, {
+                    "mid": mid_check, "seconds_left": round(seconds_left, 1),
+                })
+                await _close_trade(trade_id, 1.00, "held_for_resolution", broadcast_fn)
+                return
             result = await paper_trader.simulate_market_sell(winner_token, size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
@@ -423,7 +448,11 @@ async def _winner_exit_live(
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
     trigger_price = _get_trigger_threshold(coin)
-    current_limit = round(trigger_price + es["initial_offset"], 2)
+    break_even_price = trade.get("break_even_price") if trade else None
+    raw_limit = round(trigger_price + es["initial_offset"], 2)
+    if break_even_price is not None and break_even_price > 0:
+        raw_limit = max(raw_limit, round(break_even_price + 0.01, 2))
+    current_limit = raw_limit
     peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
@@ -448,11 +477,21 @@ async def _winner_exit_live(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
+            hold_threshold = es.get("hold_for_resolution_mid_threshold", 1.1)
+            mid_check = ws_client.get_mid_price(winner_token)
             await orders.cancel_order(current_order_id)
+            if mid_check is not None and mid_check >= hold_threshold:
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await write_event(trade_id, "held_for_resolution", coin, {
+                    "mid": mid_check, "seconds_left": round(seconds_left, 1),
+                    "note": "winner_tokens_need_redemption_in_polymarket_wallet",
+                })
+                await _close_trade(trade_id, 1.00, "held_for_resolution", broadcast_fn)
+                return
             await orders.place_market_order(winner_token, "SELL", size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
-            await _close_trade(trade_id, ws_client.get_mid_price(winner_token), "force_exit_window_end", broadcast_fn)
+            await _close_trade(trade_id, mid_check, "force_exit_window_end", broadcast_fn)
             return
 
         phase = get_exit_phase(seconds_left)

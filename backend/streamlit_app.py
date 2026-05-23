@@ -417,12 +417,14 @@ def _active_positions() -> None:
 
     rows = []
     for t in trades:
+        be = t.get("break_even_price")
         rows.append({
             "Coin": t.get("coin", ""),
             "Status": t.get("status", ""),
             "Window": fmt_time(t.get("window_start_ts")),
             "YES entry": f"€{t['entry_yes_price']:.2f}" if t.get("entry_yes_price") else "—",
             "NO entry": f"€{t['entry_no_price']:.2f}" if t.get("entry_no_price") else "—",
+            "Break-even": f"€{be:.2f}" if be is not None else "—",
             "Winner": t.get("winner_side") or "—",
             "Mode": t.get("mode", ""),
         })
@@ -440,9 +442,11 @@ def _recent_trades() -> None:
     for t in trades:
         pnl = t.get("net_pnl")
         peak = t.get("peak_bid")
+        be = t.get("break_even_price")
         rows.append({
             "Coin": t.get("coin", ""),
             "Exit": t.get("winner_exit_reason") or t.get("status", ""),
+            "Break-even": f"€{be:.2f}" if be is not None else "—",
             "Peak bid": f"{peak:.2f}" if peak is not None else "—",
             "Ratchets": t.get("ratchet_count") or 0,
             "Mode": (t.get("mode") or "").replace("_", " "),

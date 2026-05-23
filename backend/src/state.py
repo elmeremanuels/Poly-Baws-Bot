@@ -107,6 +107,7 @@ def create_trade_state(
         "phase": "manual",
         "cycle_id": None,
         "param_snapshot": None,
+        "break_even_price": None,
     }
     return state
 

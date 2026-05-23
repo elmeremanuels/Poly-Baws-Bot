@@ -19,6 +19,7 @@ exit:
   time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
   spread_avg_window: 60        # reserved for future spread averaging
   force_exit_seconds: 30       # market-sell with this many seconds left
+  hold_for_resolution_mid_threshold: 0.90  # if mid >= this at force_exit, hold to resolution instead of selling
 
 entry:
   max_combined_cost: 1.03      # YES ask + NO ask must be ≤ this
