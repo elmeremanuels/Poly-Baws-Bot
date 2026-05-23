@@ -210,17 +210,22 @@ async def _portfolio_sync_loop() -> None:
             total_pos_value = 0.0
             enriched = []
             for pos in positions:
-                token_id = pos.get("asset") or pos.get("token_id") or pos.get("market") or ""
-                size = float(pos.get("size") or pos.get("amount") or 0)
-                mid = ws_client.get_mid_price(token_id) if token_id else None
-                value = round(size * mid, 4) if (mid is not None and size) else None
+                token_id = pos.get("asset") or pos.get("positionId") or ""
+                size = float(pos.get("size") or 0)
+                cur_price = pos.get("curPrice")
+                cur_value = pos.get("currentValue")
+                pnl = pos.get("pnl")
+                value = float(cur_value) if cur_value is not None else None
                 total_pos_value += value or 0
                 enriched.append({
                     "token_id": token_id,
+                    "title": pos.get("title", ""),
+                    "outcome": pos.get("outcome", ""),
                     "size": size,
-                    "mid": mid,
-                    "value": value,
-                    "side": pos.get("side", ""),
+                    "avg_price": pos.get("avgPrice"),
+                    "cur_price": float(cur_price) if cur_price is not None else None,
+                    "value": round(value, 4) if value is not None else None,
+                    "pnl": round(float(pnl), 4) if pnl is not None else None,
                 })
 
             portfolio_value = (balance or 0.0) + total_pos_value

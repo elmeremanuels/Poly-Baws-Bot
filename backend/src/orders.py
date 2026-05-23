@@ -157,22 +157,41 @@ async def get_order(order_id: str) -> dict | None:
 
 
 async def get_open_positions() -> list[dict]:
+    """Fetch current token positions via Polymarket Data API (public, no auth needed)."""
     try:
+        import httpx as _httpx
         client = get_client()
-        resp = await _run_sync(client.get_positions)
-        return resp if isinstance(resp, list) else []
+        proxy = get_env("POLYMARKET_PROXY_ADDRESS")
+        address = proxy or (client.signer.address() if client.signer else None)
+        if not address:
+            return []
+        async with _httpx.AsyncClient(timeout=30) as http:
+            resp = await http.get(
+                "https://data-api.polymarket.com/positions",
+                params={"user": address, "sizeThreshold": "0.01"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
     except Exception as e:
         log.error("get_positions_failed", error=str(e))
         return []
 
 
 async def get_balance() -> float | None:
+    """Fetch USDC collateral balance via CLOB API."""
     try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         client = get_client()
-        resp = await _run_sync(client.get_balance_allowance)
-        # Returns USDC balance
-        bal = resp.get("balance") or resp.get("allowance")
-        return float(bal) / 1e6 if bal else None
+        proxy = get_env("POLYMARKET_PROXY_ADDRESS")
+        sig_type = 1 if proxy else 0
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=sig_type,
+        )
+        resp = await _run_sync(client.get_balance_allowance, params)
+        bal = resp.get("balance")
+        return float(bal) / 1e6 if bal is not None else None
     except Exception as e:
         log.error("get_balance_failed", error=str(e))
         return None

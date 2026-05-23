@@ -637,13 +637,14 @@ def _portfolio_panel() -> None:
     else:
         rows = []
         for pos in positions:
-            tid = pos.get("token_id", "")
             rows.append({
-                "Token": tid[:20] + "…" if len(tid) > 20 else tid,
-                "Grootte": pos.get("size", 0),
-                "Mid": f"{pos['mid']:.4f}" if pos.get("mid") is not None else "—",
-                "Waarde": f"${pos['value']:.4f}" if pos.get("value") is not None else "—",
-                "Side": pos.get("side", "—"),
+                "Markt": pos.get("title", pos.get("token_id", "")[:24]),
+                "Uitkomst": pos.get("outcome", "—"),
+                "Aandelen": pos.get("size", 0),
+                "Avg prijs": f"${pos['avg_price']:.4f}" if pos.get("avg_price") is not None else "—",
+                "Huidig": f"${pos['cur_price']:.4f}" if pos.get("cur_price") is not None else "—",
+                "Waarde": f"${pos['value']:.2f}" if pos.get("value") is not None else "—",
+                "P&L": f"${pos['pnl']:+.2f}" if pos.get("pnl") is not None else "—",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
