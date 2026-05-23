@@ -403,6 +403,29 @@ def save_manual_analysis_to_db(result: dict) -> None:
         )
 
 
+def get_portfolio_snapshot() -> dict:
+    """Read latest portfolio data from dashboard_state."""
+    def _f(v: str | None) -> float | None:
+        try:
+            return float(v) if v else None
+        except Exception:
+            return None
+
+    raw_pos = get_state("portfolio_positions")
+    try:
+        positions = json.loads(raw_pos) if raw_pos else []
+    except Exception:
+        positions = []
+
+    return {
+        "usdc": _f(get_state("portfolio_usdc")),
+        "value": _f(get_state("portfolio_value")),
+        "start_usdc": _f(get_state("portfolio_start_usdc")),
+        "positions": positions,
+        "updated_at": get_state("portfolio_updated_at"),
+    }
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():

@@ -20,6 +20,7 @@ from src.db_sync import (
     get_latest_manual_analysis,
     get_open_trades,
     get_phase_stats,
+    get_portfolio_snapshot,
     get_recent_events,
     get_recent_trades,
     get_scanner_alerts,
@@ -281,6 +282,19 @@ with st.sidebar:
     st.metric("Today's trades", total_trades)
 
     st.divider()
+
+    _pf = get_portfolio_snapshot()
+    if _pf["value"] is not None:
+        st.markdown("**Portfolio**")
+        st.metric("USDC", f"${_pf['usdc']:.2f}" if _pf["usdc"] is not None else "—")
+        st.metric("Totaal", f"${_pf['value']:.2f}")
+        if _pf["start_usdc"] is not None:
+            _pnl = (_pf["value"] or 0) - _pf["start_usdc"]
+            st.metric("P&L vs start", f"${_pnl:+.2f}")
+        if _pf["updated_at"]:
+            st.caption(f"Bijgewerkt: {fmt_time(_pf['updated_at'])}")
+        st.divider()
+
     st.caption("Auto-refreshes every 5s")
 
 
@@ -583,10 +597,81 @@ def _learning_panel() -> None:
         st.toast("Bot paused.", icon="⏸")
 
 
-tab_live, tab_analytics, tab_learning = st.tabs(["🔴 Live", "📊 Analytics", "🧠 Learning"])
+def _portfolio_panel() -> None:
+    pf = get_portfolio_snapshot()
+
+    if pf["value"] is None:
+        st.info("Portfolio data nog niet beschikbaar. Bot moet draaien om data op te halen (max 30s na start).")
+        return
+
+    updated = f" — bijgewerkt {fmt_time(pf['updated_at'])}" if pf["updated_at"] else ""
+    st.markdown(f"### 💼 Polymarket Portfolio{updated}")
+
+    usdc = pf["usdc"] or 0.0
+    value = pf["value"] or 0.0
+    start = pf["start_usdc"]
+    pos_value = value - usdc
+
+    c = st.columns(4)
+    c[0].metric("USDC (vrij)", f"${usdc:.2f}")
+    c[1].metric("Positiewaarde", f"${pos_value:.2f}")
+    c[2].metric("Totaal portfolio", f"${value:.2f}")
+    if start is not None:
+        pnl = value - start
+        c[3].metric("P&L vs start", f"${pnl:+.2f}", delta=f"{pnl/start*100:+.1f}%" if start else None)
+    else:
+        c[3].metric("Startkapitaal", "—")
+
+    if st.button("🔄 Reset startkapitaal naar huidig", key="pf_reset_start"):
+        write_command("reset_portfolio_start")
+        st.toast("Startkapitaal bijgewerkt.", icon="🔄")
+
+    st.divider()
+
+    # ── Open posities ──────────────────────────────────────────────────────────
+    positions = pf["positions"]
+    st.markdown(f"### Open posities ({len(positions)})")
+
+    if not positions:
+        st.caption("Geen open posities op Polymarket.")
+    else:
+        rows = []
+        for pos in positions:
+            tid = pos.get("token_id", "")
+            rows.append({
+                "Token": tid[:20] + "…" if len(tid) > 20 else tid,
+                "Grootte": pos.get("size", 0),
+                "Mid": f"{pos['mid']:.4f}" if pos.get("mid") is not None else "—",
+                "Waarde": f"${pos['value']:.4f}" if pos.get("value") is not None else "—",
+                "Side": pos.get("side", "—"),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Clear orphaned posities ────────────────────────────────────────────────
+    st.markdown("### 🧹 Wees Posities")
+    st.caption(
+        "Verkoopt alle Polymarket-posities die **niet** bij een actieve bot-trade horen. "
+        "Actieve trades worden afgemaakt. Posities die via held\\_for\\_resolution worden gehouden "
+        "worden WEL verkocht — check dit eerst."
+    )
+    col_cb, col_btn = st.columns([3, 1])
+    confirmed = col_cb.checkbox("Ik begrijp dit — verwijder wees-posities", key="pf_clear_confirm")
+    if col_btn.button("🧹 Clear", disabled=not confirmed, type="primary", key="pf_clear_btn"):
+        write_command("clear_orphaned_positions")
+        st.toast("Opdracht verstuurd — bot verkoopt wees-posities.", icon="🧹")
+        st.rerun()
+
+
+tab_live, tab_analytics, tab_learning, tab_portfolio = st.tabs(
+    ["🔴 Live", "📊 Analytics", "🧠 Learning", "💼 Portfolio"]
+)
 with tab_live:
     dashboard()
 with tab_analytics:
     analytics_panel()
 with tab_learning:
     _learning_panel()
+with tab_portfolio:
+    _portfolio_panel()

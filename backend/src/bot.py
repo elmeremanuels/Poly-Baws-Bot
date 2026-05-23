@@ -195,6 +195,54 @@ async def _heartbeat_loop() -> None:
         await asyncio.sleep(5)
 
 
+async def _portfolio_sync_loop() -> None:
+    """Sync Polymarket balance and open positions to dashboard_state every 30s."""
+    import json as _json
+    from . import orders as _orders
+    from .logger import load_dashboard_state
+
+    first_run = True
+    while True:
+        try:
+            balance = await _orders.get_balance()
+            positions = await _orders.get_open_positions()
+
+            total_pos_value = 0.0
+            enriched = []
+            for pos in positions:
+                token_id = pos.get("asset") or pos.get("token_id") or pos.get("market") or ""
+                size = float(pos.get("size") or pos.get("amount") or 0)
+                mid = ws_client.get_mid_price(token_id) if token_id else None
+                value = round(size * mid, 4) if (mid is not None and size) else None
+                total_pos_value += value or 0
+                enriched.append({
+                    "token_id": token_id,
+                    "size": size,
+                    "mid": mid,
+                    "value": value,
+                    "side": pos.get("side", ""),
+                })
+
+            portfolio_value = (balance or 0.0) + total_pos_value
+
+            if first_run:
+                start = await load_dashboard_state("portfolio_start_usdc")
+                if not start and balance is not None:
+                    await save_dashboard_state(
+                        "portfolio_start_usdc",
+                        str(round(balance + total_pos_value, 4)),
+                    )
+                first_run = False
+
+            await save_dashboard_state("portfolio_usdc", str(round(balance, 4)) if balance is not None else "")
+            await save_dashboard_state("portfolio_positions", _json.dumps(enriched))
+            await save_dashboard_state("portfolio_value", str(round(portfolio_value, 4)))
+            await save_dashboard_state("portfolio_updated_at", datetime.now(timezone.utc).isoformat())
+        except Exception as e:
+            log.warning("portfolio_sync_failed", error=str(e))
+        await asyncio.sleep(30)
+
+
 async def _learning_tick_loop() -> None:
     """Drive the learning orchestrator — ticks every 10s to check phase transitions."""
     from . import learning as _learning
@@ -228,6 +276,7 @@ async def run_bot() -> None:
         asyncio.create_task(scanner.scanner_loop(60)),
         asyncio.create_task(risk.risk_monitor_loop(get_active_count_by_coin)),
         asyncio.create_task(_heartbeat_loop()),
+        asyncio.create_task(_portfolio_sync_loop()),
     ]
     for coin in COINS:
         if CONFIG["coins"][coin]["enabled"]:

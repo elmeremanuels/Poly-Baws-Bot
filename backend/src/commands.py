@@ -179,5 +179,39 @@ async def _run_command(command: str, payload: dict) -> None:
             _learning.restore_learned_params()
         await save_dashboard_state("apply_learnings", "true" if enabled else "false")
 
+    elif command == "clear_orphaned_positions":
+        from . import orders as _orders
+        from .state import get_active_trades
+
+        active_tokens: set[str] = set()
+        for t in get_active_trades().values():
+            if t.get("condition_id_yes"):
+                active_tokens.add(t["condition_id_yes"])
+            if t.get("condition_id_no"):
+                active_tokens.add(t["condition_id_no"])
+
+        positions = await _orders.get_open_positions()
+        cleared = 0
+        for pos in positions:
+            token_id = pos.get("asset") or pos.get("token_id") or pos.get("market") or ""
+            size = float(pos.get("size") or pos.get("amount") or 0)
+            if not token_id or size <= 0:
+                continue
+            if token_id in active_tokens:
+                log.info("clear_orphaned_skip_active", token_id=token_id[:16])
+                continue
+            log.info("clear_orphaned_selling", token_id=token_id[:16], size=size)
+            await _orders.place_market_order(token_id, "SELL", size)
+            cleared += 1
+
+        log.info("clear_orphaned_done", cleared=cleared, active_protected=len(active_tokens))
+
+    elif command == "reset_portfolio_start":
+        from .logger import load_dashboard_state
+        current = await load_dashboard_state("portfolio_value")
+        if current:
+            await save_dashboard_state("portfolio_start_usdc", current)
+            log.info("portfolio_start_reset", value=current)
+
     else:
         log.warning("unknown_command", command=command)
