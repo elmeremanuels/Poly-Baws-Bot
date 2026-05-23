@@ -1,6 +1,5 @@
-"""Order placement, cancellation, and signing via py-clob-client."""
+"""Order placement, cancellation, and signing via py-clob-client-v2 (CLOB V2)."""
 import asyncio
-import os
 from typing import Any
 from functools import partial
 
@@ -13,41 +12,9 @@ CHAIN_ID = CONFIG["polymarket"]["chain_id"]
 _client = None
 
 
-def _force_requests_proxy() -> None:
-    """
-    py-clob-client creates requests.Session with trust_env=False, ignoring HTTP_PROXY/HTTPS_PROXY.
-    Patch Session.__init__ so every session inherits proxy from environment regardless.
-    """
-    proxy = (
-        os.environ.get("HTTPS_PROXY")
-        or os.environ.get("HTTP_PROXY")
-        or os.environ.get("ALL_PROXY")
-    )
-    if not proxy:
-        return
-    try:
-        import requests as _req
-        _orig = _req.Session.__init__
-
-        def _patched(self, *args, **kwargs):
-            _orig(self, *args, **kwargs)
-            self.proxies.update({"http": proxy, "https": proxy})
-            self.trust_env = True
-
-        _req.Session.__init__ = _patched
-        # Log host:port only, never credentials
-        host_port = proxy.rsplit("@", 1)[-1]
-        log.info("requests_proxy_forced", via=host_port)
-    except Exception as exc:
-        log.warning("requests_proxy_patch_failed", error=str(exc))
-
-
-_force_requests_proxy()
-
-
 def _build_client():
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import ApiCreds
+    from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import ApiCreds
 
     pk = get_env("POLYMARKET_PRIVATE_KEY")
     proxy = get_env("POLYMARKET_PROXY_ADDRESS")
@@ -75,7 +42,7 @@ def _build_client():
             signature_type=1 if proxy else 0,
             funder=proxy,
         )
-        creds = l1.create_or_derive_api_creds()
+        creds = l1.create_or_derive_api_key()
         log.info("clob_client_level2_derived")
 
     return ClobClient(
@@ -142,10 +109,10 @@ async def place_limit_order(
     price: float,
     size: float,
 ) -> dict | None:
-    from py_clob_client.clob_types import OrderArgs, OrderType
+    from py_clob_client_v2.clob_types import OrderArgsV2, OrderType
     try:
         client = get_client()
-        order_args = OrderArgs(
+        order_args = OrderArgsV2(
             token_id=token_id,
             price=price,
             size=size,
@@ -162,13 +129,12 @@ async def place_limit_order(
 
 
 async def place_market_order(token_id: str, side: str, size: float) -> dict | None:
-    from py_clob_client.clob_types import OrderArgs, OrderType
+    from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
     try:
         client = get_client()
-        order_args = OrderArgs(
+        order_args = MarketOrderArgsV2(
             token_id=token_id,
-            price=None,
-            size=size,
+            amount=size,
             side=side,
         )
         signed = await _run_sync(client.create_market_order, order_args)
@@ -182,9 +148,10 @@ async def place_market_order(token_id: str, side: str, size: float) -> dict | No
 
 
 async def cancel_order(order_id: str) -> bool:
+    from py_clob_client_v2.clob_types import OrderPayload
     try:
         client = get_client()
-        resp = await _run_sync(client.cancel, order_id)
+        resp = await _run_sync(client.cancel_order, OrderPayload(orderID=order_id))
         log.info("order_cancelled", order_id=order_id)
         return True
     except Exception as e:
