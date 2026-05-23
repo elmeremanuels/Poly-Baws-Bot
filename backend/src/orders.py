@@ -21,14 +21,38 @@ def _build_client():
     if not pk:
         raise RuntimeError("POLYMARKET_PRIVATE_KEY not set")
 
-    client = ClobClient(
+    # Prefer explicit API credentials from environment
+    api_key = get_env("POLYMARKET_API_KEY")
+    api_secret = get_env("POLYMARKET_API_SECRET")
+    api_passphrase = get_env("POLYMARKET_API_PASSPHRASE")
+
+    if api_key and api_secret and api_passphrase:
+        creds = ApiCreds(
+            api_key=api_key,
+            api_secret=api_secret,
+            api_passphrase=api_passphrase,
+        )
+        log.info("clob_client_level2_explicit")
+    else:
+        # Derive Level 2 credentials from the private key (deterministic, no manual setup needed)
+        l1 = ClobClient(
+            host=CLOB_REST,
+            chain_id=CHAIN_ID,
+            key=pk,
+            signature_type=1 if proxy else 0,
+            funder=proxy,
+        )
+        creds = l1.create_or_derive_api_creds()
+        log.info("clob_client_level2_derived")
+
+    return ClobClient(
         host=CLOB_REST,
         chain_id=CHAIN_ID,
         key=pk,
-        signature_type=1 if proxy else 0,
+        signature_type=2,
         funder=proxy,
+        creds=creds,
     )
-    return client
 
 
 def get_client():
