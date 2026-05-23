@@ -36,6 +36,17 @@ async def _run() -> None:
         except ValueError:
             pass
 
+    for coin in list(CONFIG["coins"].keys()):
+        saved_max = await load_dashboard_state(f"coin_{coin}_max")
+        if saved_max:
+            try:
+                CONFIG["coins"][coin]["max_parallel_positions"] = int(saved_max)
+            except ValueError:
+                pass
+        saved_enabled = await load_dashboard_state(f"coin_{coin}_enabled")
+        if saved_enabled is not None:
+            CONFIG["coins"][coin]["enabled"] = saved_enabled.lower() == "true"
+
     if await load_dashboard_state("apply_learnings") == "true":
         from . import learning as _learning
         ok = await _learning.load_and_apply_latest_params()

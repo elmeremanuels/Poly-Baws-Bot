@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from . import fill_tracker, orders, paper_trader, ws_client
+from . import fill_tracker, orders, paper_trader, volatility as _vol, ws_client
 from .config_loader import CONFIG
 from .logger import log, write_event, update_trade
 from .state import (
@@ -291,6 +291,15 @@ def _add_winner_fees(trade_id: str, fees: float) -> None:
 
 # ── Peg-Cross Exit Engine ─────────────────────────────────────────────────────
 
+def crossing_cost(mid: float, spread: float, size: float) -> float:
+    """Cost (€) of converting a resting limit sell to a market sell.
+    Includes taker fee + selling at bid instead of mid."""
+    bid = max(0.01, mid - spread / 2)
+    taker = bid * paper_trader.taker_fee_rate(bid) * size
+    spread_loss = (spread / 2) * size
+    return taker + spread_loss
+
+
 def compute_cross_score(
     mid: float,
     peak_mid: float,
@@ -299,22 +308,29 @@ def compute_cross_score(
     best_ask: float | None,
     seconds_left: float,
     cfg: dict,
-) -> float:
+    size: float = 2.0,
+    velocity: float = 0.0,
+) -> tuple[float, str]:
     """
-    Returns 0–1 score; when score ≥ cross_threshold the bot converts the
-    resting limit to a market sell ("peg_cross").
+    Returns (score 0–1, dominant_reason). score ≥ cross_threshold → market sell.
 
     Components:
-      0.35 time_urgency    — increases as window end approaches
-      0.25 spread_tightness — tight spread = cheap to cross
-      0.25 mid_decay       — mid dropped from peak → momentum reversed
-      0.15 fill_unlikely   — limit above best ask → passive fill impossible
+      0.30 time_urgency         — rises as window end approaches
+      0.30 fee_adjusted         — expected peg loss vs €0.11 crossing cost
+      0.25 mid_decay            — mid dropped from peak → momentum reversed
+      0.15 fill_unlikely        — limit above best ask → passive fill impossible
     """
     urgency_window = cfg.get("time_urgency_window", 120)
     time_urgency = max(0.0, min(1.0, 1.0 - seconds_left / urgency_window))
 
     spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else 0.06
-    spread_tightness = max(0.0, min(1.0, 1.0 - spread / 0.06))
+
+    if velocity < 0:
+        cost = crossing_cost(mid, spread, size)
+        expected_peg_loss = abs(velocity) * min(seconds_left, 60) * size
+        fee_adjusted = min(1.0, min(2.0, expected_peg_loss / max(0.001, cost)) / 2.0)
+    else:
+        fee_adjusted = 0.0
 
     decay = max(0.0, peak_mid - mid)
     mid_decay = min(1.0, decay / 0.03)
@@ -324,13 +340,21 @@ def compute_cross_score(
     else:
         fill_unlikely = 1.0
 
-    return round(
-        0.35 * time_urgency
-        + 0.25 * spread_tightness
+    score = round(
+        0.30 * time_urgency
+        + 0.30 * fee_adjusted
         + 0.25 * mid_decay
         + 0.15 * fill_unlikely,
         4,
     )
+    components = {
+        "time_urgency": time_urgency,
+        "fee_loss_vs_crossing_cost": fee_adjusted,
+        "mid_decay": mid_decay,
+        "fill_unlikely": fill_unlikely,
+    }
+    reason = max(components, key=components.get)
+    return score, reason
 
 
 def get_exit_phase(seconds_left: float) -> str:
@@ -422,7 +446,11 @@ async def _winner_exit_paper(
             if mid > peak_mid:
                 peak_mid = mid
 
-            score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
+            vel = _vol.get_price_velocity(winner_token)
+            score, reason = compute_cross_score(
+                mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
+                size=size, velocity=vel,
+            )
 
             if score >= params["cross_threshold"]:
                 # Don't market-sell a profitable position in patient/urgent phase;
@@ -435,7 +463,8 @@ async def _winner_exit_paper(
                     await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
                     _add_winner_fees(trade_id, result.get("fees", 0.0))
                     await write_event(trade_id, "peg_cross_triggered", coin, {
-                        "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                        "score": score, "reason": reason, "phase": phase,
+                        "mid": mid, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
                     })
                     await _close_trade(trade_id, result.get("fill_price"), "peg_cross", broadcast_fn)
                     return
@@ -524,7 +553,11 @@ async def _winner_exit_live(
             if mid > peak_mid:
                 peak_mid = mid
 
-            score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
+            vel = _vol.get_price_velocity(winner_token)
+            score, reason = compute_cross_score(
+                mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
+                size=size, velocity=vel,
+            )
 
             if score >= params["cross_threshold"]:
                 if break_even_price and mid > break_even_price and phase != "force":
@@ -536,7 +569,8 @@ async def _winner_exit_live(
                     await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
                     _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
                     await write_event(trade_id, "peg_cross_triggered", coin, {
-                        "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                        "score": score, "reason": reason, "phase": phase,
+                        "mid": mid, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
                     })
                     await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
                     return
