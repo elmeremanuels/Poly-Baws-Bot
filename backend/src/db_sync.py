@@ -268,3 +268,96 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dic
             params,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Learning cycles ───────────────────────────────────────────────────────────
+
+def get_current_cycle() -> dict | None:
+    """Return the active (not ended) learning cycle, or None."""
+    if not _db_path.exists():
+        return None
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM learning_cycles WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def get_phase_stats(cycle_id: int, phase: str) -> dict:
+    """Aggregated stats for a specific phase of a cycle."""
+    if not _db_path.exists():
+        return {}
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT
+                COUNT(*) as trades,
+                SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END) as triggered,
+                ROUND(AVG(CASE WHEN trigger_hit=1 AND net_pnl IS NOT NULL
+                    THEN net_pnl END), 4) as avg_pnl,
+                ROUND(SUM(CASE WHEN net_pnl IS NOT NULL THEN net_pnl ELSE 0 END), 4) as total_pnl,
+                ROUND(SUM(CASE WHEN trigger_hit=1 AND net_pnl > 0 THEN 1.0 ELSE 0.0 END)
+                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0) * 100, 1) as win_rate
+            FROM trades WHERE cycle_id=? AND phase=?""",
+            (cycle_id, phase),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def get_cycle_stats(cycle_id: int) -> dict:
+    """Full per-coin stats for a learning cycle, used for Claude analysis prompt."""
+    if not _db_path.exists():
+        return {}
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT coin,
+                COUNT(*) as trades,
+                SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END) as triggered,
+                ROUND(SUM(CASE WHEN trigger_hit=1 AND net_pnl > 0 THEN 1.0 ELSE 0.0 END)
+                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0) * 100, 1) as win_rate,
+                ROUND(AVG(CASE WHEN trigger_hit=1 AND net_pnl IS NOT NULL
+                    THEN net_pnl END), 4) as avg_pnl,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN peak_bid END), 4) as avg_peak_bid,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN mid_at_trigger END), 4) as avg_mid_at_trigger,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN spread_at_trigger END), 4) as avg_spread_at_trigger,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN time_in_trail_seconds END), 1) as avg_trail_time,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN ratchet_count END), 1) as avg_ratchets,
+                ROUND(AVG(entry_yes_price + entry_no_price), 4) as avg_entry_cost,
+                ROUND(SUM(CASE WHEN winner_exit_reason='peg_cross' AND trigger_hit=1
+                    THEN 1.0 ELSE 0.0 END)
+                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0), 2) as peg_cross_rate,
+                ROUND(SUM(CASE WHEN winner_exit_reason='limit_filled' AND trigger_hit=1
+                    THEN 1.0 ELSE 0.0 END)
+                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0), 2) as limit_filled_rate
+            FROM trades WHERE cycle_id=?
+            GROUP BY coin""",
+            (cycle_id,),
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*), ROUND(AVG(net_pnl),4) FROM trades WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()
+    per_coin = {dict(r)["coin"]: {k: v for k, v in dict(r).items() if k != "coin"} for r in rows}
+    return {
+        "per_coin": per_coin,
+        "total_trades": total[0] if total else 0,
+        "overall_avg_pnl": total[1] if total else None,
+    }
+
+
+def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
+    """Recent trades from a cycle for Claude's detailed log."""
+    if not _db_path.exists():
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT coin, mode, phase, trigger_hit, winner_exit_reason,
+                mid_at_trigger, spread_at_trigger, mid_velocity_at_trigger,
+                peak_bid, ratchet_count, time_in_trail_seconds,
+                entry_yes_price, entry_no_price, net_pnl, fees_paid
+               FROM trades WHERE cycle_id=? ORDER BY created_at DESC LIMIT ?""",
+            (cycle_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]

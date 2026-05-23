@@ -34,3 +34,21 @@ def get_realized_vol(asset_id: str) -> float | None:
     mean = sum(returns) / len(returns)
     var = sum((r - mean) ** 2 for r in returns) / len(returns)
     return math.sqrt(var)
+
+
+def get_price_velocity(asset_id: str, window_secs: float = 5.0) -> float | None:
+    """Price change rate in ¢/sec over the last window_secs seconds."""
+    samples = _prices.get(asset_id)
+    if not samples or len(samples) < 2:
+        return None
+    latest_ts, latest_price = samples[-1]
+    cutoff = latest_ts - window_secs
+    oldest = samples[0]
+    for s in samples:
+        if s[0] >= cutoff:
+            oldest = s
+            break
+    time_delta = latest_ts - oldest[0]
+    if time_delta <= 0:
+        return None
+    return (latest_price - oldest[1]) / time_delta

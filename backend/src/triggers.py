@@ -7,7 +7,7 @@ from .config_loader import CONFIG
 from .logger import log, write_event, update_trade
 from .state import (
     get_active_trades, update_trade_field, remove_active_trade,
-    persist_trade, is_paper_mode,
+    persist_trade, is_paper_mode, get_mode,
 )
 from .monitor import start_monitoring, stop_monitoring
 
@@ -38,7 +38,12 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     trade_size_eur = CONFIG["trading"].get("trade_size_eur", 1.0)
     size = round(trade_size_eur / ENTRY_PRICE, 2)
     update_trade_field(trade_id, "entry_size", size)
-    paper = is_paper_mode()
+    mode = get_mode()
+    if mode == "live_learning":
+        from . import learning as _learning
+        paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
+    else:
+        paper = is_paper_mode()
 
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
@@ -176,7 +181,12 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     if not trade:
         return
 
-    paper = is_paper_mode()
+    _mode = get_mode()
+    if _mode == "live_learning":
+        from . import learning as _learning
+        paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
+    else:
+        paper = is_paper_mode()
     coin = trade["coin"]
     yes_token = trade["condition_id_yes"]
     no_token = trade["condition_id_no"]

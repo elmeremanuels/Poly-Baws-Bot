@@ -115,6 +115,20 @@ CREATE TABLE IF NOT EXISTS fill_history (
     fill_price REAL,
     ts TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS learning_cycles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_number INTEGER NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'learn',
+    phase_started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    params_used TEXT,
+    claude_analysis TEXT,
+    claude_params TEXT,
+    confidence_score REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -153,6 +167,37 @@ async def init_db() -> None:
             "side TEXT, limit_price REAL, filled INTEGER DEFAULT 0, fill_price REAL, "
             "ts TEXT DEFAULT (datetime('now')))"
         )
+        await db.commit()
+        # Migration: new trade columns for learning mode
+        for col_name, col_type in [
+            ("mid_at_trigger", "REAL"),
+            ("spread_at_trigger", "REAL"),
+            ("mid_velocity_at_trigger", "REAL"),
+            ("yes_depth_at_trigger", "REAL"),
+            ("no_depth_at_trigger", "REAL"),
+            ("time_since_window_start", "REAL"),
+            ("phase", "TEXT DEFAULT 'manual'"),
+            ("cycle_id", "INTEGER"),
+            ("param_snapshot", "TEXT"),
+        ]:
+            if col_name not in existing:
+                await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+        # Migration: create learning_cycles table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS learning_cycles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_number INTEGER NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'learn',
+                phase_started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ended_at TEXT,
+                params_used TEXT,
+                claude_analysis TEXT,
+                claude_params TEXT,
+                confidence_score REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         await db.commit()
     log.info("database_initialized", path=str(_db_path))
 

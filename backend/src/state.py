@@ -20,7 +20,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str) -> None:
     global _mode
-    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto"}
+    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning"}
     if mode not in valid:
         raise ValueError(f"Invalid mode: {mode}. Must be one of {valid}")
     _mode = mode
@@ -98,6 +98,15 @@ def create_trade_state(
         "peak_bid": None,
         "ratchet_count": 0,
         "time_in_trail_seconds": None,
+        "mid_at_trigger": None,
+        "spread_at_trigger": None,
+        "mid_velocity_at_trigger": None,
+        "yes_depth_at_trigger": None,
+        "no_depth_at_trigger": None,
+        "time_since_window_start": None,
+        "phase": "manual",
+        "cycle_id": None,
+        "param_snapshot": None,
     }
     return state
 
@@ -138,6 +147,9 @@ async def persist_trade(trade_id: str) -> None:
         "loser_exit_price", "loser_exit_ts", "winner_exit_price", "winner_exit_ts",
         "winner_exit_reason", "fees_paid", "gross_pnl", "net_pnl", "status", "notes",
         "peak_bid", "ratchet_count", "time_in_trail_seconds",
+        "mid_at_trigger", "spread_at_trigger", "mid_velocity_at_trigger",
+        "yes_depth_at_trigger", "no_depth_at_trigger", "time_since_window_start",
+        "phase", "cycle_id", "param_snapshot",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)

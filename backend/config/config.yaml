@@ -66,6 +66,20 @@ polymarket:
   gamma_url: "https://gamma-api.polymarket.com"
   chain_id: 137
 
+learning:
+  min_trades_per_coin: 50      # minimum paper trades per coin before analysis
+  max_learn_hours: 4
+  max_live_trades: 30
+  max_live_hours: 2
+  max_live_loss: 5.00          # EUR emergency stop for live phase
+  min_validate_trades: 30
+  max_validate_hours: 2
+  confidence_threshold: 0.60
+
+claude:
+  model: "claude-sonnet-4-6"
+  max_tokens: 4096
+
 dashboard:
   host: "0.0.0.0"
   port: 8000

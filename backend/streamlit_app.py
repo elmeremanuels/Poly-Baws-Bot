@@ -12,9 +12,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config_loader import CONFIG
 from src.db_sync import (
     get_bot_heartbeat_age,
+    get_current_cycle,
     get_daily_pnl,
     get_hybrid_pending,
     get_open_trades,
+    get_phase_stats,
     get_recent_events,
     get_recent_trades,
     get_scanner_alerts,
@@ -28,7 +30,7 @@ from analytics_tab import analytics_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto"]
+MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning"]
 
 st.set_page_config(
     page_title="Poly-Baws-Bot",
@@ -442,8 +444,90 @@ def _event_log() -> None:
             st.caption("No events.")
 
 
-tab_live, tab_analytics = st.tabs(["🔴 Live", "📊 Analytics"])
+def _learning_panel() -> None:
+    cycle = get_current_cycle()
+
+    if not cycle:
+        st.info("Learning mode is not active. Set mode to **live_learning** to start.")
+        if st.button("Start Learning Mode"):
+            write_command("set_mode", {"mode": "live_learning"})
+            st.rerun()
+        return
+
+    phase = cycle.get("phase", "?")
+    phase_emoji = {"learn": "📚", "analyze": "🧠", "deploy": "🚀", "validate": "🔍"}
+    phase_color = {"learn": "🟡", "analyze": "🔵", "deploy": "🟢", "validate": "🟠"}
+
+    st.markdown(f"### {phase_color.get(phase, '⚪')} Learning Cycle #{cycle.get('cycle_number', '?')}")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Phase", f"{phase_emoji.get(phase, '⚪')} {phase.upper()}")
+    col2.metric("Cycle #", cycle.get("cycle_number", "?"))
+    started = (cycle.get("phase_started_at") or "")[:16]
+    col3.metric("Phase started", started or "—")
+    conf = cycle.get("confidence_score")
+    col4.metric("Last confidence", f"{conf*100:.0f}%" if conf is not None else "—")
+
+    # Phase stats
+    cycle_id = cycle.get("id")
+    if cycle_id:
+        for ph, label in [("learn", "📚 Learn"), ("deploy", "🚀 Deploy"), ("validate", "🔍 Validate")]:
+            stats = get_phase_stats(cycle_id, ph)
+            if stats and stats.get("trades", 0) > 0:
+                with st.expander(f"{label} phase stats ({stats.get('trades', 0)} trades)"):
+                    cs = st.columns(4)
+                    cs[0].metric("Trades", stats.get("trades", 0))
+                    cs[1].metric("Triggered", stats.get("triggered", 0))
+                    wr = stats.get("win_rate")
+                    cs[2].metric("Win Rate", f"{wr:.1f}%" if wr is not None else "—")
+                    pnl = stats.get("total_pnl")
+                    cs[3].metric("Total P&L", f"€{pnl:+.2f}" if pnl is not None else "—")
+
+    # Claude's analysis
+    if cycle.get("claude_analysis"):
+        with st.expander("Claude's latest reasoning"):
+            st.markdown(cycle["claude_analysis"][:3000])
+
+    # Active Claude params
+    if cycle.get("claude_params"):
+        try:
+            params = json.loads(cycle["claude_params"])
+            coin_p = params.get("coin_params", {})
+            if coin_p:
+                with st.expander("Active Claude parameters"):
+                    rows = []
+                    for coin, cp in coin_p.items():
+                        rows.append({
+                            "Coin": coin,
+                            "Trigger": cp.get("trigger_threshold", "—"),
+                            "Cross": cp.get("cross_threshold", "—"),
+                            "Offset": cp.get("initial_offset", "—"),
+                            "Buffer": cp.get("ratchet_buffer", "—"),
+                            "Enabled": cp.get("enabled", True),
+                        })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+    # Control buttons
+    st.markdown("---")
+    st.markdown("**Manual controls**")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Force next phase", use_container_width=True):
+        write_command("force_next_phase")
+        st.toast("Phase transition requested.", icon="⏭")
+    if c2.button("Reset cycle", use_container_width=True):
+        write_command("reset_learning_cycle")
+        st.toast("Cycle reset requested.", icon="🔄")
+    if c3.button("Pause learning", use_container_width=True):
+        write_command("kill")
+        st.toast("Bot paused.", icon="⏸")
+
+
+tab_live, tab_analytics, tab_learning = st.tabs(["🔴 Live", "📊 Analytics", "🧠 Learning"])
 with tab_live:
     dashboard()
 with tab_analytics:
     analytics_panel()
+with tab_learning:
+    _learning_panel()

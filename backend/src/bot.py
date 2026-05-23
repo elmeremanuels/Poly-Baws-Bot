@@ -13,6 +13,21 @@ from .state import (
 from .triggers import execute_entry
 from .commands import write_hybrid_pending, delete_hybrid_pending
 
+
+def _effective_is_auto(mode: str) -> bool:
+    """Live learning mode is always auto-triggered."""
+    if mode == "live_learning":
+        return True
+    return is_auto_mode()
+
+
+def _effective_is_paper(mode: str) -> bool:
+    """In live learning mode, paper/live depends on current phase."""
+    if mode == "live_learning":
+        from . import learning as _learning
+        return _learning.get_orchestrator().get_trading_mode().startswith("paper")
+    return is_paper_mode()
+
 COINS = list(CONFIG["coins"].keys())
 _pending_hybrid_triggers: dict[str, asyncio.Event] = {}  # market_id -> Event
 
@@ -60,6 +75,15 @@ async def trigger_hybrid_entry(market_id: str) -> bool:
 
 
 async def _process_coin_window(coin: str, market: dict) -> None:
+    mode = get_mode()
+
+    # Skip new entries during live_learning analysis phase
+    if mode == "live_learning":
+        from . import learning as _learning
+        if _learning.is_analyzing():
+            log.info("entry_skipped_analyzing", coin=coin)
+            return
+
     active_counts = get_active_count_by_coin()
     ok, reason = await risk.pre_trade_checks(coin, active_counts)
     if not ok:
@@ -70,12 +94,25 @@ async def _process_coin_window(coin: str, market: dict) -> None:
     if has_traded_window(coin, window_ts):
         return
 
-    mode = get_mode()
     trade = create_trade_state(coin, market, mode, triggered_by="bot")
+
+    # Stamp trade with current learning cycle info
+    if mode == "live_learning":
+        from . import learning as _learning
+        import json as _json
+        trade["cycle_id"] = _learning.get_current_cycle_id()
+        trade["phase"] = _learning.get_current_phase()
+        coin_cfg = CONFIG["coins"].get(coin, {})
+        trade["param_snapshot"] = _json.dumps({
+            "trigger_threshold": coin_cfg.get("trigger_threshold", CONFIG["trading"]["trigger_threshold"]),
+            "cross_threshold": CONFIG.get("exit", {}).get("cross_threshold"),
+            "initial_offset": CONFIG.get("exit", {}).get("initial_offset"),
+        })
+
     add_active_trade(trade)
     trade_id = trade["trade_id"]
 
-    if not is_auto_mode():
+    if not _effective_is_auto(mode):
         market_id = market.get("market_id") or market.get("condition_id")
         evt = asyncio.Event()
         _pending_hybrid_triggers[market_id] = evt
@@ -148,6 +185,19 @@ async def _heartbeat_loop() -> None:
         await asyncio.sleep(5)
 
 
+async def _learning_tick_loop() -> None:
+    """Drive the learning orchestrator — ticks every 10s to check phase transitions."""
+    from . import learning as _learning
+    orch = _learning.get_orchestrator()
+    await orch.start()
+    while True:
+        try:
+            await orch.tick()
+        except Exception as e:
+            log.error("learning_tick_error", error=str(e))
+        await asyncio.sleep(10)
+
+
 async def run_bot() -> None:
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
@@ -172,5 +222,8 @@ async def run_bot() -> None:
     for coin in COINS:
         if CONFIG["coins"][coin]["enabled"]:
             tasks.append(asyncio.create_task(_coin_loop(coin)))
+
+    if get_mode() == "live_learning":
+        tasks.append(asyncio.create_task(_learning_tick_loop()))
 
     await asyncio.gather(*tasks)

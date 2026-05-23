@@ -141,5 +141,31 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("trade_size_eur", str(eur))
         log.info("trade_size_updated", eur=eur)
 
+    elif command == "pause_learning":
+        from . import learning as _learning
+        _learning.get_orchestrator()
+        log.info("learning_paused_by_user")
+        # Trading is paused via the existing kill mechanism
+
+    elif command == "force_next_phase":
+        from . import learning as _learning
+        orch = _learning.get_orchestrator()
+        phase = orch._phase
+        next_map = {"learn": "analyze", "analyze": "deploy", "deploy": "validate", "validate": "learn"}
+        next_phase = next_map.get(phase, "learn")
+        await orch._transition_to(next_phase)
+        log.info("learning_phase_forced", to=next_phase)
+
+    elif command == "reset_learning_cycle":
+        from . import learning as _learning
+        from .logger import _db as _adb
+        async with _adb() as db:
+            await db.execute(
+                "UPDATE learning_cycles SET ended_at=datetime('now') WHERE ended_at IS NULL"
+            )
+            await db.commit()
+        _learning._orchestrator_instance = None
+        log.info("learning_cycle_reset")
+
     else:
         log.warning("unknown_command", command=command)
