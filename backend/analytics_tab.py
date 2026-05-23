@@ -51,6 +51,9 @@ def analytics_panel() -> None:
                 "trades_export.csv", "text/csv", key="an_csv",
             )
 
+    # ── Claude Analysis (always visible, even without trades) ─────────────────
+    _claude_analysis_section(df, coin_filter, days)
+
     if df.empty:
         st.info("No completed triggered trades in this period.")
         return
@@ -76,9 +79,6 @@ def analytics_panel() -> None:
 
     # ── Full Trade History ────────────────────────────────────────────────────
     _trade_history(df)
-
-    # ── Claude Analysis ───────────────────────────────────────────────────────
-    _claude_analysis_section(df, coin_filter, days)
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
