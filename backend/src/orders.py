@@ -179,19 +179,27 @@ async def get_open_positions() -> list[dict]:
 
 
 async def get_balance() -> float | None:
-    """Fetch USDC collateral balance via CLOB API."""
+    """Get USDC balance on Polygon via public RPC — no CLOB Level 2 auth needed."""
     try:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        client = get_client()
+        import httpx as _httpx
+        from eth_account import Account
         proxy = get_env("POLYMARKET_PROXY_ADDRESS")
-        sig_type = 1 if proxy else 0
-        params = BalanceAllowanceParams(
-            asset_type=AssetType.COLLATERAL,
-            signature_type=sig_type,
-        )
-        resp = await _run_sync(client.get_balance_allowance, params)
-        bal = resp.get("balance")
-        return float(bal) / 1e6 if bal is not None else None
+        if proxy:
+            address = proxy
+        else:
+            pk = get_env("POLYMARKET_PRIVATE_KEY")
+            address = Account.from_key(pk).address
+        usdc = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        # balanceOf(address) selector
+        data = "0x70a08231" + "000000000000000000000000" + address[2:].lower()
+        async with _httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                "https://polygon-rpc.com",
+                json={"jsonrpc": "2.0", "method": "eth_call",
+                      "params": [{"to": usdc, "data": data}, "latest"], "id": 1},
+            )
+            result = resp.json().get("result", "0x0") or "0x0"
+            return int(result, 16) / 1e6
     except Exception as e:
         log.error("get_balance_failed", error=str(e))
         return None
