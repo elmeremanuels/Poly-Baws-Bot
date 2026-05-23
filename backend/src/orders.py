@@ -20,13 +20,14 @@ def _sig_type(proxy: str | None) -> int:
       1 = POLY_PROXY     (email/Magic login deposit wallet)
       2 = POLY_GNOSIS_SAFE (browser-wallet / MetaMask login deposit wallet)
 
-    Override via POLYMARKET_SIGNATURE_TYPE. Default: 2 when a proxy is set
-    (browser-wallet deposit wallets are Gnosis Safes), else 0.
+    Override via POLYMARKET_SIGNATURE_TYPE. Default: 1 when a proxy is set
+    (email/Magic POLY_PROXY is the most common deposit wallet); Gnosis Safe
+    users must set POLYMARKET_SIGNATURE_TYPE=2 explicitly. Else 0 (bare EOA).
     """
     explicit = get_env("POLYMARKET_SIGNATURE_TYPE")
     if explicit is not None and explicit.strip() != "":
         return int(explicit)
-    return 2 if proxy else 0
+    return 1 if proxy else 0
 
 
 def _build_client():
