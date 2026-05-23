@@ -3,6 +3,7 @@ import json
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -169,11 +170,21 @@ def _coin_status(coin: str, open_trades: list[dict], online: bool = True) -> tup
         return "chip-wait", label
 
 
+_LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
+
+
+def _to_local(iso: str) -> datetime:
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_LOCAL_TZ)
+
+
 def fmt_time(iso: str | None) -> str:
     if not iso:
         return "—"
     try:
-        return datetime.fromisoformat(iso).strftime("%H:%M")
+        return _to_local(iso).strftime("%H:%M")
     except Exception:
         return iso[:16]
 
@@ -309,7 +320,7 @@ def _scanner_alerts() -> None:
         reason = data.get("reason", "unknown")
         st.markdown(
             f'<div class="alert-banner">🔴 <b>SCANNER ALERT</b> — {coin}: {reason}'
-            f' <span style="color:#7f1d1d;float:right">{ts_str[:19]}</span></div>',
+            f' <span style="color:#7f1d1d;float:right">{_to_local(ts_str).strftime("%Y-%m-%d %H:%M:%S") if ts_str else ""}</span></div>',
             unsafe_allow_html=True,
         )
         shown += 1
@@ -452,7 +463,7 @@ def _event_log() -> None:
         rows = []
         for e in events[:100]:
             rows.append({
-                "Time": (e.get("ts") or "")[:19],
+                "Time": _to_local(e["ts"]).strftime("%Y-%m-%d %H:%M:%S") if e.get("ts") else "—",
                 "Type": e.get("event_type", ""),
                 "Coin": e.get("coin") or "—",
                 "Data": (e.get("data") or "")[:120],
@@ -482,8 +493,9 @@ def _learning_panel() -> None:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Phase", f"{phase_emoji.get(phase, '⚪')} {phase.upper()}")
     col2.metric("Cycle #", cycle.get("cycle_number", "?"))
-    started = (cycle.get("phase_started_at") or "")[:16]
-    col3.metric("Phase started", started or "—")
+    _ps = cycle.get("phase_started_at") or ""
+    started = _to_local(_ps).strftime("%d-%m %H:%M") if _ps else "—"
+    col3.metric("Phase started", started)
     conf = cycle.get("confidence_score")
     col4.metric("Last confidence", f"{conf*100:.0f}%" if conf is not None else "—")
 
