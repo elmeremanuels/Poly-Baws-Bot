@@ -272,13 +272,13 @@ async def get_daily_pnl(coin: str | None = None) -> float:
     async with _db() as db:
         if coin:
             async with db.execute(
-                "SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE date(created_at) = ? AND coin = ? AND status = 'closed'",
+                "SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE date(created_at) = ? AND coin = ? AND status IN ('closed', 'resolved')",
                 (today, coin),
             ) as cursor:
                 row = await cursor.fetchone()
         else:
             async with db.execute(
-                "SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE date(created_at) = ? AND status = 'closed'",
+                "SELECT COALESCE(SUM(net_pnl), 0) FROM trades WHERE date(created_at) = ? AND status IN ('closed', 'resolved')",
                 (today,),
             ) as cursor:
                 row = await cursor.fetchone()

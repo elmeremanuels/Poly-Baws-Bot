@@ -48,12 +48,12 @@ def get_daily_pnl(coin: str | None = None) -> float:
     with _conn() as conn:
         if coin:
             row = conn.execute(
-                "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE date(created_at)=? AND coin=? AND status='closed'",
+                "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE date(created_at)=? AND coin=? AND status IN ('closed','resolved')",
                 (today, coin),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE date(created_at)=? AND status='closed'",
+                "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE date(created_at)=? AND status IN ('closed','resolved')",
                 (today,),
             ).fetchone()
     return float(row[0]) if row else 0.0
@@ -183,7 +183,7 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> l
     """Aggregate stats grouped by winner_exit_reason."""
     if not _db_path.exists():
         return []
-    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -215,7 +215,7 @@ def get_coin_comparison(days: int | None = None) -> list[dict]:
     """Per-coin aggregated stats for closed triggered trades."""
     if not _db_path.exists():
         return []
-    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
     params: list = []
     if days:
         conditions.append("created_at >= datetime('now', ?)")
@@ -245,7 +245,7 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dic
     """Average P&L by hour of day (UTC)."""
     if not _db_path.exists():
         return []
-    conditions = ["status = 'closed'", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
