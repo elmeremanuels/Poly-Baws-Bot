@@ -78,10 +78,13 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
                         yes_filled=yes_result["filled"], no_filled=no_result["filled"],
                         yes_ask=yes_ask, no_ask=no_ask)
     else:
-        # Live: place both simultaneously
+        # Live: place at current best ask so the order crosses immediately (taker fill).
+        # _should_enter already validated combined ask ≤ max_combined_cost and spread ≤ max_token_spread.
+        yes_ask = round(ws_client.get_best_ask(yes_token) or ENTRY_PRICE, 2)
+        no_ask = round(ws_client.get_best_ask(no_token) or ENTRY_PRICE, 2)
         yes_resp, no_resp = await asyncio.gather(
-            orders.place_limit_order(yes_token, "BUY", ENTRY_PRICE, size),
-            orders.place_limit_order(no_token, "BUY", ENTRY_PRICE, size),
+            orders.place_limit_order(yes_token, "BUY", yes_ask, size),
+            orders.place_limit_order(no_token, "BUY", no_ask, size),
         )
         if yes_resp:
             update_trade_field(trade_id, "yes_order_id", yes_resp["order_id"])
@@ -147,6 +150,12 @@ async def _handle_fill_results(
     elif no_filled and not yes_filled:
         await _abort_partial(trade_id, "NO", no_result, paper)
     else:
+        # Cancel any resting orders on Polymarket before abandoning
+        if not paper:
+            for oid_field in ("yes_order_id", "no_order_id"):
+                oid = trade.get(oid_field)
+                if oid:
+                    await orders.cancel_order(oid)
         update_trade_field(trade_id, "status", "aborted")
         update_trade_field(trade_id, "notes", "no_fills_at_cutoff")
         await persist_trade(trade_id)
