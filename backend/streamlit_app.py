@@ -15,6 +15,7 @@ from src.db_sync import (
     get_current_cycle,
     get_daily_pnl,
     get_hybrid_pending,
+    get_latest_completed_cycle,
     get_open_trades,
     get_phase_stats,
     get_recent_events,
@@ -191,6 +192,24 @@ with st.sidebar:
     if new_mode != mode:
         write_command("set_mode", {"mode": new_mode})
         st.rerun()
+
+    if mode == "live_auto":
+        completed = get_latest_completed_cycle()
+        if completed:
+            conf = completed.get("confidence_score")
+            cycle_num = completed.get("cycle_number", "?")
+            label = (
+                f"Apply learnings  \n"
+                f"_Cycle #{cycle_num}"
+                + (f", {conf*100:.0f}% confidence_" if conf is not None else "_")
+            )
+            apply_active = get_state("apply_learnings") == "true"
+            apply_new = st.toggle(label, value=apply_active, key="apply_learnings_toggle")
+            if apply_new != apply_active:
+                write_command("toggle_learned_params", {"enabled": apply_new})
+                st.rerun()
+        else:
+            st.caption("_Geen learnings beschikbaar — voer eerst live\\_learning uit._")
 
     if mode.startswith("paper"):
         confirmed = st.checkbox("Bevestig reset", key="reset_confirm")

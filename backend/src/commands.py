@@ -167,5 +167,17 @@ async def _run_command(command: str, payload: dict) -> None:
         _learning._orchestrator_instance = None
         log.info("learning_cycle_reset")
 
+    elif command == "toggle_learned_params":
+        from . import learning as _learning
+        enabled = payload.get("enabled", False)
+        if enabled:
+            ok = await _learning.load_and_apply_latest_params()
+            if not ok:
+                log.warning("toggle_learned_params_no_data",
+                            hint="Run live_learning first to generate a completed cycle.")
+        else:
+            _learning.restore_learned_params()
+        await save_dashboard_state("apply_learnings", "true" if enabled else "false")
+
     else:
         log.warning("unknown_command", command=command)

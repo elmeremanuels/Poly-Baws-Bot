@@ -36,6 +36,12 @@ async def _run() -> None:
         except ValueError:
             pass
 
+    if await load_dashboard_state("apply_learnings") == "true":
+        from . import learning as _learning
+        ok = await _learning.load_and_apply_latest_params()
+        if not ok:
+            log.warning("startup_apply_learnings_no_data")
+
     log.info("startup_complete", mode=risk.get_kill_reason() or "ok")
 
     await asyncio.gather(

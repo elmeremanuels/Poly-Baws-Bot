@@ -286,6 +286,21 @@ def get_current_cycle() -> dict | None:
         return None
 
 
+def get_latest_completed_cycle() -> dict | None:
+    """Return the most recent completed cycle that has claude_params, for the apply-learnings toggle."""
+    if not _db_path.exists():
+        return None
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM learning_cycles WHERE ended_at IS NOT NULL AND claude_params IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
 def get_phase_stats(cycle_id: int, phase: str) -> dict:
     """Aggregated stats for a specific phase of a cycle."""
     if not _db_path.exists():

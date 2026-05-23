@@ -13,6 +13,9 @@ _current_cycle_id: Optional[int] = None
 _current_phase: str = "manual"
 _analyzing: bool = False
 
+# ── Apply-learnings state (used by live_auto + apply toggle) ─────────────────
+_applied_learned_params: dict = {}  # originals saved before applying
+
 
 def get_current_cycle_id() -> Optional[int]:
     return _current_cycle_id
@@ -346,6 +349,75 @@ class LearningOrchestrator:
             "exit": dict(CONFIG.get("exit", {})),
             "entry": dict(CONFIG.get("entry", {})),
         }
+
+
+# ── Apply-learnings helpers (used by live_auto + toggle) ─────────────────────
+
+async def load_and_apply_latest_params() -> bool:
+    """Load the most recent completed cycle's claude_params into CONFIG.
+    Saves original values so restore_learned_params() can undo the change.
+    Returns True when params were found and applied."""
+    global _applied_learned_params
+    async with _db() as db:
+        db.row_factory = __import__("aiosqlite").Row
+        async with db.execute(
+            "SELECT claude_params, confidence_score, cycle_number FROM learning_cycles "
+            "WHERE ended_at IS NOT NULL AND claude_params IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row["claude_params"]:
+        return False
+
+    params = json.loads(row["claude_params"])
+
+    # Snapshot current values before overwriting
+    _applied_learned_params = {
+        coin: {k: CONFIG["coins"][coin].get(k) for k in ("trigger_threshold", "enabled")}
+        for coin in CONFIG["coins"]
+    }
+    _applied_learned_params["__entry__"] = {
+        "max_combined_cost": CONFIG["entry"].get("max_combined_cost"),
+        "max_token_spread": CONFIG["entry"].get("max_token_spread"),
+    }
+
+    for coin, cp in params.get("coin_params", {}).items():
+        if coin not in CONFIG["coins"]:
+            continue
+        if "trigger_threshold" in cp:
+            CONFIG["coins"][coin]["trigger_threshold"] = float(cp["trigger_threshold"])
+        if "enabled" in cp:
+            CONFIG["coins"][coin]["enabled"] = bool(cp["enabled"])
+
+    gp = params.get("global_params", {})
+    if "max_entry_cost" in gp:
+        CONFIG["entry"]["max_combined_cost"] = float(gp["max_entry_cost"])
+    if "max_token_spread" in gp:
+        CONFIG["entry"]["max_token_spread"] = float(gp["max_token_spread"])
+
+    log.info("learned_params_applied",
+             cycle=int(row["cycle_number"]),
+             confidence=float(row["confidence_score"] or 0))
+    return True
+
+
+def restore_learned_params() -> None:
+    """Undo load_and_apply_latest_params — revert CONFIG to saved originals."""
+    global _applied_learned_params
+    for key, orig in _applied_learned_params.items():
+        if key == "__entry__":
+            for k, v in orig.items():
+                if v is not None:
+                    CONFIG["entry"][k] = v
+        elif key in CONFIG["coins"]:
+            for k, v in orig.items():
+                if v is not None:
+                    CONFIG["coins"][key][k] = v
+    _applied_learned_params = {}
+    log.info("learned_params_restored")
+
+
+def learned_params_active() -> bool:
+    return bool(_applied_learned_params)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
