@@ -63,7 +63,25 @@ async def _close_stale_recovered_trades() -> None:
 
         window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc)
         if now < window_end_dt:
-            continue  # Window still open — normal monitoring loop will handle it
+            # Window still open — resume the appropriate loop instead of leaving it as a zombie.
+            if status == "monitoring":
+                from .monitor import start_monitoring as _sm
+                from .triggers import on_trigger as _on_trigger
+                log.info("recovery_resuming_monitoring", trade_id=trade_id,
+                         seconds_left=round((window_end_dt - now).total_seconds()))
+                await _sm(trade_id, lambda tid, w, p: _on_trigger(tid, w, p, None))
+            elif status == "exiting":
+                # Exit order ID was lost on restart; settle as resolution (both tokens held → $1).
+                log.info("recovery_closing_exiting_open_window", trade_id=trade_id)
+                await _close_trade(trade_id, 1.0, "resolution_recovery_open_window", None)
+            else:
+                # entry_placed / pending — entry was mid-flight when bot died; abort.
+                update_trade_field(trade_id, "status", "aborted")
+                update_trade_field(trade_id, "notes", "recovery_entry_incomplete")
+                await persist_trade(trade_id)
+                remove_active_trade(trade_id)
+                log.warning("recovery_aborted_incomplete_entry", trade_id=trade_id, status=status)
+            continue
 
         log.info("recovery_closing_stale_trade", trade_id=trade_id, status=status,
                  expired_seconds_ago=round((now - window_end_dt).total_seconds()))
