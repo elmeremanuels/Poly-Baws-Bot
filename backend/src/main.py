@@ -12,6 +12,52 @@ from . import bot as bot_module
 from .commands import command_poll_loop
 
 
+async def _close_stale_recovered_trades() -> None:
+    """
+    After recover_state(), clean up trades that were left open when the bot was last down.
+    Trades whose window has already ended are closed/resolved immediately so they don't
+    persist as zombie entries in the Live tab.
+    """
+    from datetime import datetime, timezone
+    from .state import get_active_trades, update_trade_field, remove_active_trade, persist_trade
+    from .triggers import _handle_resolution, _close_trade
+
+    now = datetime.now(timezone.utc)
+    for trade_id, trade in list(get_active_trades().items()):
+        status = trade.get("status", "")
+        if status not in ("monitoring", "exiting", "entry_placed", "pending", "entry_placed"):
+            continue
+
+        window_end = trade.get("window_end_ts")
+        if not window_end:
+            update_trade_field(trade_id, "status", "aborted")
+            update_trade_field(trade_id, "notes", "recovery_no_window_info")
+            await persist_trade(trade_id)
+            remove_active_trade(trade_id)
+            log.warning("recovery_aborted_no_window", trade_id=trade_id, status=status)
+            continue
+
+        window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc)
+        if now < window_end_dt:
+            continue  # Window still open — normal monitoring loop will handle it
+
+        log.info("recovery_closing_stale_trade", trade_id=trade_id, status=status,
+                 expired_seconds_ago=round((now - window_end_dt).total_seconds()))
+
+        if status == "monitoring":
+            # Both legs held to resolution — P&L = $1/share - cost - fees
+            await _handle_resolution(trade_id, None)
+        elif status == "exiting":
+            # Loser already sold; winner leg resolves on-chain at $1.00
+            await _close_trade(trade_id, 1.0, "resolution_recovery", None)
+        else:
+            # entry_placed / pending — market closed before entry filled
+            update_trade_field(trade_id, "status", "aborted")
+            update_trade_field(trade_id, "notes", "recovery_expired_before_fill")
+            await persist_trade(trade_id)
+            remove_active_trade(trade_id)
+
+
 async def _run() -> None:
     log.info("startup_begin")
     await init_db()
@@ -21,6 +67,7 @@ async def _run() -> None:
         # Do not abort — command_poll_loop must run so the dashboard can reset the flag
 
     await recover_state()
+    await _close_stale_recovered_trades()
 
     saved_mode = await load_dashboard_state("mode")
     if saved_mode:
