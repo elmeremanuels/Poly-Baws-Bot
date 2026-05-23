@@ -94,6 +94,15 @@ async def _process_coin_window(coin: str, market: dict) -> None:
     if has_traded_window(coin, window_ts):
         return
 
+    # In auto mode: verify entry conditions BEFORE consuming the window slot.
+    # If the check fails (e.g. no orderbook data yet), the window stays available
+    # so the next _coin_loop iteration (10s later) can retry the same window.
+    if _effective_is_auto(mode):
+        ok_entry, entry_reason = _should_enter(market)
+        if not ok_entry:
+            log.info("trade_skipped_spread", coin=coin, reason=entry_reason)
+            return  # window NOT registered — retried next iteration
+
     trade = create_trade_state(coin, market, mode, triggered_by="bot")
 
     # Stamp trade with current learning cycle info
@@ -109,7 +118,7 @@ async def _process_coin_window(coin: str, market: dict) -> None:
             "initial_offset": CONFIG.get("exit", {}).get("initial_offset"),
         })
 
-    add_active_trade(trade)
+    add_active_trade(trade)  # registers window in _window_registry
     trade_id = trade["trade_id"]
 
     if not _effective_is_auto(mode):
@@ -148,12 +157,13 @@ async def _process_coin_window(coin: str, market: dict) -> None:
         delete_hybrid_pending(market_id)
         trade["triggered_by"] = "user"
 
-    ok_entry, entry_reason = _should_enter(market)
-    if not ok_entry:
-        log.info("trade_skipped_spread", coin=coin, reason=entry_reason)
-        from .state import remove_active_trade
-        remove_active_trade(trade_id)
-        return
+        # Hybrid mode: re-check spread after user clicks (prices may have moved)
+        ok_entry, entry_reason = _should_enter(market)
+        if not ok_entry:
+            log.info("trade_skipped_spread_after_click", coin=coin, reason=entry_reason)
+            from .state import remove_active_trade
+            remove_active_trade(trade_id)
+            return
 
     await write_event(trade_id, "entry_initiated", coin, {"mode": mode})
     success = await execute_entry(trade_id)
