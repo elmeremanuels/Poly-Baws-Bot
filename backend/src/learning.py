@@ -216,6 +216,7 @@ class LearningOrchestrator:
                 log.info("confidence_too_low",
                          score=analysis["confidence_score"],
                          action="starting_new_learn_cycle")
+                self._restore_original_params()  # revert Claude params before paper learn cycle
                 await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
                 await self._start_new_cycle()
         except Exception as e:
@@ -234,13 +235,12 @@ class LearningOrchestrator:
         pnl = await _db_get_phase_pnl(self._cycle_id, "deploy")
         hours = self._phase_hours()
         peg_rate = await _db_recent_peg_cross_rate(self._cycle_id, n=10)
-        # Check exit conditions
+        # Check exit conditions — re-analyze with live data instead of going to validate
         if (count >= lcfg["max_live_trades"]
                 or hours >= lcfg["max_live_hours"]
                 or pnl < -lcfg["max_live_loss"]
                 or (count >= 10 and peg_rate > 0.50)):
-            self._restore_original_params()
-            await self._transition_to("validate")
+            await self._transition_to("analyze")
 
     async def _tick_validate(self) -> None:
         if not self._cycle_id:

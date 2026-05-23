@@ -589,17 +589,58 @@ def _learning_panel() -> None:
 
     # Control buttons
     st.markdown("---")
-    st.markdown("**Manual controls**")
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Force next phase", use_container_width=True):
+    st.markdown("**Handmatige bediening**")
+
+    # Flow explanation per phase
+    _next_phase_label = {
+        "learn": "→ Analyse (Claude)",
+        "analyze": "→ Live (Deploy)",
+        "deploy": "→ Analyse (Claude)",
+        "validate": "→ Learn (paper)",
+    }
+    _next_help = {
+        "learn": "Slaat resterende paper-trades over en start Claude-analyse. Bij vertrouwen ≥60% gaat bot direct live.",
+        "analyze": "Sla Claude-analyse over en ga direct live (gebruikt huidige config-params).",
+        "deploy": "Stop live-trades vroeg en start meteen een Claude-heranalyse.",
+        "validate": "Sla validate-fase over en start nieuwe learn-cyclus.",
+    }
+    next_label = _next_phase_label.get(phase, "Force next phase")
+    next_help = _next_help.get(phase, "")
+
+    # Automatic flow info
+    if phase == "learn":
+        st.info(
+            "**Flow:** learn (paper) → **analyse** (Claude, ~2 min) → **live** (deploy, max "
+            f"{CONFIG['learning']['max_live_trades']} trades / €{CONFIG['learning']['max_live_loss']:.0f} verlies) "
+            "→ **analyse** → live → … Bij vertrouwen <60% valt het terug naar learn."
+        )
+    elif phase == "deploy":
+        deploy_stats = get_phase_stats(cycle_id, "deploy") if cycle_id else {}
+        live_done = deploy_stats.get("trades", 0) if deploy_stats else 0
+        live_max = CONFIG["learning"]["max_live_trades"]
+        st.success(
+            f"**Live aan het traden.** {live_done}/{live_max} trades. "
+            f"Na {live_max} trades (of -{CONFIG['learning']['max_live_loss']:.0f} EUR) heranalyseert Claude automatisch."
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button(next_label, use_container_width=True, help=next_help):
         write_command("force_next_phase")
-        st.toast("Phase transition requested.", icon="⏭")
-    if c2.button("Reset cycle", use_container_width=True):
+        st.toast(f"Faseovergang aangevraagd: {next_label}", icon="⏭")
+    if c2.button("Reset cyclus", use_container_width=True, help="Sluit huidige cyclus af en start nieuw van learn."):
         write_command("reset_learning_cycle")
-        st.toast("Cycle reset requested.", icon="🔄")
-    if c3.button("Pause learning", use_container_width=True):
+        st.toast("Cyclus reset aangevraagd.", icon="🔄")
+    if c3.button("Pauzeer", use_container_width=True, help="Kill-switch: stopt alle nieuwe trades."):
         write_command("kill")
-        st.toast("Bot paused.", icon="⏸")
+        st.toast("Bot gepauzeerd.", icon="⏸")
+    if phase == "learn" and c4.button("Ga direct live", use_container_width=True,
+                                       help="Sla analyse over en ga direct naar deploy. Gebruikt huidige config-params."):
+        # learn → analyze (skip) → deploy via two forced transitions
+        write_command("force_next_phase")   # learn → analyze
+        write_command("force_next_phase")   # analyze → deploy (bot executes sequentially)
+        st.toast("Direct live aangevraagd (2x phase skip).", icon="🚀")
+    elif phase != "learn":
+        c4.empty()
 
 
 def _portfolio_panel() -> None:

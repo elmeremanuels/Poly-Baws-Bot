@@ -198,7 +198,7 @@ async def _run_command(command: str, payload: dict) -> None:
         from . import learning as _learning
         orch = _learning.get_orchestrator()
         phase = orch._phase
-        next_map = {"learn": "analyze", "analyze": "deploy", "deploy": "validate", "validate": "learn"}
+        next_map = {"learn": "analyze", "analyze": "deploy", "deploy": "analyze", "validate": "learn"}
         next_phase = next_map.get(phase, "learn")
         await orch._transition_to(next_phase)
         log.info("learning_phase_forced", to=next_phase)
