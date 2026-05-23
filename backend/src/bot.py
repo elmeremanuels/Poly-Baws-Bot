@@ -265,17 +265,23 @@ async def run_bot() -> None:
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
     await scanner.refresh_markets()
-    await ws_client.start()
 
     all_tokens = []
     for coin in COINS:
-        for m in scanner._market_cache.get(coin, []):
+        markets = scanner._market_cache.get(coin, [])
+        log.info("bot_scanner_cache", coin=coin, markets=len(markets))
+        for m in markets:
             if m.get("yes_token"):
                 all_tokens.append(m["yes_token"])
             if m.get("no_token"):
                 all_tokens.append(m["no_token"])
+
+    log.info("bot_ws_subscribe_start", token_count=len(all_tokens))
+    await ws_client.start()
     if all_tokens:
         await ws_client.subscribe_assets(all_tokens)
+    else:
+        log.warning("bot_no_tokens_no_orderbook_data_expected")
 
     tasks = [
         asyncio.create_task(scanner.scanner_loop(60)),
