@@ -82,12 +82,13 @@ def _key_metrics(df: pd.DataFrame) -> None:
     total = len(df)
     triggered = df[df["trigger_hit"] == 1] if "trigger_hit" in df.columns else df
     aborted = df[df["status"].isin(["aborted"])] if "status" in df.columns else pd.DataFrame()
-    closed = df[df["status"] == "closed"] if "status" in df.columns else df
+    closed = df[df["status"].isin(["closed", "resolved"])] if "status" in df.columns else df
+    triggered_closed = closed[closed["trigger_hit"] == 1] if "trigger_hit" in closed.columns else closed
 
-    winners = int((closed["net_pnl"] > 0).sum()) if not closed.empty else 0
-    win_rate = winners / len(closed) * 100 if len(closed) else 0
+    winners = int((triggered_closed["net_pnl"] > 0).sum()) if not triggered_closed.empty else 0
+    win_rate = winners / len(triggered_closed) * 100 if len(triggered_closed) else 0
     net_pnl = float(closed["net_pnl"].sum()) if not closed.empty else 0.0
-    avg_pnl = float(closed["net_pnl"].mean()) if not closed.empty else 0.0
+    avg_pnl = float(triggered_closed["net_pnl"].mean()) if not triggered_closed.empty else 0.0
     cum = closed.sort_values("created_at")["net_pnl"].cumsum() if not closed.empty else pd.Series([0])
     max_dd = float((cum - cum.cummax()).min())
 

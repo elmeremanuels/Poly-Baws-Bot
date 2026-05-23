@@ -415,14 +415,19 @@ async def _winner_exit_paper(
             score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
 
             if score >= params["cross_threshold"]:
-                result = await paper_trader.simulate_market_sell(winner_token, size)
-                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
-                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
-                await write_event(trade_id, "peg_cross_triggered", coin, {
-                    "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
-                })
-                await _close_trade(trade_id, result.get("fill_price"), "peg_cross", broadcast_fn)
-                return
+                # Don't market-sell a profitable position in patient/urgent phase;
+                # let the resting limit fill or force_exit handle it.
+                if break_even_price and mid > break_even_price and phase != "force":
+                    pass
+                else:
+                    result = await paper_trader.simulate_market_sell(winner_token, size)
+                    _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                    await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                    await write_event(trade_id, "peg_cross_triggered", coin, {
+                        "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                    })
+                    await _close_trade(trade_id, result.get("fill_price"), "peg_cross", broadcast_fn)
+                    return
 
             if mid > current_limit:
                 new_limit = round(mid + params["ratchet_buffer"], 2)
@@ -508,15 +513,18 @@ async def _winner_exit_live(
             score = compute_cross_score(mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es)
 
             if score >= params["cross_threshold"]:
-                await orders.cancel_order(current_order_id)
-                await orders.place_market_order(winner_token, "SELL", size)
-                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
-                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
-                await write_event(trade_id, "peg_cross_triggered", coin, {
-                    "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
-                })
-                await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
-                return
+                if break_even_price and mid > break_even_price and phase != "force":
+                    pass
+                else:
+                    await orders.cancel_order(current_order_id)
+                    await orders.place_market_order(winner_token, "SELL", size)
+                    _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                    await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                    await write_event(trade_id, "peg_cross_triggered", coin, {
+                        "score": score, "phase": phase, "mid": mid, "seconds_left": round(seconds_left, 1),
+                    })
+                    await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
+                    return
 
             if mid > current_limit:
                 new_limit = round(mid + params["ratchet_buffer"], 2)
