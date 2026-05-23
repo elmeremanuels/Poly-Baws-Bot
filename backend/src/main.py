@@ -104,7 +104,14 @@ async def _run() -> None:
     saved_trade_size = await load_dashboard_state("trade_size_eur")
     if saved_trade_size:
         try:
-            CONFIG["trading"]["trade_size_eur"] = float(saved_trade_size)
+            saved_val = float(saved_trade_size)
+            cfg_val = CONFIG["trading"].get("trade_size_eur", 1.0)
+            # Cap saved value to 3× the config value to catch stale/accidental overrides.
+            if saved_val > cfg_val * 3:
+                log.warning("startup_trade_size_clamped",
+                            saved=saved_val, config=cfg_val, using=cfg_val)
+            else:
+                CONFIG["trading"]["trade_size_eur"] = saved_val
         except ValueError:
             pass
 
