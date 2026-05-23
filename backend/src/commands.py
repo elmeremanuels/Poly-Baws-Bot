@@ -105,10 +105,57 @@ async def _execute_pending() -> None:
 
 async def _run_command(command: str, payload: dict) -> None:
     from . import risk
-    from .state import set_mode, reset_state
+    from .state import set_mode, reset_state, get_active_trades, is_paper_mode
     from .logger import reset_paper_data
 
-    if command == "set_mode":
+    if command == "force_close_trade":
+        from . import orders as _orders, paper_trader as _pt
+        from .state import update_trade_field, remove_active_trade, persist_trade
+        from .monitor import stop_monitoring
+        from .triggers import _close_trade
+
+        trade_id = payload.get("trade_id")
+        trade = get_active_trades().get(trade_id)
+        if not trade:
+            log.warning("force_close_not_found", trade_id=trade_id)
+            return
+
+        await stop_monitoring(trade_id)
+
+        paper = is_paper_mode()
+        size = trade.get("entry_size") or 2
+        yes_token = trade.get("condition_id_yes")
+        no_token = trade.get("condition_id_no")
+        winner_side = trade.get("winner_side")
+        status = trade.get("status", "")
+        fill_price = None
+
+        if status == "monitoring":
+            # Trigger not yet hit — sell both legs
+            if paper:
+                yr = await _pt.simulate_market_sell(yes_token, size)
+                nr = await _pt.simulate_market_sell(no_token, size)
+                fill_price = yr.get("fill_price")
+                update_trade_field(trade_id, "loser_exit_price", nr.get("fill_price"))
+            else:
+                await _orders.cancel_order(trade.get("yes_order_id") or "")
+                await _orders.cancel_order(trade.get("no_order_id") or "")
+                await _orders.place_market_order(yes_token, "SELL", size)
+                await _orders.place_market_order(no_token, "SELL", size)
+        else:
+            # Trigger hit — only winner remains
+            winner_token = yes_token if winner_side == "YES" else no_token
+            if paper:
+                r = await _pt.simulate_market_sell(winner_token, size)
+                fill_price = r.get("fill_price")
+            else:
+                await _orders.cancel_all_orders()
+                await _orders.place_market_order(winner_token, "SELL", size)
+
+        await _close_trade(trade_id, fill_price, "force_closed_by_user", None)
+        log.info("force_close_done", trade_id=trade_id, status=status)
+
+    elif command == "set_mode":
         set_mode(payload["mode"])
         await save_dashboard_state("mode", payload["mode"])
 

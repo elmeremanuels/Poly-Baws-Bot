@@ -430,20 +430,25 @@ def _active_positions() -> None:
         st.caption("No active positions.")
         return
 
-    rows = []
     for t in trades:
         be = t.get("break_even_price")
-        rows.append({
-            "Coin": t.get("coin", ""),
-            "Status": t.get("status", ""),
-            "Window": fmt_time(t.get("window_start_ts")),
-            "YES entry": f"€{t['entry_yes_price']:.2f}" if t.get("entry_yes_price") else "—",
-            "NO entry": f"€{t['entry_no_price']:.2f}" if t.get("entry_no_price") else "—",
-            "Break-even": f"€{be:.2f}" if be is not None else "—",
-            "Winner": t.get("winner_side") or "—",
-            "Mode": t.get("mode", ""),
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        trade_id = t.get("trade_id", "")
+        coin = t.get("coin", "")
+        status = t.get("status", "")
+        winner = t.get("winner_side") or "—"
+
+        c = st.columns([1, 2, 1.5, 1.5, 1.5, 1.5, 1.5, 1])
+        c[0].markdown(f"**{coin}**")
+        c[1].caption(status)
+        c[2].caption(fmt_time(t.get("window_start_ts")))
+        c[3].caption(f"YES {t['entry_yes_price']:.2f}" if t.get("entry_yes_price") else "YES —")
+        c[4].caption(f"NO {t['entry_no_price']:.2f}" if t.get("entry_no_price") else "NO —")
+        c[5].caption(f"BE €{be:.2f}" if be is not None else "BE —")
+        c[6].caption(f"Winner: {winner}")
+        if c[7].button("🛑", key=f"fc_{trade_id}", help="Force close deze positie"):
+            write_command("force_close_trade", {"trade_id": trade_id})
+            st.toast(f"{coin} force close verstuurd.", icon="🛑")
+            st.rerun()
 
 
 def _recent_trades() -> None:
