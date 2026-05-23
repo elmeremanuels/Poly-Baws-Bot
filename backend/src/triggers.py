@@ -48,6 +48,16 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
 
+    now_utc = datetime.now(timezone.utc)
+    if now_utc >= cutoff_time:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "past_cutoff")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("entry_aborted_past_cutoff", trade_id=trade_id,
+                 seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
+        return False
+
     log.info("entry_starting", trade_id=trade_id, coin=coin, paper=paper)
     await write_event(trade_id, "entry_start", coin, {"paper": paper, "size": size})
 
@@ -55,12 +65,18 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "status", "entry_placed")
 
     if paper:
+        # Market-fill both legs immediately at current best ask.
+        # _should_enter already verified combined ask ≤ max_combined_cost and spread ≤ max_token_spread,
+        # so a market fill at current ask is the correct simulation of aggressive entry.
         yes_result, no_result = await asyncio.gather(
-            paper_trader.poll_for_fill(yes_token, ENTRY_PRICE + MAX_DEV, size, "buy",
-                                       timeout_seconds=(cutoff_time - datetime.now(timezone.utc)).total_seconds()),
-            paper_trader.poll_for_fill(no_token, ENTRY_PRICE + MAX_DEV, size, "buy",
-                                       timeout_seconds=(cutoff_time - datetime.now(timezone.utc)).total_seconds()),
+            paper_trader.simulate_market_buy(yes_token, size),
+            paper_trader.simulate_market_buy(no_token, size),
         )
+        if not yes_result["filled"] or not no_result["filled"]:
+            log.warning("entry_market_fill_failed", trade_id=trade_id,
+                        yes_filled=yes_result["filled"], no_filled=no_result["filled"],
+                        yes_ask=ws_client.get_best_ask(yes_token),
+                        no_ask=ws_client.get_best_ask(no_token))
     else:
         # Live: place both simultaneously
         yes_resp, no_resp = await asyncio.gather(

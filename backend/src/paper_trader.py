@@ -94,6 +94,26 @@ async def simulate_limit_sell(token_id: str, limit_price: float, size: float) ->
     }
 
 
+async def simulate_market_buy(token_id: str, size: float) -> dict:
+    """Simulate a market buy — walk asks immediately. Used for paper entry."""
+    book = ws_client.get_orderbook(token_id)
+    asks = sorted(
+        [(float(p), s) for p, s in book["asks"].items()],
+        key=lambda x: x[0],
+    )
+    if not asks:
+        return {"filled": False, "fill_price": None, "filled_size": 0.0}
+
+    avg_price, filled_size = _walk_book(asks, size)
+    fees = filled_size * avg_price * taker_fee_rate(avg_price or 0.5) + filled_size * SLIPPAGE_BUFFER
+    return {
+        "filled": filled_size >= size * 0.95,
+        "fill_price": round(avg_price, 4) if avg_price else None,
+        "filled_size": filled_size,
+        "fees": round(fees, 6),
+    }
+
+
 async def simulate_market_sell(token_id: str, size: float) -> dict:
     """Simulate a market sell — walk bids immediately."""
     book = ws_client.get_orderbook(token_id)
