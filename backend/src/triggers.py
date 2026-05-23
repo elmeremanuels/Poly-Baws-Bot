@@ -65,18 +65,18 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "status", "entry_placed")
 
     if paper:
-        # Market-fill both legs immediately at current best ask.
-        # _should_enter already verified combined ask ≤ max_combined_cost and spread ≤ max_token_spread,
-        # so a market fill at current ask is the correct simulation of aggressive entry.
+        # Simulate limit buy at current best ask — maker order, 0% taker fee.
+        # _should_enter already verified spreads are acceptable.
+        yes_ask = ws_client.get_best_ask(yes_token) or ENTRY_PRICE
+        no_ask = ws_client.get_best_ask(no_token) or ENTRY_PRICE
         yes_result, no_result = await asyncio.gather(
-            paper_trader.simulate_market_buy(yes_token, size),
-            paper_trader.simulate_market_buy(no_token, size),
+            paper_trader.simulate_limit_buy(yes_token, yes_ask, size),
+            paper_trader.simulate_limit_buy(no_token, no_ask, size),
         )
         if not yes_result["filled"] or not no_result["filled"]:
-            log.warning("entry_market_fill_failed", trade_id=trade_id,
+            log.warning("entry_limit_fill_failed", trade_id=trade_id,
                         yes_filled=yes_result["filled"], no_filled=no_result["filled"],
-                        yes_ask=ws_client.get_best_ask(yes_token),
-                        no_ask=ws_client.get_best_ask(no_token))
+                        yes_ask=yes_ask, no_ask=no_ask)
     else:
         # Live: place both simultaneously
         yes_resp, no_resp = await asyncio.gather(
