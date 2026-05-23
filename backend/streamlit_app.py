@@ -630,9 +630,16 @@ def _learning_panel() -> None:
     if c2.button("Reset cyclus", use_container_width=True, help="Sluit huidige cyclus af en start nieuw van learn."):
         write_command("reset_learning_cycle")
         st.toast("Cyclus reset aangevraagd.", icon="🔄")
-    if c3.button("Pauzeer", use_container_width=True, help="Kill-switch: stopt alle nieuwe trades."):
-        write_command("kill")
-        st.toast("Bot gepauzeerd.", icon="⏸")
+    if is_killed():
+        if c3.button("▶ Hervat", use_container_width=True, type="primary",
+                     help="Herstart trading na pauze."):
+            write_command("reset_kill")
+            st.rerun()
+    else:
+        if c3.button("⏸ Pauzeer", use_container_width=True,
+                     help="Kill-switch: stopt alle nieuwe trades."):
+            write_command("kill")
+            st.toast("Bot gepauzeerd.", icon="⏸")
     if phase == "learn" and c4.button("Ga direct live", use_container_width=True,
                                        help="Sla analyse over en ga direct naar deploy. Gebruikt huidige config-params."):
         # learn → analyze (skip) → deploy via two forced transitions
