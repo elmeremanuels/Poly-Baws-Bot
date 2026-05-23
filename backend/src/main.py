@@ -132,6 +132,15 @@ async def _run() -> None:
         if not ok:
             log.warning("startup_apply_learnings_no_data")
 
+    # For live modes, verify Polymarket credentials up front so wallet_info /
+    # api_key_auth_failed surface immediately instead of on the first trade.
+    from .state import get_mode as _get_mode
+    if _get_mode().startswith("live"):
+        from . import orders as _orders
+        ok = await _orders.check_credentials()
+        if not ok:
+            log.warning("startup_credentials_invalid_live_orders_will_fail")
+
     log.info("startup_complete", mode=risk.get_kill_reason() or "ok")
 
     await asyncio.gather(

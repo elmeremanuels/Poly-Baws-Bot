@@ -91,6 +91,12 @@ def _is_maker_not_allowed(e: Exception) -> bool:
     return "maker address not allowed" in str(e).lower()
 
 
+def _mask(s: str | None) -> str:
+    if not s:
+        return "(none)"
+    return f"{s[:4]}…{s[-4:]}" if len(s) > 8 else "(set)"
+
+
 async def check_credentials() -> bool:
     try:
         proxy = get_env("POLYMARKET_PROXY_ADDRESS")
@@ -100,12 +106,27 @@ async def check_credentials() -> bool:
             eoa = Account.from_key(pk).address
         else:
             eoa = "(no key)"
+        explicit_key = get_env("POLYMARKET_API_KEY")
         log.info("wallet_info",
                  eoa=eoa,
                  proxy=proxy or "(not set)",
                  maker_address=proxy if proxy else eoa,
-                 signature_type=_sig_type(proxy))
+                 signature_type=_sig_type(proxy),
+                 explicit_api_creds=bool(explicit_key),
+                 api_key=_mask(explicit_key))
         client = get_client()
+        # Actively verify L2 auth: get_api_keys lists keys registered to POLY_ADDRESS (the EOA).
+        # A 401 here means the api creds in use don't belong to the EOA we're signing as.
+        try:
+            keys = await _run_sync(client.get_api_keys)
+            log.info("api_keys_verified", registered=keys)
+        except Exception as auth_e:
+            log.critical("api_key_auth_failed",
+                         error=str(auth_e),
+                         fix="If POLYMARKET_API_KEY/SECRET/PASSPHRASE are set in .env, remove "
+                             "them so the bot derives the EOA's own key. Explicit creds generated "
+                             "via the Polymarket website belong to the proxy, not the signing EOA.")
+            return False
         await _run_sync(client.get_ok)
         return True
     except Exception as e:
