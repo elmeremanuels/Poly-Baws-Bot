@@ -15,6 +15,7 @@ exit:
   cross_threshold: 0.65        # peg-cross score threshold (0-1) to convert limit→market
   initial_offset: 0.05         # limit starts trigger_price + offset above trigger
   ratchet_buffer: 0.02         # limit stays this far above mid when ratcheting
+  min_winner_profit_margin: 0.03  # resting limit sits at least break_even + this (ensures real profit)
   check_interval_seconds: 1.5  # polling interval in patient phase
   time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
   spread_avg_window: 60        # reserved for future spread averaging
@@ -22,7 +23,7 @@ exit:
   hold_for_resolution_mid_threshold: 0.90  # if mid >= this at force_exit, hold to resolution instead of selling
 
 entry:
-  max_combined_cost: 1.03      # YES ask + NO ask must be ≤ this
+  max_combined_cost: 1.07      # YES ask + NO ask must be ≤ this (taker entry; break_even exit protects margin)
   max_token_spread: 0.06       # per-token bid/ask spread must be ≤ this
 
 coins:

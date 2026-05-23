@@ -406,7 +406,7 @@ async def _winner_exit_paper(
     # Initial limit is at least break_even + 1¢ so we never rest below profitability
     raw_limit = round(trigger_price + es["initial_offset"], 2)
     if break_even_price is not None and break_even_price > 0:
-        raw_limit = max(raw_limit, round(break_even_price + 0.01, 2))
+        raw_limit = max(raw_limit, round(break_even_price + es.get("min_winner_profit_margin", 0.03), 2))
     current_limit = raw_limit
     peak_mid = trigger_price
     ratchet_count = 0
@@ -510,7 +510,7 @@ async def _winner_exit_live(
     break_even_price = trade.get("break_even_price") if trade else None
     raw_limit = round(trigger_price + es["initial_offset"], 2)
     if break_even_price is not None and break_even_price > 0:
-        raw_limit = max(raw_limit, round(break_even_price + 0.01, 2))
+        raw_limit = max(raw_limit, round(break_even_price + es.get("min_winner_profit_margin", 0.03), 2))
     current_limit = raw_limit
     peak_mid = trigger_price
     ratchet_count = 0
