@@ -22,10 +22,30 @@ async def _close_stale_recovered_trades() -> None:
     from .state import get_active_trades, update_trade_field, remove_active_trade, persist_trade
     from .triggers import _handle_resolution, _close_trade
 
+    from .config_loader import CONFIG as _CFG
     now = datetime.now(timezone.utc)
+    # Max plausible size: even at the cheapest entry (30¢), 10× trade_size_eur is the limit.
+    _trade_size_eur = _CFG["trading"].get("trade_size_eur", 1.0)
+    _max_sane_size = round(_trade_size_eur / 0.10 * 2, 2)  # generous upper bound
+
     for trade_id, trade in list(get_active_trades().items()):
         status = trade.get("status", "")
         if status not in ("monitoring", "exiting", "entry_placed", "pending"):
+            continue
+
+        # Abort recovered trades with suspiciously large entry_size (from old/misconfigured runs).
+        entry_size = trade.get("entry_size") or 0
+        if entry_size > _max_sane_size:
+            log.warning("recovery_aborted_size_mismatch",
+                        trade_id=trade_id, entry_size=entry_size, max_sane=_max_sane_size)
+            try:
+                update_trade_field(trade_id, "status", "aborted")
+                update_trade_field(trade_id, "notes", f"recovery_size_mismatch:{entry_size}")
+                await persist_trade(trade_id)
+            except Exception as e:
+                log.error("recovery_cleanup_failed", trade_id=trade_id, error=str(e))
+            finally:
+                remove_active_trade(trade_id)
             continue
 
         window_end = trade.get("window_end_ts")

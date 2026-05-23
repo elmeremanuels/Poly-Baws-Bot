@@ -67,8 +67,24 @@ async def _run_sync(fn, *args, **kwargs):
     return await loop.run_in_executor(None, partial(fn, *args, **kwargs))
 
 
+def _is_maker_not_allowed(e: Exception) -> bool:
+    return "maker address not allowed" in str(e).lower()
+
+
 async def check_credentials() -> bool:
     try:
+        proxy = get_env("POLYMARKET_PROXY_ADDRESS")
+        pk = get_env("POLYMARKET_PRIVATE_KEY")
+        if pk:
+            from eth_account import Account
+            eoa = Account.from_key(pk).address
+        else:
+            eoa = "(no key)"
+        log.info("wallet_info",
+                 eoa=eoa,
+                 proxy=proxy or "(not set)",
+                 maker_address=proxy if proxy else eoa,
+                 signature_type=1 if proxy else 0)
         client = get_client()
         await _run_sync(client.get_ok)
         return True
@@ -125,7 +141,13 @@ async def place_limit_order(
         log.info("order_placed", token_id=token_id, side=side, price=price, size=size, order_id=order_id)
         return {"order_id": order_id, "status": resp.get("status"), "raw": resp}
     except Exception as e:
-        log.error("place_order_failed", token_id=token_id, side=side, price=price, size=size, error=str(e))
+        if _is_maker_not_allowed(e):
+            log.critical("maker_not_allowed",
+                         token_id=token_id, side=side, price=price, size=size,
+                         fix="Complete Polymarket deposit wallet flow at polymarket.com, "
+                             "then set POLYMARKET_PROXY_ADDRESS to your proxy wallet address")
+        else:
+            log.error("place_order_failed", token_id=token_id, side=side, price=price, size=size, error=str(e))
         return None
 
 
@@ -145,7 +167,13 @@ async def place_market_order(token_id: str, side: str, size: float) -> dict | No
         log.info("market_order_placed", token_id=token_id, side=side, size=size, order_id=order_id)
         return {"order_id": order_id, "status": resp.get("status"), "raw": resp}
     except Exception as e:
-        log.error("market_order_failed", token_id=token_id, side=side, size=size, error=str(e))
+        if _is_maker_not_allowed(e):
+            log.critical("maker_not_allowed",
+                         token_id=token_id, side=side, size=size,
+                         fix="Complete Polymarket deposit wallet flow at polymarket.com, "
+                             "then set POLYMARKET_PROXY_ADDRESS to your proxy wallet address")
+        else:
+            log.error("market_order_failed", token_id=token_id, side=side, size=size, error=str(e))
         return None
 
 
