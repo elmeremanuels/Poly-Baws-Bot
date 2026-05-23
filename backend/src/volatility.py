@@ -36,6 +36,17 @@ def get_realized_vol(asset_id: str) -> float | None:
     return math.sqrt(var)
 
 
+def get_coin_params(coin: str) -> dict:
+    """Return exit config merged with per-coin overrides from coins.<coin>."""
+    from .config_loader import CONFIG
+    base = dict(CONFIG["exit"])
+    coin_cfg = CONFIG["coins"].get(coin, {})
+    for k in ("initial_offset", "ratchet_buffer"):
+        if k in coin_cfg:
+            base[k] = coin_cfg[k]
+    return base
+
+
 def get_price_velocity(asset_id: str, window_secs: float = 5.0) -> float | None:
     """Price change rate in ¢/sec over the last window_secs seconds."""
     samples = _prices.get(asset_id)

@@ -393,9 +393,9 @@ async def _winner_exit_paper(
     broadcast_fn,
 ) -> None:
     """Paper mode: peg-cross exit engine — resting limit + dynamic market conversion."""
-    es = CONFIG["exit"]
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
+    es = _vol.get_coin_params(coin)
     trigger_price = _get_trigger_threshold(coin)
     break_even_price = trade.get("break_even_price") if trade else None
     # Initial limit is at least break_even + 1¢ so we never rest below profitability
@@ -498,9 +498,9 @@ async def _winner_exit_live(
     broadcast_fn,
 ) -> None:
     """Live mode: peg-cross exit engine — real limit order + dynamic market conversion."""
-    es = CONFIG["exit"]
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
+    es = _vol.get_coin_params(coin)
     trigger_price = _get_trigger_threshold(coin)
     break_even_price = trade.get("break_even_price") if trade else None
     raw_limit = round(trigger_price + es["initial_offset"], 2)

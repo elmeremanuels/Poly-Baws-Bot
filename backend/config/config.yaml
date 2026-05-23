@@ -31,10 +31,13 @@ coins:
     max_parallel_positions: 5
     market_filter: "btc-updown-5m"
     trigger_threshold: 0.75    # BTC is more volatile; higher bar reduces stop-outs
+    ratchet_buffer: 0.025      # wider buffer for BTC volatility
   ETH:
     enabled: true
     max_parallel_positions: 5
     market_filter: "eth-updown-5m"
+    initial_offset: 0.06       # more ambitious target on ETH
+    ratchet_buffer: 0.03
   SOL:
     enabled: true
     max_parallel_positions: 5
@@ -43,10 +46,14 @@ coins:
     enabled: true
     max_parallel_positions: 5
     market_filter: "xrp-updown-5m"
+    trigger_threshold: 0.72    # XRP best performer, lower bar
+    initial_offset: 0.04
+    ratchet_buffer: 0.02
   DOGE:
     enabled: true
     max_parallel_positions: 5
     market_filter: "doge-updown-5m"
+    trigger_threshold: 0.74
 
 fees:
   # Taker fee peaks at peak_rate_pct near 50¢ probability, scales to 0 at 0¢/100¢.
