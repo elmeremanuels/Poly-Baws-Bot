@@ -1,5 +1,6 @@
 """Order placement, cancellation, and signing via py-clob-client."""
 import asyncio
+import os
 from typing import Any
 from functools import partial
 
@@ -10,6 +11,38 @@ CLOB_REST = CONFIG["polymarket"]["clob_rest_url"]
 CHAIN_ID = CONFIG["polymarket"]["chain_id"]
 
 _client = None
+
+
+def _force_requests_proxy() -> None:
+    """
+    py-clob-client creates requests.Session with trust_env=False, ignoring HTTP_PROXY/HTTPS_PROXY.
+    Patch Session.__init__ so every session inherits proxy from environment regardless.
+    """
+    proxy = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("ALL_PROXY")
+    )
+    if not proxy:
+        return
+    try:
+        import requests as _req
+        _orig = _req.Session.__init__
+
+        def _patched(self, *args, **kwargs):
+            _orig(self, *args, **kwargs)
+            self.proxies.update({"http": proxy, "https": proxy})
+            self.trust_env = True
+
+        _req.Session.__init__ = _patched
+        # Log host:port only, never credentials
+        host_port = proxy.rsplit("@", 1)[-1]
+        log.info("requests_proxy_forced", via=host_port)
+    except Exception as exc:
+        log.warning("requests_proxy_patch_failed", error=str(exc))
+
+
+_force_requests_proxy()
 
 
 def _build_client():
