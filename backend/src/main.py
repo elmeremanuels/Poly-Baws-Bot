@@ -25,16 +25,20 @@ async def _close_stale_recovered_trades() -> None:
     now = datetime.now(timezone.utc)
     for trade_id, trade in list(get_active_trades().items()):
         status = trade.get("status", "")
-        if status not in ("monitoring", "exiting", "entry_placed", "pending", "entry_placed"):
+        if status not in ("monitoring", "exiting", "entry_placed", "pending"):
             continue
 
         window_end = trade.get("window_end_ts")
         if not window_end:
-            update_trade_field(trade_id, "status", "aborted")
-            update_trade_field(trade_id, "notes", "recovery_no_window_info")
-            await persist_trade(trade_id)
-            remove_active_trade(trade_id)
-            log.warning("recovery_aborted_no_window", trade_id=trade_id, status=status)
+            try:
+                update_trade_field(trade_id, "status", "aborted")
+                update_trade_field(trade_id, "notes", "recovery_no_window_info")
+                await persist_trade(trade_id)
+                remove_active_trade(trade_id)
+                log.warning("recovery_aborted_no_window", trade_id=trade_id, status=status)
+            except Exception as e:
+                log.error("recovery_cleanup_failed", trade_id=trade_id, error=str(e))
+                remove_active_trade(trade_id)
             continue
 
         window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc)
@@ -44,18 +48,19 @@ async def _close_stale_recovered_trades() -> None:
         log.info("recovery_closing_stale_trade", trade_id=trade_id, status=status,
                  expired_seconds_ago=round((now - window_end_dt).total_seconds()))
 
-        if status == "monitoring":
-            # Both legs held to resolution — P&L = $1/share - cost - fees
-            await _handle_resolution(trade_id, None)
-        elif status == "exiting":
-            # Loser already sold; winner leg resolves on-chain at $1.00
-            await _close_trade(trade_id, 1.0, "resolution_recovery", None)
-        else:
-            # entry_placed / pending — market closed before entry filled
-            update_trade_field(trade_id, "status", "aborted")
-            update_trade_field(trade_id, "notes", "recovery_expired_before_fill")
-            await persist_trade(trade_id)
-            remove_active_trade(trade_id)
+        try:
+            if status == "monitoring":
+                await _handle_resolution(trade_id, None)
+            elif status == "exiting":
+                await _close_trade(trade_id, 1.0, "resolution_recovery", None)
+            else:
+                update_trade_field(trade_id, "status", "aborted")
+                update_trade_field(trade_id, "notes", "recovery_expired_before_fill")
+                await persist_trade(trade_id)
+                remove_active_trade(trade_id)
+        except Exception as e:
+            log.error("recovery_cleanup_failed", trade_id=trade_id, status=status, error=str(e))
+            remove_active_trade(trade_id)  # always remove from memory even if DB write fails
 
 
 async def _run() -> None:

@@ -135,6 +135,8 @@ async def _refresh_coin(coin: str) -> None:
             tokens.append(m["no_token"])
     if tokens:
         volatility.register_tokens(tokens)
+        from . import ws_client as _ws
+        await _ws.subscribe_assets(tokens)
 
     log.info("scanner_refreshed", coin=coin, count=len(active))
 

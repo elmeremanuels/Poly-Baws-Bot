@@ -61,10 +61,25 @@ def is_connected() -> bool:
     return _connected
 
 
+_ws_conn = None  # reference to active websockets.WebSocketClientProtocol
+
+
 async def subscribe_assets(asset_ids: list[str]) -> None:
-    """Register assets for subscription; will be applied on next connect."""
+    """Register assets and immediately subscribe if the WS is already connected."""
+    new_ids = [aid for aid in asset_ids if aid not in _subscribed_assets]
     for aid in asset_ids:
         _subscribed_assets.add(aid)
+    if new_ids and _connected and _ws_conn is not None:
+        try:
+            sub_msg = json.dumps({
+                "type": "market",
+                "assets_ids": new_ids,
+                "custom_feature_enabled": True,
+            })
+            await _ws_conn.send(sub_msg)
+            log.info("ws_subscribed_live", count=len(new_ids))
+        except Exception as e:
+            log.warning("ws_live_subscribe_failed", error=str(e))
 
 
 async def _apply_book_update(asset_id: str, changes: list[dict]) -> None:
@@ -142,12 +157,13 @@ async def _handle_single(data: dict) -> None:
 
 
 async def _run_ws() -> None:
-    global _connected
+    global _connected, _ws_conn
     backoff = 1
     while True:
         try:
             log.info("ws_connecting", url=WS_URL)
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=10) as ws:
+                _ws_conn = ws
                 _connected = True
                 backoff = 1
                 log.info("ws_connected")
@@ -165,9 +181,11 @@ async def _run_ws() -> None:
 
         except ConnectionClosed as e:
             _connected = False
+            _ws_conn = None
             log.warning("ws_disconnected", reason=str(e))
         except Exception as e:
             _connected = False
+            _ws_conn = None
             log.error("ws_error", error=str(e))
 
         await asyncio.sleep(min(backoff, 30))
