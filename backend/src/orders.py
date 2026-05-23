@@ -49,7 +49,7 @@ def _build_client():
         host=CLOB_REST,
         chain_id=CHAIN_ID,
         key=pk,
-        signature_type=2,
+        signature_type=1 if proxy else 0,
         funder=proxy,
         creds=creds,
     )
@@ -118,9 +118,10 @@ async def place_limit_order(
             size=size,
             side=side,
         )
-        signed = await _run_sync(client.create_order, order_args)
-        resp = await _run_sync(client.post_order, signed, OrderType.GTC)
+        resp = await _run_sync(client.create_and_post_order, order_args, None, OrderType.GTC)
         order_id = resp.get("orderID") or resp.get("order_id")
+        if not order_id:
+            log.error("order_placed_no_id", token_id=token_id, side=side, price=price, resp=resp)
         log.info("order_placed", token_id=token_id, side=side, price=price, size=size, order_id=order_id)
         return {"order_id": order_id, "status": resp.get("status"), "raw": resp}
     except Exception as e:
@@ -137,9 +138,10 @@ async def place_market_order(token_id: str, side: str, size: float) -> dict | No
             amount=size,
             side=side,
         )
-        signed = await _run_sync(client.create_market_order, order_args)
-        resp = await _run_sync(client.post_order, signed, OrderType.FOK)
+        resp = await _run_sync(client.create_and_post_market_order, order_args, None, OrderType.FOK)
         order_id = resp.get("orderID") or resp.get("order_id")
+        if not order_id:
+            log.error("market_order_no_id", token_id=token_id, side=side, size=size, resp=resp)
         log.info("market_order_placed", token_id=token_id, side=side, size=size, order_id=order_id)
         return {"order_id": order_id, "status": resp.get("status"), "raw": resp}
     except Exception as e:

@@ -107,10 +107,15 @@ async def _poll_live_fill(order_id: str | None, cutoff: datetime, poll_interval:
         return {"filled": False}
     while datetime.now(timezone.utc) < cutoff:
         order = await orders.get_order(order_id)
-        if order and order.get("status") in ("MATCHED", "FILLED"):
-            size_matched = float(order.get("size_matched") or order.get("sizeFilled") or 0)
-            avg_price = float(order.get("average_price") or order.get("price") or 0)
-            return {"filled": True, "fill_price": avg_price, "filled_size": size_matched, "fees": 0.0}
+        if order:
+            status = order.get("status")
+            if status in ("MATCHED", "FILLED"):
+                size_matched = float(order.get("size_matched") or order.get("sizeFilled") or 0)
+                avg_price = float(order.get("average_price") or order.get("price") or 0)
+                return {"filled": True, "fill_price": avg_price, "filled_size": size_matched, "fees": 0.0}
+            if status in ("CANCELED", "UNMATCHED"):
+                log.warning("poll_order_cancelled", order_id=order_id, status=status)
+                return {"filled": False, "cancelled": True}
         await asyncio.sleep(poll_interval)
     return {"filled": False, "timed_out": True}
 
