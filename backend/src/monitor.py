@@ -7,7 +7,7 @@ from .config_loader import CONFIG
 from .logger import log, write_event, write_snapshot
 from .state import get_active_trades, update_trade_field
 
-TRIGGER_THRESHOLD = CONFIG["trading"]["trigger_threshold"]
+_DEFAULT_TRIGGER_THRESHOLD = CONFIG["trading"]["trigger_threshold"]
 _monitoring_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -60,7 +60,9 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             await on_trigger_callback(trade_id, "RESOLUTION", None)
             break
 
-        winner, price = paper_trader.check_trigger(yes_token, no_token, TRIGGER_THRESHOLD)
+        coin = trade.get("coin", "")
+        threshold = CONFIG["coins"].get(coin, {}).get("trigger_threshold", _DEFAULT_TRIGGER_THRESHOLD)
+        winner, price = paper_trader.check_trigger(yes_token, no_token, threshold)
         if winner:
             log.info("trigger_detected", trade_id=trade_id, winner=winner, price=price)
             update_trade_field(trade_id, "trigger_hit", True)

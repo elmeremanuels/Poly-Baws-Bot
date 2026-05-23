@@ -17,6 +17,11 @@ MAX_DEV = TRADING_CFG["entry_price_max_deviation"]
 CUTOFF_MIN = TRADING_CFG["entry_cutoff_minutes_before_window"]
 
 
+def _get_trigger_threshold(coin: str) -> float:
+    """Per-coin trigger threshold, falling back to global trading.trigger_threshold."""
+    return CONFIG["coins"].get(coin, {}).get("trigger_threshold", TRADING_CFG["trigger_threshold"])
+
+
 async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     """
     Place YES and NO limit buy orders. Wait for fills.
@@ -314,14 +319,14 @@ async def _winner_exit_paper(
 ) -> None:
     """Paper mode: peg-cross exit engine — resting limit + dynamic market conversion."""
     es = CONFIG["exit"]
-    trigger_price = TRADING_CFG["trigger_threshold"]
+    trade = get_active_trades().get(trade_id)
+    coin = trade["coin"] if trade else "UNKNOWN"
+    trigger_price = _get_trigger_threshold(coin)
     current_limit = round(trigger_price + es["initial_offset"], 2)
     peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
 
-    trade = get_active_trades().get(trade_id)
-    coin = trade["coin"] if trade else "UNKNOWN"
     await write_event(trade_id, "trailing_started", coin, {
         "initial_limit": current_limit, "trigger_price": trigger_price,
     })
@@ -389,15 +394,14 @@ async def _winner_exit_live(
 ) -> None:
     """Live mode: peg-cross exit engine — real limit order + dynamic market conversion."""
     es = CONFIG["exit"]
-    trigger_price = TRADING_CFG["trigger_threshold"]
+    trade = get_active_trades().get(trade_id)
+    coin = trade["coin"] if trade else "UNKNOWN"
+    trigger_price = _get_trigger_threshold(coin)
     current_limit = round(trigger_price + es["initial_offset"], 2)
     peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
     last_status_check = trail_start
-
-    trade = get_active_trades().get(trade_id)
-    coin = trade["coin"] if trade else "UNKNOWN"
 
     limit_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
     current_order_id = limit_resp["order_id"] if limit_resp else None
@@ -530,15 +534,27 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
 
 
 async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
-    """Window expired — position resolves on-chain."""
+    """Window expired — both legs settle on-chain ($1 winner / $0 loser).
+    Since the bot holds BOTH sides, total proceeds = 1.0 × size regardless of which
+    side wins. P&L = proceeds - cost - fees."""
     trade = get_active_trades().get(trade_id)
     if not trade:
         return
+
+    entry_yes = trade.get("entry_yes_price") or ENTRY_PRICE
+    entry_no = trade.get("entry_no_price") or ENTRY_PRICE
+    size = trade.get("entry_size") or 2
+    fees = trade.get("fees_paid") or 0.0
+    gross_pnl = round(1.0 * size - (entry_yes + entry_no) * size, 4)
+    net_pnl = round(gross_pnl - fees, 4)
+
     update_trade_field(trade_id, "winner_exit_reason", "resolution")
+    update_trade_field(trade_id, "gross_pnl", gross_pnl)
+    update_trade_field(trade_id, "net_pnl", net_pnl)
     update_trade_field(trade_id, "status", "resolved")
     await persist_trade(trade_id)
     remove_active_trade(trade_id)
-    await write_event(trade_id, "resolution", trade["coin"], {})
-    log.info("trade_resolved", trade_id=trade_id)
+    await write_event(trade_id, "resolution", trade["coin"], {"net_pnl": net_pnl})
+    log.info("trade_resolved", trade_id=trade_id, net_pnl=net_pnl)
     if broadcast_fn:
         await broadcast_fn({"event": "trade_resolved", "trade_id": trade_id})

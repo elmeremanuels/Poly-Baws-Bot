@@ -3,7 +3,7 @@ trading:
   entry_size_shares: 2
   entry_price_target: 0.50
   entry_price_max_deviation: 0.02
-  trigger_threshold: 0.70
+  trigger_threshold: 0.73
   target_exit: 0.80
   stop_exit: 0.60
   entry_cutoff_minutes_before_window: 2
@@ -12,7 +12,7 @@ trading:
 
 exit:
   # Peg-Cross exit engine (Höschler/Bulthuis V2)
-  cross_threshold: 0.70        # score to trigger market-sell conversion
+  cross_threshold: 0.65        # peg-cross score threshold (0-1) to convert limit→market
   initial_offset: 0.05         # limit starts trigger_price + offset above trigger
   ratchet_buffer: 0.02         # limit stays this far above mid when ratcheting
   check_interval_seconds: 1.5  # polling interval in patient phase
@@ -29,6 +29,7 @@ coins:
     enabled: true
     max_parallel_positions: 5
     market_filter: "btc-updown-5m"
+    trigger_threshold: 0.75    # BTC is more volatile; higher bar reduces stop-outs
   ETH:
     enabled: true
     max_parallel_positions: 5
