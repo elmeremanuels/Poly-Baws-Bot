@@ -1,6 +1,6 @@
 """Live orderbook monitoring and trigger detection for active trades."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from . import ws_client, paper_trader
 from .config_loader import CONFIG
@@ -63,8 +63,18 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             await on_trigger_callback(trade_id, "RESOLUTION", None)
             break
 
+        # Don't fire trigger before window start — early entry (T-45min) may have
+        # pre-window price swings that don't reflect the actual window dynamics.
+        window_start_ts = trade.get("window_start_ts")
+        if window_start_ts:
+            ws_dt = datetime.fromisoformat(window_start_ts).astimezone(timezone.utc)
+            if now < ws_dt - timedelta(seconds=30):
+                await asyncio.sleep(1.0)
+                continue
+
         coin = trade.get("coin", "")
-        threshold = CONFIG["coins"].get(coin, {}).get("trigger_threshold", _DEFAULT_TRIGGER_THRESHOLD)
+        from . import regime as _regime
+        threshold = _regime.get_effective_trigger_threshold(coin)
         winner, price = paper_trader.check_trigger(yes_token, no_token, threshold)
         if winner:
             log.info("trigger_detected", trade_id=trade_id, winner=winner, price=price)

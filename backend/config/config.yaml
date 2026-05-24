@@ -7,7 +7,7 @@ trading:
   target_exit: 0.80
   stop_exit: 0.60
   entry_cutoff_minutes_before_window: 2
-  entry_start_minutes_before_window: 15
+  entry_start_minutes_before_window: 45
   # legacy exit_strategy removed — see top-level exit: block
 
 exit:
@@ -20,10 +20,10 @@ exit:
   time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
   spread_avg_window: 60        # reserved for future spread averaging
   force_exit_seconds: 30       # market-sell with this many seconds left
-  hold_for_resolution_mid_threshold: 0.70  # if mid >= this at force_exit, hold to $1.00 resolution (math: always beats market sell above 0.65)
+  hold_for_resolution_mid_threshold: 0.65  # if mid >= this at force_exit, hold to $1.00 resolution
 
 entry:
-  max_combined_cost: 1.05      # YES ask + NO ask must be ≤ this (tighter = lower entry cost = lower break-even)
+  max_combined_cost: 1.02      # YES ask + NO ask must be ≤ this (stricter = lower break-even)
   max_token_spread: 0.05       # per-token bid/ask spread must be ≤ this
 
 coins:
@@ -94,6 +94,10 @@ dashboard:
   host: "0.0.0.0"
   port: 8000
   auth_user: "admin"
+
+bias:
+  max_weight_ratio: 2.0     # biased side gets up to 2× size when certainty = 1.0
+  min_certainty: 0.20       # ignore bias below this score to avoid marginal signals
 
 logging:
   level: "INFO"

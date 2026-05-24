@@ -18,12 +18,8 @@ CUTOFF_MIN = TRADING_CFG["entry_cutoff_minutes_before_window"]
 
 
 def _get_trigger_threshold(coin: str) -> float:
-    """Per-coin trigger threshold with regime delta applied."""
     from . import regime as _regime
-    base = CONFIG["coins"].get(coin, {}).get("trigger_threshold", TRADING_CFG["trigger_threshold"])
-    current_regime = _regime.get_current_regime(coin)
-    delta = _regime.get_regime_params(current_regime).get("trigger_threshold_delta", 0.0)
-    return max(0.65, min(0.85, base + delta))
+    return _regime.get_effective_trigger_threshold(coin)
 
 
 async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
@@ -42,6 +38,27 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     trade_size_eur = CONFIG["trading"].get("trade_size_eur", 1.0)
     size = round(trade_size_eur / ENTRY_PRICE, 2)
     update_trade_field(trade_id, "entry_size", size)
+
+    # Compute bias-weighted sizes — biased side gets up to max_weight_ratio× more
+    from . import regime as _regime
+    _bias_cfg = CONFIG.get("bias", {})
+    _max_ratio = float(_bias_cfg.get("max_weight_ratio", 2.0))
+    _min_cert = float(_bias_cfg.get("min_certainty", 0.20))
+    _bias, _certainty = _regime.get_bias_certainty(coin)
+    yes_size = size
+    no_size = size
+    if _bias and _certainty >= _min_cert:
+        _weight = round(1.0 + _certainty * (_max_ratio - 1.0), 3)
+        if _bias == "UP":
+            yes_size = round(size * _weight, 2)
+        else:
+            no_size = round(size * _weight, 2)
+        log.info("weighted_entry", trade_id=trade_id, coin=coin, bias=_bias,
+                 certainty=round(_certainty, 3), weight=_weight,
+                 yes_size=yes_size, no_size=no_size)
+    update_trade_field(trade_id, "bias_certainty", round(_certainty, 3) if _bias else 0.0)
+    update_trade_field(trade_id, "yes_size", yes_size)
+    update_trade_field(trade_id, "no_size", no_size)
     # Use the mode stored in the trade (set at creation time) so that mode changes
     # during an active trade don't switch it between paper/live mid-flight.
     trade_mode = trade.get("mode") or get_mode()
@@ -71,33 +88,28 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "status", "entry_placed")
 
     if paper:
-        # Simulate limit buy at current best ask — maker order, 0% taker fee.
-        # _should_enter already verified spreads are acceptable.
         yes_ask = ws_client.get_best_ask(yes_token) or ENTRY_PRICE
         no_ask = ws_client.get_best_ask(no_token) or ENTRY_PRICE
         yes_result, no_result = await asyncio.gather(
-            paper_trader.simulate_limit_buy(yes_token, yes_ask, size),
-            paper_trader.simulate_limit_buy(no_token, no_ask, size),
+            paper_trader.simulate_limit_buy(yes_token, yes_ask, yes_size),
+            paper_trader.simulate_limit_buy(no_token, no_ask, no_size),
         )
         if not yes_result["filled"] or not no_result["filled"]:
             log.warning("entry_limit_fill_failed", trade_id=trade_id,
                         yes_filled=yes_result["filled"], no_filled=no_result["filled"],
                         yes_ask=yes_ask, no_ask=no_ask)
     else:
-        # Live: place at current best ask so the order crosses immediately (taker fill).
-        # _should_enter already validated combined ask ≤ max_combined_cost and spread ≤ max_token_spread.
         yes_ask = round(ws_client.get_best_ask(yes_token) or ENTRY_PRICE, 2)
         no_ask = round(ws_client.get_best_ask(no_token) or ENTRY_PRICE, 2)
         yes_resp, no_resp = await asyncio.gather(
-            orders.place_limit_order(yes_token, "BUY", yes_ask, size),
-            orders.place_limit_order(no_token, "BUY", no_ask, size),
+            orders.place_limit_order(yes_token, "BUY", yes_ask, yes_size),
+            orders.place_limit_order(no_token, "BUY", no_ask, no_size),
         )
         if yes_resp:
             update_trade_field(trade_id, "yes_order_id", yes_resp["order_id"])
         if no_resp:
             update_trade_field(trade_id, "no_order_id", no_resp["order_id"])
 
-        # Poll for fills until cutoff
         yes_result = await _poll_live_fill(yes_resp["order_id"] if yes_resp else None, cutoff_time)
         no_result = await _poll_live_fill(no_resp["order_id"] if no_resp else None, cutoff_time)
 
@@ -280,10 +292,14 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     yes_token = trade["condition_id_yes"]
     no_token = trade["condition_id_no"]
     size = trade["entry_size"]
+    yes_size = float(trade.get("yes_size") or size)
+    no_size = float(trade.get("no_size") or size)
 
     loser_side = "NO" if winner == "YES" else "YES"
     loser_token = no_token if loser_side == "NO" else yes_token
     winner_token = yes_token if winner == "YES" else no_token
+    loser_size = no_size if loser_side == "NO" else yes_size
+    winner_size = yes_size if winner == "YES" else no_size
 
     # Directional bias adjustment: RANGING regime with a bias signal.
     # With-bias win: lower cross_threshold (more patient, expect larger move).
@@ -300,9 +316,9 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
 
     log.info("executing_trigger_action", trade_id=trade_id, winner=winner, loser=loser_side)
 
-    # Step 1: sell loser immediately via market order
+    # Step 1: sell loser immediately via market order (correct size for weighted entries)
     loser_result = await _sell_loser_immediately(
-        loser_token, size, paper, coin, trade_id
+        loser_token, loser_size, paper, coin, trade_id
     )
 
     loser_price = loser_result.get("fill_price") or 0.30
@@ -310,24 +326,29 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     update_trade_field(trade_id, "loser_exit_price", loser_price)
     update_trade_field(trade_id, "loser_exit_ts", datetime.now(timezone.utc).isoformat())
 
-    await write_event(trade_id, "loser_sold", coin, {"side": loser_side, "price": loser_price})
+    await write_event(trade_id, "loser_sold", coin, {
+        "side": loser_side, "price": loser_price,
+        "loser_size": loser_size, "winner_size": winner_size,
+    })
 
     current_fees = trade.get("fees_paid") or 0.0
     total_fees_so_far = current_fees + loser_fees
     update_trade_field(trade_id, "fees_paid", total_fees_so_far)
 
-    # Compute break-even winner price: the minimum winner sell that recovers total cost
+    # Break-even accounts for asymmetric position sizes
     entry_yes = trade.get("entry_yes_price") or ENTRY_PRICE
     entry_no = trade.get("entry_no_price") or ENTRY_PRICE
-    total_cost = (entry_yes + entry_no) * size + total_fees_so_far
-    loser_proceeds = loser_price * size
-    be_price = max(0.0, min(1.0, round((total_cost - loser_proceeds) / size, 4)))
+    total_cost = entry_yes * yes_size + entry_no * no_size + total_fees_so_far
+    loser_proceeds = loser_price * loser_size
+    be_price = max(0.0, min(1.0, round((total_cost - loser_proceeds) / winner_size, 4)))
     update_trade_field(trade_id, "break_even_price", be_price)
     update_trade_field(trade_id, "actual_winner", winner)
-    await write_event(trade_id, "break_even_computed", coin, {"break_even_price": be_price})
+    await write_event(trade_id, "break_even_computed", coin, {
+        "break_even_price": be_price, "winner_size": winner_size, "loser_size": loser_size,
+    })
 
-    # Step 2: single resting target order + stop-market via price monitoring
-    asyncio.create_task(_winner_exit_oco(trade_id, winner_token, size, paper, broadcast_fn, bias_cross_adj))
+    # Step 2: trail winner with its actual (possibly weighted) size
+    asyncio.create_task(_winner_exit_oco(trade_id, winner_token, winner_size, paper, broadcast_fn, bias_cross_adj))
     update_trade_field(trade_id, "status", "exiting")
     await persist_trade(trade_id)
     if broadcast_fn:
@@ -743,16 +764,20 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     update_trade_field(trade_id, "winner_exit_reason", reason)
     update_trade_field(trade_id, "status", "closed")
 
-    # Calculate P&L
+    # Calculate P&L — uses actual per-side sizes (supports weighted bias entries)
     entry_yes = trade.get("entry_yes_price") or ENTRY_PRICE
     entry_no = trade.get("entry_no_price") or ENTRY_PRICE
-    size = trade.get("entry_size") or 2
+    base_size = trade.get("entry_size") or 2
+    yes_size = float(trade.get("yes_size") or base_size)
+    no_size = float(trade.get("no_size") or base_size)
+    actual_winner = trade.get("actual_winner") or "YES"
+    winner_sz = yes_size if actual_winner == "YES" else no_size
+    loser_sz = no_size if actual_winner == "YES" else yes_size
     loser_price = trade.get("loser_exit_price") or 0.30
-    winner_price = fill_price or 1.0  # resolution = $1
+    winner_price = fill_price or 1.0
 
-    # Cost basis: (entry_yes + entry_no) * size
-    cost = (entry_yes + entry_no) * size
-    proceeds = (loser_price + (winner_price or 0)) * size
+    cost = entry_yes * yes_size + entry_no * no_size
+    proceeds = loser_price * loser_sz + (winner_price or 0) * winner_sz
     fees = trade.get("fees_paid") or 0.0
     gross_pnl = proceeds - cost
     net_pnl = gross_pnl - fees

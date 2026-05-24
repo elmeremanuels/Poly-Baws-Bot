@@ -221,3 +221,37 @@ def update_regime_profile(regime: str, params: dict) -> None:
     if extracted:
         _learned_profiles[regime] = extracted
         log.info("regime_profile_updated", regime=regime, params=extracted)
+
+
+def get_bias_certainty(coin: str) -> tuple[str | None, float]:
+    """Certainty score for the directional bias signal (0.0–1.0).
+
+    0.0 = price just at threshold (0.75 or 0.25 of 30-min range).
+    1.0 = price at extreme (1.0 = top or 0.0 = bottom of range).
+    Only non-zero in RANGING regime.
+    """
+    if get_current_regime(coin) != "RANGING":
+        return None, 0.0
+    stats = get_asset_price_stats(coin)
+    if not stats:
+        return None, 0.0
+    pos = stats["price_position"]
+    if pos >= 0.75:
+        return "DOWN", min(1.0, (pos - 0.75) / 0.25)
+    if pos <= 0.25:
+        return "UP", min(1.0, (0.25 - pos) / 0.25)
+    return None, 0.0
+
+
+def get_effective_trigger_threshold(coin: str) -> float:
+    """Coin trigger threshold with regime delta applied.
+
+    Used by both triggers.py and monitor.py so the detection threshold is
+    consistent between entry-guard and live trigger-fire.
+    """
+    base = CONFIG["coins"].get(coin, {}).get(
+        "trigger_threshold", CONFIG["trading"]["trigger_threshold"]
+    )
+    regime = get_current_regime(coin)
+    delta = get_regime_params(regime).get("trigger_threshold_delta", 0.0)
+    return max(0.65, min(0.85, base + delta))

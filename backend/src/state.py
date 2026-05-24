@@ -109,6 +109,9 @@ def create_trade_state(
         "param_snapshot": None,
         "break_even_price": None,
         "actual_winner": None,
+        "bias_certainty": None,
+        "yes_size": None,
+        "no_size": None,
     }
     return state
 

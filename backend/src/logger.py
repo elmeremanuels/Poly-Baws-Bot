@@ -191,6 +191,9 @@ async def init_db() -> None:
             ("directional_bias", "TEXT"),
             ("price_position", "REAL"),
             ("asset_range_pct", "REAL"),
+            ("bias_certainty", "REAL"),
+            ("yes_size", "REAL"),
+            ("no_size", "REAL"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
