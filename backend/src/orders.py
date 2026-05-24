@@ -288,7 +288,8 @@ async def get_balance() -> float | None:
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
         )
         if result and "balance" in result:
-            return float(result["balance"])
+            # CLOB returns raw USDC units (6 decimals), same as on-chain ERC-20
+            return float(result["balance"]) / 1e6
     except Exception as e:
         log.warning("get_balance_clob_failed", error=str(e))
 

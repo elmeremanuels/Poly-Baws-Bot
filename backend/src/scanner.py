@@ -14,37 +14,66 @@ COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].item
 _market_cache: dict[str, list[dict]] = {}
 _last_refresh: dict[str, datetime] = {}
 
+# Shared events cache so all 5 coins share one API call per refresh cycle
+_events_cache: list[dict] = []
+_events_cache_ts: datetime | None = None
+_EVENTS_CACHE_TTL = timedelta(seconds=45)
 
-async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
-    """Fetch currently-tradeable events from Gamma API; extract nested markets."""
+
+async def _fetch_all_events() -> list[dict]:
+    """Fetch upcoming events from Gamma API (one call shared by all coins).
+
+    Uses end_date_max to limit to the next 26 hours and a high limit (2000) to
+    ensure all 5 coins' 5-minute windows (≤1560 markets) fit in a single response.
+    Without end_date_max the limit-500 default silently drops coins near the tail.
+    """
+    global _events_cache, _events_cache_ts
     now = datetime.now(timezone.utc)
-    end_min = now.isoformat()
+    if _events_cache_ts and (now - _events_cache_ts) < _EVENTS_CACHE_TTL:
+        return _events_cache
 
-    results = []
+    end_max = (now + timedelta(hours=26)).isoformat()
+    params = {
+        "closed": "false",
+        "limit": 2000,
+        "order": "endDate",
+        "ascending": "true",
+        "end_date_min": now.isoformat(),
+        "end_date_max": end_max,
+    }
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            params = {
-                "closed": "false",
-                "limit": 500,
-                "order": "endDate",
-                "ascending": "true",
-                "end_date_min": end_min,
-            }
             resp = await client.get(f"{GAMMA_URL}/events", params=params)
-            if resp.status_code == 200:
-                events = resp.json()
-                if not isinstance(events, list):
-                    events = events.get("events", [])
-                for event in events:
-                    slug = (event.get("slug") or "").lower()
-                    if filter_slug.lower() not in slug:
-                        continue
-                    for market in event.get("markets") or []:
-                        normalized = _normalize_event_market(coin, event, market)
-                        if normalized:
-                            results.append(normalized)
+        if resp.status_code == 200:
+            events = resp.json()
+            if not isinstance(events, list):
+                events = events.get("events", [])
+            _events_cache = events
+            _events_cache_ts = now
+            log.debug("gamma_events_fetched", count=len(events))
+        else:
+            log.warning("gamma_events_bad_status", status=resp.status_code)
     except Exception as e:
-        log.error("scanner_fetch_error", coin=coin, error=str(e))
+        log.error("gamma_events_fetch_error", error=str(e))
+
+    return _events_cache
+
+
+async def _fetch_markets_for_coin(coin: str, filter_slug: str) -> list[dict]:
+    """Filter the shared events cache for this coin's updown markets."""
+    events = await _fetch_all_events()
+    results = []
+    for event in events:
+        slug = (event.get("slug") or "").lower()
+        if filter_slug.lower() not in slug:
+            continue
+        for market in event.get("markets") or []:
+            normalized = _normalize_event_market(coin, event, market)
+            if normalized:
+                results.append(normalized)
+    if not results:
+        log.warning("scanner_coin_no_events", coin=coin, filter=filter_slug,
+                    total_events=len(events))
     return results
 
 
