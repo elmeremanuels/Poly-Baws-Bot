@@ -714,6 +714,21 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     update_trade_field(trade_id, "gross_pnl", round(gross_pnl, 4))
     update_trade_field(trade_id, "net_pnl", round(net_pnl, 4))
 
+    # Adaptive learning: adjust trigger_threshold from real deploy-phase outcomes
+    if trade.get("trigger_hit"):
+        try:
+            from . import adaptive, learning as _learning
+            if _learning.get_current_phase() == "deploy":
+                adaptive.record_closed_trade(
+                    coin=trade["coin"],
+                    net_pnl=net_pnl,
+                    size=size,
+                    loser_exit_price=loser_price,
+                    break_even_price=trade.get("break_even_price") or 0.0,
+                )
+        except Exception:
+            pass  # never block trade close on adaptive errors
+
     await persist_trade(trade_id)
     await write_event(trade_id, "trade_closed", trade["coin"], {
         "reason": reason, "net_pnl": net_pnl, "fill_price": fill_price

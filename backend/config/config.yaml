@@ -13,18 +13,18 @@ trading:
 exit:
   # Peg-Cross exit engine (Höschler/Bulthuis V2)
   cross_threshold: 0.65        # peg-cross score threshold (0-1) to convert limit→market
-  initial_offset: 0.05         # limit starts trigger_price + offset above trigger
-  ratchet_buffer: 0.02         # limit stays this far above mid when ratcheting
-  min_winner_profit_margin: 0.03  # resting limit sits at least break_even + this (ensures real profit)
+  initial_offset: 0.06         # limit starts trigger_price + offset above trigger
+  ratchet_buffer: 0.025        # limit stays this far above mid when ratcheting
+  min_winner_profit_margin: 0.01  # resting limit sits at least break_even + this
   check_interval_seconds: 1.5  # polling interval in patient phase
   time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
   spread_avg_window: 60        # reserved for future spread averaging
   force_exit_seconds: 30       # market-sell with this many seconds left
-  hold_for_resolution_mid_threshold: 0.90  # if mid >= this at force_exit, hold to resolution instead of selling
+  hold_for_resolution_mid_threshold: 0.85  # if mid >= this at force_exit, hold to resolution instead of selling
 
 entry:
-  max_combined_cost: 1.07      # YES ask + NO ask must be ≤ this (taker entry; break_even exit protects margin)
-  max_token_spread: 0.06       # per-token bid/ask spread must be ≤ this
+  max_combined_cost: 1.05      # YES ask + NO ask must be ≤ this (tighter = lower entry cost = lower break-even)
+  max_token_spread: 0.05       # per-token bid/ask spread must be ≤ this
 
 coins:
   BTC:
@@ -76,13 +76,13 @@ polymarket:
   chain_id: 137
 
 learning:
-  min_trades_per_coin: 50      # minimum paper trades per coin before analysis
-  max_learn_hours: 4
-  max_live_trades: 30
-  max_live_hours: 2
+  min_trades_per_coin: 15      # minimum paper trades per coin before analysis (75 total vs 250 old)
+  max_learn_hours: 2
+  max_live_trades: 15          # re-analyze after 15 live trades for faster iteration
+  max_live_hours: 1            # re-analyze every hour
   max_live_loss: 20.00         # EUR emergency stop for live phase
-  min_validate_trades: 30
-  max_validate_hours: 2
+  min_validate_trades: 15
+  max_validate_hours: 1
   confidence_threshold: 0.60
 
 claude:

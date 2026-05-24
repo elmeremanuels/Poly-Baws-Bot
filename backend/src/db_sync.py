@@ -357,7 +357,10 @@ def get_cycle_stats(cycle_id: int) -> dict:
                     / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0), 2) as peg_cross_rate,
                 ROUND(SUM(CASE WHEN winner_exit_reason='limit_filled' AND trigger_hit=1
                     THEN 1.0 ELSE 0.0 END)
-                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0), 2) as limit_filled_rate
+                    / NULLIF(SUM(CASE WHEN trigger_hit=1 THEN 1 ELSE 0 END), 0), 2) as limit_filled_rate,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN loser_exit_price END), 4) as avg_loser_exit_price,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN winner_exit_price END), 4) as avg_winner_exit_price,
+                ROUND(AVG(CASE WHEN trigger_hit=1 THEN break_even_price END), 4) as avg_break_even_price
             FROM trades WHERE cycle_id=?
             GROUP BY coin""",
             (cycle_id,),
