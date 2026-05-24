@@ -29,19 +29,10 @@ def analytics_panel() -> None:
         )
 
     coin_filter = selected_coin if selected_coin != "All" else None
-    only_today = (selected_range == "Today")
-    days = None if only_today else _RANGE_DAYS[selected_range]
+    days = _RANGE_DAYS[selected_range]
 
-    trades = get_analytics_trades(coin=coin_filter, days=days, only_today=only_today)
+    trades = get_analytics_trades(coin=coin_filter, days=days)
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
-
-    # Count label so the user can confirm the filter is active
-    if only_today:
-        st.caption(f"{len(trades)} trades vandaag (UTC)")
-    elif days:
-        st.caption(f"{len(trades)} trades — afgelopen {days} dagen")
-    else:
-        st.caption(f"{len(trades)} trades — alle tijd")
 
     with col_export:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -71,11 +62,11 @@ def analytics_panel() -> None:
     _key_metrics(df)
 
     # ── Exit Reason Breakdown ─────────────────────────────────────────────────
-    _exit_breakdown(coin_filter, days, only_today)
+    _exit_breakdown(coin_filter, days)
 
     # ── Per-Coin Comparison ───────────────────────────────────────────────────
     if coin_filter is None:
-        _coin_comparison(days, only_today)
+        _coin_comparison(days)
 
     # ── Cumulative P&L Chart ──────────────────────────────────────────────────
     _cumulative_pnl(df)
@@ -84,7 +75,7 @@ def analytics_panel() -> None:
     _trailing_metrics(df)
 
     # ── Hourly Analysis ───────────────────────────────────────────────────────
-    _hourly_analysis(coin_filter, days, only_today)
+    _hourly_analysis(coin_filter, days)
 
     # ── Full Trade History ────────────────────────────────────────────────────
     _trade_history(df)
@@ -116,9 +107,9 @@ def _key_metrics(df: pd.DataFrame) -> None:
     c[5].metric("Avg P&L/Trade", f"€{avg_pnl:+.4f}")
 
 
-def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False) -> None:
+def _exit_breakdown(coin: str | None, days: int | None) -> None:
     st.markdown("### Exit Reason Breakdown")
-    stats = get_exit_reason_stats(coin=coin, days=days, only_today=only_today)
+    stats = get_exit_reason_stats(coin=coin, days=days)
     if not stats:
         st.caption("No data.")
         return
@@ -142,9 +133,9 @@ def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False
         st.bar_chart(sdf.set_index("winner_exit_reason")[["count"]])
 
 
-def _coin_comparison(days: int | None, only_today: bool = False) -> None:
+def _coin_comparison(days: int | None) -> None:
     st.markdown("### Per-Coin Comparison")
-    rows = get_coin_comparison(days=days, only_today=only_today)
+    rows = get_coin_comparison(days=days)
     if not rows:
         st.caption("No data.")
         return
@@ -200,9 +191,9 @@ def _trailing_metrics(df: pd.DataFrame) -> None:
         st.scatter_chart(scatter, x="time_in_trail_seconds", y="net_pnl", color="winner_exit_reason")
 
 
-def _hourly_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
+def _hourly_analysis(coin: str | None, days: int | None) -> None:
     st.markdown("### Avg P&L by Hour of Day (UTC)")
-    hourly = get_hourly_pnl(coin=coin, days=days, only_today=only_today)
+    hourly = get_hourly_pnl(coin=coin, days=days)
     if not hourly:
         st.caption("Not enough data yet (needs 100+ trades for reliable signal).")
         return

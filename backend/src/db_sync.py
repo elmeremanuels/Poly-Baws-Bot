@@ -158,7 +158,7 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
-def get_analytics_trades(coin: str | None = None, days: int | None = None, only_today: bool = False) -> list[dict]:
+def get_analytics_trades(coin: str | None = None, days: int | None = None) -> list[dict]:
     """All trades, optionally filtered by coin and date range. No trigger/status filter."""
     if not _db_path.exists():
         return []
@@ -167,9 +167,7 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None, only_
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
+    if days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -181,7 +179,7 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None, only_
     return [dict(r) for r in rows]
 
 
-def get_exit_reason_stats(coin: str | None = None, days: int | None = None, only_today: bool = False) -> list[dict]:
+def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> list[dict]:
     """Aggregate stats grouped by winner_exit_reason."""
     if not _db_path.exists():
         return []
@@ -190,9 +188,7 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None, only
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
+    if days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -215,15 +211,13 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None, only
     return [dict(r) for r in rows]
 
 
-def get_coin_comparison(days: int | None = None, only_today: bool = False) -> list[dict]:
+def get_coin_comparison(days: int | None = None) -> list[dict]:
     """Per-coin aggregated stats for closed triggered trades."""
     if not _db_path.exists():
         return []
     conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
     params: list = []
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
+    if days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -247,7 +241,7 @@ def get_coin_comparison(days: int | None = None, only_today: bool = False) -> li
     return [dict(r) for r in rows]
 
 
-def get_hourly_pnl(coin: str | None = None, days: int | None = None, only_today: bool = False) -> list[dict]:
+def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dict]:
     """Average P&L by hour of day (UTC)."""
     if not _db_path.exists():
         return []
@@ -256,9 +250,7 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None, only_today:
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
+    if days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
