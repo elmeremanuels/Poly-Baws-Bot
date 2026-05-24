@@ -581,7 +581,8 @@ async def _winner_exit_live(
                     "mid": mid_check, "seconds_left": round(seconds_left, 1),
                     "note": "winner_tokens_need_redemption_in_polymarket_wallet",
                 })
-                await _close_trade(trade_id, mid_check, "held_for_resolution", broadcast_fn)
+                # Token resolves to exactly $1.00 on-chain; mid at hold time is just confirmation
+                await _close_trade(trade_id, 1.0, "held_for_resolution", broadcast_fn)
                 return
             mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
