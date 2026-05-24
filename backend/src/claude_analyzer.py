@@ -6,7 +6,7 @@ import re
 import httpx
 
 from .config_loader import CONFIG
-from .db_sync import get_cycle_trades, get_cycle_stats
+from .db_sync import get_cycle_trades, get_cycle_stats, get_cycle_pnl_accuracy
 from .logger import log
 
 _CLAUDE_URL = "https://api.anthropic.com/v1/messages"
@@ -51,25 +51,41 @@ Diagnosis shortcuts:
   avg_winner < avg_break_even → raise trigger_threshold (primary lever) or lower cross_threshold
   avg_winner close to 0.85  → lower hold_for_resolution_mid_threshold so they go to $1.00
 
-adaptive_stats in the prompt show the real-time EMA of pnl/share and any threshold adjustments
-already applied by the in-process adaptive tuner this deploy cycle.
+adaptive_stats shows real-time EMA of pnl/share and threshold adjustments already applied.
+
+pnl_accuracy shows computed P&L (from trade DB) vs actual USDC delta since cycle start.
+  pnl_accuracy_ratio near 1.0 = calculations match reality. Far from 1.0 = data is unreliable.
+  Degrade confidence_score proportionally: if ratio < 0.7, cap confidence at 0.55.
+  Note: held_for_resolution trades are excluded (their P&L is real but not yet in USDC balance).
+
+global_params you can suggest: max_entry_cost, max_token_spread, hold_for_resolution_mid_threshold.
+  hold_for_resolution_mid_threshold (0.60–0.85): at force_exit time, hold to $1.00 resolution
+  when winner mid >= this threshold. Math: holding is always better in expectation above 0.65
+  because resolution ($1.00) beats market-sell (bid = mid minus spread) in expected value.
+  Suggest lower values (0.65–0.70) when trades are near break-even; higher (0.75–0.80) when
+  you see frequent reversals in the trade sample.
 
 Respond with ONLY a JSON object. No markdown fences, no explanation outside the JSON."""
 
 
 def _build_prompt(trades: list, stats: dict, current_params: dict,
-                  adaptive_stats: dict | None = None) -> str:
+                  adaptive_stats: dict | None = None,
+                  pnl_accuracy: dict | None = None) -> str:
     payload: dict = {
         "cycle_stats": stats,
         "current_params": current_params,
         "recent_trades_sample": trades,
         "task": (
             "Analyze and return optimized parameters. "
-            "Confidence < 0.6 means stay in paper mode for another cycle."
+            "Confidence < 0.6 means stay in paper mode for another cycle. "
+            "If pnl_accuracy_ratio is far from 1.0, reduce confidence score accordingly — "
+            "the computed data may not reflect reality."
         ),
     }
     if adaptive_stats:
         payload["adaptive_tuner_stats"] = adaptive_stats
+    if pnl_accuracy:
+        payload["pnl_accuracy"] = pnl_accuracy
     return json.dumps(payload, indent=2)
 
 
@@ -114,6 +130,8 @@ async def analyze_cycle(cycle_id: int) -> dict:
         },
     }
 
+    pnl_accuracy = get_cycle_pnl_accuracy(cycle_id)
+
     schema = """{
   "confidence_score": 0.0-1.0,
   "reasoning": "...",
@@ -121,10 +139,17 @@ async def analyze_cycle(cycle_id: int) -> dict:
     "BTC": {"trigger_threshold": float, "cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "enabled": bool},
     "ETH": { ... }, "SOL": { ... }, "XRP": { ... }, "DOGE": { ... }
   },
-  "global_params": {"max_entry_cost": float, "max_token_spread": float}
+  "global_params": {
+    "max_entry_cost": float,
+    "max_token_spread": float,
+    "hold_for_resolution_mid_threshold": float
+  }
 }"""
 
-    user_prompt = _build_prompt(trades, stats, current_params, adaptive_stats) + f"\n\nReturn this exact JSON structure:\n{schema}"
+    user_prompt = (
+        _build_prompt(trades, stats, current_params, adaptive_stats, pnl_accuracy)
+        + f"\n\nReturn this exact JSON structure:\n{schema}"
+    )
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
@@ -268,5 +293,8 @@ def _parse_response(text: str) -> dict:
         gp["max_entry_cost"] = max(1.00, min(1.05, float(gp["max_entry_cost"])))
     if "max_token_spread" in gp:
         gp["max_token_spread"] = max(0.02, min(0.10, float(gp["max_token_spread"])))
+    if "hold_for_resolution_mid_threshold" in gp:
+        # Allow Claude to tune between 0.60 (aggressive hold) and 0.85 (conservative)
+        gp["hold_for_resolution_mid_threshold"] = max(0.60, min(0.85, float(gp["hold_for_resolution_mid_threshold"])))
 
     return params

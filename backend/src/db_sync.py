@@ -440,6 +440,52 @@ def save_manual_analysis_to_db(result: dict) -> None:
         )
 
 
+def get_cycle_pnl_accuracy(cycle_id: int) -> dict:
+    """Compare computed P&L (from trades DB) vs actual USDC delta (from portfolio snapshots).
+
+    Excludes held_for_resolution trades — their P&L only becomes cash after claiming.
+    Returns a dict suitable for inclusion in Claude's analysis prompt.
+    """
+    if not _db_path.exists():
+        return {}
+    with _conn() as conn:
+        cycle_row = conn.execute(
+            "SELECT usdc_at_start FROM learning_cycles WHERE id=?", (cycle_id,)
+        ).fetchone()
+        usdc_at_start = float(cycle_row[0]) if cycle_row and cycle_row[0] is not None else None
+
+        pnl_row = conn.execute(
+            """SELECT ROUND(SUM(net_pnl), 4), COUNT(*)
+               FROM trades
+               WHERE cycle_id=? AND status='closed' AND trigger_hit=1 AND net_pnl IS NOT NULL""",
+            (cycle_id,),
+        ).fetchone()
+        computed_pnl = float(pnl_row[0]) if pnl_row and pnl_row[0] is not None else None
+        closed_trades = int(pnl_row[1]) if pnl_row else 0
+
+        usdc_row = conn.execute(
+            "SELECT value FROM dashboard_state WHERE key='portfolio_usdc'"
+        ).fetchone()
+        current_usdc = float(usdc_row[0]) if usdc_row and usdc_row[0] else None
+
+    actual_delta = None
+    accuracy_ratio = None
+    if usdc_at_start is not None and current_usdc is not None:
+        actual_delta = round(current_usdc - usdc_at_start, 4)
+        if computed_pnl and computed_pnl != 0:
+            accuracy_ratio = round(actual_delta / computed_pnl, 3)
+
+    return {
+        "usdc_at_cycle_start": usdc_at_start,
+        "current_usdc": current_usdc,
+        "actual_usdc_delta": actual_delta,
+        "computed_pnl_closed_trades": computed_pnl,
+        "closed_triggered_trades": closed_trades,
+        "pnl_accuracy_ratio": accuracy_ratio,
+        "note": "held_for_resolution trades excluded (unclaimed = not yet in USDC balance)",
+    }
+
+
 def get_portfolio_snapshot() -> dict:
     """Read latest portfolio data from dashboard_state."""
     def _f(v: str | None) -> float | None:

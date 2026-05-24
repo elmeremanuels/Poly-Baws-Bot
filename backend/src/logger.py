@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS learning_cycles (
     claude_analysis TEXT,
     claude_params TEXT,
     confidence_score REAL,
+    usdc_at_start REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -202,9 +203,15 @@ async def init_db() -> None:
                 claude_analysis TEXT,
                 claude_params TEXT,
                 confidence_score REAL,
+                usdc_at_start REAL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # Migration: add usdc_at_start to existing learning_cycles rows
+        async with db.execute("PRAGMA table_info(learning_cycles)") as cur:
+            lc_cols = {row[1] for row in await cur.fetchall()}
+        if "usdc_at_start" not in lc_cols:
+            await db.execute("ALTER TABLE learning_cycles ADD COLUMN usdc_at_start REAL")
         await db.commit()
     log.info("database_initialized", path=str(_db_path))
 

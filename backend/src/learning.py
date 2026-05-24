@@ -31,12 +31,12 @@ def is_analyzing() -> bool:
 
 # ── DB helpers (async, bot-side) ──────────────────────────────────────────────
 
-async def _db_create_cycle(cycle_number: int, params_used: str) -> int:
+async def _db_create_cycle(cycle_number: int, params_used: str, usdc_at_start: float | None = None) -> int:
     async with _db() as db:
         cursor = await db.execute(
-            "INSERT INTO learning_cycles (cycle_number, phase, phase_started_at, started_at, params_used) "
-            "VALUES (?, 'learn', datetime('now'), datetime('now'), ?)",
-            (cycle_number, params_used),
+            "INSERT INTO learning_cycles (cycle_number, phase, phase_started_at, started_at, params_used, usdc_at_start) "
+            "VALUES (?, 'learn', datetime('now'), datetime('now'), ?, ?)",
+            (cycle_number, params_used, usdc_at_start),
         )
         await db.commit()
         return cursor.lastrowid
@@ -144,10 +144,18 @@ class LearningOrchestrator:
     async def _start_new_cycle(self) -> None:
         self._cycle_number += 1
         params_json = json.dumps(self._current_config_snapshot())
-        cycle_id = await _db_create_cycle(self._cycle_number, params_json)
+        # Snapshot current USDC so Claude can compare computed vs actual P&L later
+        usdc_at_start: float | None = None
+        try:
+            from .logger import load_dashboard_state
+            usdc_str = await load_dashboard_state("portfolio_usdc")
+            usdc_at_start = float(usdc_str) if usdc_str else None
+        except Exception:
+            pass
+        cycle_id = await _db_create_cycle(self._cycle_number, params_json, usdc_at_start)
         self._cycle_id = cycle_id
         self._set_phase("learn")
-        log.info("learning_cycle_started", cycle=self._cycle_number)
+        log.info("learning_cycle_started", cycle=self._cycle_number, usdc_at_start=usdc_at_start)
 
     def _set_phase(self, phase: str, reset_time: bool = True) -> None:
         global _current_cycle_id, _current_phase
@@ -330,6 +338,8 @@ class LearningOrchestrator:
             CONFIG["entry"]["max_combined_cost"] = float(gp["max_entry_cost"])
         if "max_token_spread" in gp:
             CONFIG["entry"]["max_token_spread"] = float(gp["max_token_spread"])
+        if "hold_for_resolution_mid_threshold" in gp:
+            CONFIG["exit"]["hold_for_resolution_mid_threshold"] = float(gp["hold_for_resolution_mid_threshold"])
         log.info("claude_params_applied", cycle=self._cycle_number)
 
     def _restore_original_params(self) -> None:
