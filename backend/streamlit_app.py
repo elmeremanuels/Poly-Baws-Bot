@@ -18,6 +18,7 @@ from src.db_sync import (
     get_hybrid_pending,
     get_latest_completed_cycle,
     get_latest_manual_analysis,
+    get_latest_snapshot_for_trade,
     get_open_trades,
     get_phase_stats,
     get_portfolio_snapshot,
@@ -260,18 +261,26 @@ with st.sidebar:
 
     st.markdown("**Trade size (EUR per leg)**")
     saved_eur = get_state("trade_size_eur")
-    default_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
+    db_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
+    # Keep a pending value in session_state while the bot processes the command.
+    # Clear it once the DB reflects the change.
+    _ts_key = "_pending_trade_size_eur"
+    pending = st.session_state.get(_ts_key)
+    if pending is not None and abs(pending - db_eur) < 0.001:
+        del st.session_state[_ts_key]
+    display_eur = st.session_state.get(_ts_key, db_eur)
     new_eur = st.number_input(
         "trade_size_input",
         min_value=0.50,
         max_value=100.0,
-        value=default_eur,
+        value=display_eur,
         step=0.10,
         format="%.2f",
         label_visibility="collapsed",
     )
-    if abs(new_eur - default_eur) > 0.001:
+    if abs(new_eur - display_eur) > 0.001:
         write_command("set_trade_size", {"trade_size_eur": new_eur})
+        st.session_state[_ts_key] = new_eur
         st.rerun()
 
     st.divider()
@@ -423,6 +432,68 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     )
 
 
+@st.dialog("Trade Details", width="large")
+def _trade_detail_dialog(trade: dict) -> None:
+    coin = trade.get("coin", "")
+    status = trade.get("status", "")
+    trade_mode = (trade.get("mode") or "").replace("_", " ")
+    trade_id = trade.get("trade_id", "")
+    winner_side = trade.get("winner_side")
+
+    st.markdown(f"### {COIN_EMOJI.get(coin, '')} {coin} — {status.upper()}")
+    st.caption(f"Mode bij entry: **{trade_mode}** · ID: `{trade_id[:12]}…`")
+    st.divider()
+
+    entry_yes = trade.get("entry_yes_price")
+    entry_no = trade.get("entry_no_price")
+    be = trade.get("break_even_price")
+
+    exit_cfg = CONFIG.get("exit", {})
+    if be is not None:
+        target = round(be + exit_cfg.get("min_winner_profit_margin", 0.03), 3)
+    else:
+        trigger_thr = CONFIG["trading"].get("trigger_threshold", 0.73)
+        target = round(trigger_thr + exit_cfg.get("initial_offset", 0.05), 3)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Entry YES", f"{entry_yes:.3f}" if entry_yes else "—")
+    c2.metric("Entry NO", f"{entry_no:.3f}" if entry_no else "—")
+    c3.metric("Break-even", f"{be:.3f}" if be is not None else "—")
+    c4.metric("Doelprijs", f"{target:.3f}")
+
+    if winner_side:
+        st.success(f"Trigger geraakt — **{winner_side}** heeft gewonnen")
+
+    # Latest prices from orderbook snapshot (written every 30s during monitoring)
+    snap = get_latest_snapshot_for_trade(trade_id)
+    if snap:
+        yes_mid = snap.get("yes_mid")
+        no_mid = snap.get("no_mid")
+        age = snap.get("age_seconds")
+        age_str = f"{age:.0f}s geleden" if age is not None else "onbekend"
+        st.markdown(f"**Live prijzen** _(snapshot {age_str})_")
+        cs1, cs2, cs3 = st.columns(3)
+        cs1.metric("YES mid (kans omhoog)", f"{yes_mid:.3f}" if yes_mid else "—")
+        cs2.metric("NO mid (kans omlaag)", f"{no_mid:.3f}" if no_mid else "—")
+        if yes_mid is not None:
+            conf = yes_mid if (winner_side or "YES") == "YES" else (1 - yes_mid)
+            cs3.metric("Polymarket confidence", f"{conf*100:.1f}%")
+    else:
+        st.caption("Nog geen prijssnapshot — trade is pas gestart of monitoring nog niet begonnen.")
+
+    st.divider()
+    c5, c6 = st.columns(2)
+    c5.metric("Window start", fmt_time(trade.get("window_start_ts")))
+    c6.metric("Window einde", fmt_time(trade.get("window_end_ts")))
+
+    yes_token = trade.get("condition_id_yes", "")
+    no_token = trade.get("condition_id_no", "")
+    if yes_token:
+        st.caption(f"YES token: `{yes_token[:24]}…`")
+    if no_token:
+        st.caption(f"NO token: `{no_token[:24]}…`")
+
+
 def _active_positions() -> None:
     st.markdown("#### Active Positions")
     trades = get_open_trades()
@@ -436,16 +507,19 @@ def _active_positions() -> None:
         coin = t.get("coin", "")
         status = t.get("status", "")
         winner = t.get("winner_side") or "—"
+        trade_mode = (t.get("mode") or "").replace("_", " ")
 
-        c = st.columns([1, 2, 1.5, 1.5, 1.5, 1.5, 1.5, 1])
+        c = st.columns([1, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1, 1])
         c[0].markdown(f"**{coin}**")
         c[1].caption(status)
-        c[2].caption(fmt_time(t.get("window_start_ts")))
-        c[3].caption(f"YES {t['entry_yes_price']:.2f}" if t.get("entry_yes_price") else "YES —")
-        c[4].caption(f"NO {t['entry_no_price']:.2f}" if t.get("entry_no_price") else "NO —")
-        c[5].caption(f"BE €{be:.2f}" if be is not None else "BE —")
-        c[6].caption(f"Winner: {winner}")
-        if c[7].button("🛑", key=f"fc_{trade_id}", help="Force close deze positie"):
+        c[2].caption(trade_mode)
+        c[3].caption(fmt_time(t.get("window_start_ts")))
+        c[4].caption(f"YES {t['entry_yes_price']:.2f}" if t.get("entry_yes_price") else "YES —")
+        c[5].caption(f"NO {t['entry_no_price']:.2f}" if t.get("entry_no_price") else "NO —")
+        c[6].caption(f"BE €{be:.2f}" if be is not None else "BE —")
+        if c[7].button("ℹ️", key=f"info_{trade_id}", help="Details bekijken"):
+            _trade_detail_dialog(t)
+        if c[8].button("🛑", key=f"fc_{trade_id}", help="Force close deze positie"):
             write_command("force_close_trade", {"trade_id": trade_id})
             st.toast(f"{coin} force close verstuurd.", icon="🛑")
             st.rerun()

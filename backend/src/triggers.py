@@ -38,12 +38,14 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     trade_size_eur = CONFIG["trading"].get("trade_size_eur", 1.0)
     size = round(trade_size_eur / ENTRY_PRICE, 2)
     update_trade_field(trade_id, "entry_size", size)
-    mode = get_mode()
-    if mode == "live_learning":
+    # Use the mode stored in the trade (set at creation time) so that mode changes
+    # during an active trade don't switch it between paper/live mid-flight.
+    trade_mode = trade.get("mode") or get_mode()
+    if trade_mode == "live_learning":
         from . import learning as _learning
         paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
     else:
-        paper = is_paper_mode()
+        paper = trade_mode.startswith("paper")
 
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
@@ -211,12 +213,14 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     if not trade:
         return
 
-    _mode = get_mode()
-    if _mode == "live_learning":
+    # Use the mode stored at trade creation time so a mode change mid-trade
+    # doesn't switch between paper/live execution.
+    trade_mode = trade.get("mode") or get_mode()
+    if trade_mode == "live_learning":
         from . import learning as _learning
         paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
     else:
-        paper = is_paper_mode()
+        paper = trade_mode.startswith("paper")
     coin = trade["coin"]
     yes_token = trade["condition_id_yes"]
     no_token = trade["condition_id_no"]

@@ -367,6 +367,33 @@ def get_cycle_stats(cycle_id: int) -> dict:
     }
 
 
+def get_latest_snapshot_for_trade(trade_id: str) -> dict | None:
+    """Return latest orderbook snapshot for a trade, with YES/NO mid prices."""
+    if not _db_path.exists():
+        return None
+    import json as _json
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT snapshot, best_bid, best_ask, ts FROM orderbook_snapshots "
+            "WHERE trade_id=? ORDER BY id DESC LIMIT 1",
+            (trade_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        snap = _json.loads(row[0] or "{}")
+        ts = row[3]
+        age = None
+        if ts:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+        return {**snap, "best_bid": row[1], "best_ask": row[2], "age_seconds": age}
+    except Exception:
+        return None
+
+
 def get_latest_manual_analysis() -> dict | None:
     """Return the most recent manual Claude analysis (phase='manual') from analytics tab."""
     if not _db_path.exists():
