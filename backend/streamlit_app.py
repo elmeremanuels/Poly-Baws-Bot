@@ -32,6 +32,7 @@ from src.db_sync import (
 from src.commands import write_command, delete_hybrid_pending
 from src.risk import KILL_FLAG_PATH
 from analytics_tab import analytics_panel
+from signal_lab_tab import signal_lab_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -791,13 +792,15 @@ def _portfolio_panel() -> None:
         st.rerun()
 
 
-tab_live, tab_analytics, tab_learning, tab_portfolio = st.tabs(
-    ["🔴 Live", "📊 Analytics", "🧠 Learning", "💼 Portfolio"]
+tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio = st.tabs(
+    ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio"]
 )
 with tab_live:
     dashboard()
 with tab_analytics:
     analytics_panel()
+with tab_signal_lab:
+    signal_lab_panel()
 with tab_learning:
     _learning_panel()
 with tab_portfolio:

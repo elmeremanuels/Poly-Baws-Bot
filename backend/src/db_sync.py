@@ -534,6 +534,53 @@ def get_portfolio_snapshot() -> dict:
     }
 
 
+def get_signal_lab_trades(
+    coin: str | None = None,
+    days: int | None = None,
+    only_today: bool = False,
+    triggered_only: bool = False,
+    outcome: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Return paginated trades with ALL columns for Signal Lab.
+
+    outcome: "WIN" | "LOSS" | "NO_TRIGGER" | None (all)
+    Returns (rows, total_count_without_limit).
+    """
+    if not _db_path.exists():
+        return [], 0
+    conditions: list[str] = []
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    if triggered_only:
+        conditions.append("trigger_hit = 1")
+    if outcome == "WIN":
+        conditions.append("trigger_hit = 1 AND net_pnl > 0")
+    elif outcome == "LOSS":
+        conditions.append("trigger_hit = 1 AND net_pnl <= 0")
+    elif outcome == "NO_TRIGGER":
+        conditions.append("trigger_hit = 0 OR trigger_hit IS NULL")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    with _conn() as conn:
+        count_row = conn.execute(
+            f"SELECT COUNT(*) FROM trades {where}", params
+        ).fetchone()
+        total = int(count_row[0]) if count_row else 0
+        rows = conn.execute(
+            f"SELECT * FROM trades {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+    return [dict(r) for r in rows], total
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():
