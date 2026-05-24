@@ -122,6 +122,27 @@ async def _poll_live_fill(order_id: str | None, cutoff: datetime, poll_interval:
     return {"filled": False, "timed_out": True}
 
 
+async def _fetch_market_fill(order_id: str, fallback: float, size: float) -> dict:
+    """Poll once after a FOK market sell to get actual fill price and fees.
+    FOK orders fill or die immediately, so one pass with a 1.5s grace period suffices."""
+    for attempt in range(3):
+        await asyncio.sleep(1.0 if attempt == 0 else 0.5)
+        order = await orders.get_order(order_id)
+        if order:
+            status = order.get("status")
+            if status in ("MATCHED", "FILLED"):
+                avg = float(order.get("average_price") or order.get("price") or fallback)
+                fees = float(order.get("fees_charged") or order.get("fees") or 0.0)
+                if fees == 0.0:
+                    fees = round(paper_trader.taker_fee_rate(avg) * avg * size, 6)
+                log.info("market_fill_confirmed", order_id=order_id, avg_price=avg, fees=fees)
+                return {"fill_price": avg, "fees": fees}
+            if status in ("CANCELED", "UNMATCHED"):
+                break
+    log.warning("market_fill_fallback", order_id=order_id, fallback=fallback)
+    return {"fill_price": fallback, "fees": round(paper_trader.taker_fee_rate(fallback) * fallback * size, 6)}
+
+
 async def _handle_fill_results(
     trade_id: str,
     yes_filled: bool,
@@ -237,7 +258,11 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
         loser_result = await paper_trader.simulate_market_sell(loser_token, size)
     else:
         loser_resp = await orders.place_market_order(loser_token, "SELL", size)
-        loser_result = {"filled": bool(loser_resp), "fill_price": 0.30, "fees": 0.0}
+        if loser_resp and loser_resp.get("order_id"):
+            fill = await _fetch_market_fill(loser_resp["order_id"], fallback=0.30, size=size)
+            loser_result = {"filled": True, "fill_price": fill["fill_price"], "fees": fill["fees"]}
+        else:
+            loser_result = {"filled": bool(loser_resp), "fill_price": 0.30, "fees": 0.0}
 
     loser_price = loser_result.get("fill_price") or 0.30
     loser_fees = loser_result.get("fees") or 0.0
@@ -525,9 +550,14 @@ async def _winner_exit_live(
     current_order_id = limit_resp["order_id"] if limit_resp else None
     if not current_order_id:
         log.error("winner_initial_limit_failed", trade_id=trade_id)
-        await orders.place_market_order(winner_token, "SELL", size)
+        mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
         _store_trail_metrics(trade_id, peak_mid, 0, 0)
-        await _close_trade(trade_id, None, "peg_cross", broadcast_fn)
+        fill_price = None
+        if mkt_resp and mkt_resp.get("order_id"):
+            f = await _fetch_market_fill(mkt_resp["order_id"], fallback=peak_mid, size=size)
+            fill_price = f["fill_price"]
+            _add_winner_fees(trade_id, f["fees"])
+        await _close_trade(trade_id, fill_price, "peg_cross", broadcast_fn)
         return
 
     await write_event(trade_id, "trailing_started", coin, {
@@ -553,11 +583,17 @@ async def _winner_exit_live(
                 })
                 await _close_trade(trade_id, mid_check, "held_for_resolution", broadcast_fn)
                 return
-            await orders.place_market_order(winner_token, "SELL", size)
+            mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
             await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
-            _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid_check or 0.5) * size)
-            await _close_trade(trade_id, mid_check, "force_exit_window_end", broadcast_fn)
+            fill_price = mid_check
+            if mkt_resp and mkt_resp.get("order_id"):
+                f = await _fetch_market_fill(mkt_resp["order_id"], fallback=mid_check or 0.5, size=size)
+                fill_price = f["fill_price"]
+                _add_winner_fees(trade_id, f["fees"])
+            else:
+                _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid_check or 0.5) * size)
+            await _close_trade(trade_id, fill_price, "force_exit_window_end", broadcast_fn)
             return
 
         phase = get_exit_phase(seconds_left)
@@ -582,15 +618,21 @@ async def _winner_exit_live(
                     pass
                 else:
                     await orders.cancel_order(current_order_id)
-                    await orders.place_market_order(winner_token, "SELL", size)
+                    mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
                     _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                     await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
-                    _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
+                    fill_price = mid
+                    if mkt_resp and mkt_resp.get("order_id"):
+                        f = await _fetch_market_fill(mkt_resp["order_id"], fallback=mid or 0.5, size=size)
+                        fill_price = f["fill_price"]
+                        _add_winner_fees(trade_id, f["fees"])
+                    else:
+                        _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
                     await write_event(trade_id, "peg_cross_triggered", coin, {
                         "score": score, "reason": reason, "phase": phase,
-                        "mid": mid, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
+                        "mid": mid, "fill_price": fill_price, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
                     })
-                    await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
+                    await _close_trade(trade_id, fill_price, "peg_cross", broadcast_fn)
                     return
 
             if mid > current_limit:
@@ -608,10 +650,16 @@ async def _winner_exit_live(
                             ratchet_count += 1
                         else:
                             log.warning("ratchet_reissue_failed_market_exit", trade_id=trade_id)
-                            await orders.place_market_order(winner_token, "SELL", size)
+                            mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
                             _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
-                            _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
-                            await _close_trade(trade_id, mid, "peg_cross", broadcast_fn)
+                            fill_price = mid
+                            if mkt_resp and mkt_resp.get("order_id"):
+                                f = await _fetch_market_fill(mkt_resp["order_id"], fallback=mid or 0.5, size=size)
+                                fill_price = f["fill_price"]
+                                _add_winner_fees(trade_id, f["fees"])
+                            else:
+                                _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
+                            await _close_trade(trade_id, fill_price, "peg_cross", broadcast_fn)
                             return
                     else:
                         order = await orders.get_order(current_order_id)
