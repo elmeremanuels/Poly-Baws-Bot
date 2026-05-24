@@ -256,27 +256,17 @@ async def init_db() -> None:
 
 
 async def write_trade(trade: dict) -> None:
-    """Upsert a trade record without clobbering created_at or unrelated columns.
+    """Insert or fully replace a trade record.
 
-    INSERT OR IGNORE creates the row on first call (preserving the created_at
-    DEFAULT).  The subsequent UPDATE patches only the supplied fields, leaving
-    any columns not in `trade` untouched.  This replaces the old
-    INSERT OR REPLACE which deleted and re-inserted the row — losing created_at
-    and any columns that happened to be absent from the current dict.
+    created_at is now always included in the record (added to db_fields in
+    state.persist_trade), so INSERT OR REPLACE preserves the original creation
+    timestamp on every replace instead of resetting it to datetime('now').
     """
     cols = ", ".join(trade.keys())
     placeholders = ", ".join(f":{k}" for k in trade.keys())
-    insert_sql = f"INSERT OR IGNORE INTO trades ({cols}) VALUES ({placeholders})"
-    trade_id = trade.get("trade_id")
-    update_fields = [k for k in trade.keys() if k != "trade_id"]
-    update_sql = ""
-    if trade_id and update_fields:
-        sets = ", ".join(f"{k} = :{k}" for k in update_fields)
-        update_sql = f"UPDATE trades SET {sets} WHERE trade_id = :trade_id"
+    sql = f"INSERT OR REPLACE INTO trades ({cols}) VALUES ({placeholders})"
     async with _db() as db:
-        await db.execute(insert_sql, trade)
-        if update_sql:
-            await db.execute(update_sql, trade)
+        await db.execute(sql, trade)
         await db.commit()
 
 
