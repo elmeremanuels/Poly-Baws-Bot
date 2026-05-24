@@ -19,25 +19,26 @@ _RANGE_DAYS = {"All time": None, "30 days": 30, "7 days": 7, "Today": 1}
 
 
 @st.cache_data(ttl=60)
-def _q_trades(coin, days):
-    return get_analytics_trades(coin=coin, days=days)
+def _q_trades(coin, days, only_today):
+    return get_analytics_trades(coin=coin, days=days, only_today=only_today)
 
 
 @st.cache_data(ttl=60)
-def _q_exit_stats(coin, days):
-    return get_exit_reason_stats(coin=coin, days=days)
+def _q_exit_stats(coin, days, only_today):
+    return get_exit_reason_stats(coin=coin, days=days, only_today=only_today)
 
 
 @st.cache_data(ttl=60)
-def _q_coin_comparison(days):
-    return get_coin_comparison(days=days)
+def _q_coin_comparison(days, only_today):
+    return get_coin_comparison(days=days, only_today=only_today)
 
 
 @st.cache_data(ttl=60)
-def _q_hourly_pnl(coin, days):
-    return get_hourly_pnl(coin=coin, days=days)
+def _q_hourly_pnl(coin, days, only_today):
+    return get_hourly_pnl(coin=coin, days=days, only_today=only_today)
 
 
+@st.fragment
 def analytics_panel() -> None:
     # ── Global Filters ────────────────────────────────────────────────────────
     col_coin, col_range, col_export = st.columns([2, 3, 1])
@@ -49,10 +50,19 @@ def analytics_panel() -> None:
         )
 
     coin_filter = selected_coin if selected_coin != "All" else None
-    days = _RANGE_DAYS[selected_range]
+    only_today = (selected_range == "Today")
+    days = None if only_today else _RANGE_DAYS[selected_range]
 
-    trades = _q_trades(coin_filter, days)
+    trades = _q_trades(coin_filter, days, only_today)
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
+
+    # Count label — confirms the filter is actually working
+    if only_today:
+        st.caption(f"{len(trades)} trades vandaag (UTC)")
+    elif days:
+        st.caption(f"{len(trades)} trades — afgelopen {days} dagen")
+    else:
+        st.caption(f"{len(trades)} trades — alle tijd")
 
     with col_export:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -82,11 +92,11 @@ def analytics_panel() -> None:
     _key_metrics(df)
 
     # ── Exit Reason Breakdown ─────────────────────────────────────────────────
-    _exit_breakdown(coin_filter, days)
+    _exit_breakdown(coin_filter, days, only_today)
 
     # ── Per-Coin Comparison ───────────────────────────────────────────────────
     if coin_filter is None:
-        _coin_comparison(days)
+        _coin_comparison(days, only_today)
 
     # ── Cumulative P&L Chart ──────────────────────────────────────────────────
     _cumulative_pnl(df)
@@ -95,7 +105,7 @@ def analytics_panel() -> None:
     _trailing_metrics(df)
 
     # ── Hourly Analysis ───────────────────────────────────────────────────────
-    _hourly_analysis(coin_filter, days)
+    _hourly_analysis(coin_filter, days, only_today)
 
     # ── Full Trade History ────────────────────────────────────────────────────
     _trade_history(df)
@@ -127,9 +137,9 @@ def _key_metrics(df: pd.DataFrame) -> None:
     c[5].metric("Avg P&L/Trade", f"€{avg_pnl:+.4f}")
 
 
-def _exit_breakdown(coin: str | None, days: int | None) -> None:
+def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False) -> None:
     st.markdown("### Exit Reason Breakdown")
-    stats = _q_exit_stats(coin, days)
+    stats = _q_exit_stats(coin, days, only_today)
     if not stats:
         st.caption("No data.")
         return
@@ -153,9 +163,9 @@ def _exit_breakdown(coin: str | None, days: int | None) -> None:
         st.bar_chart(sdf.set_index("winner_exit_reason")[["count"]])
 
 
-def _coin_comparison(days: int | None) -> None:
+def _coin_comparison(days: int | None, only_today: bool = False) -> None:
     st.markdown("### Per-Coin Comparison")
-    rows = _q_coin_comparison(days)
+    rows = _q_coin_comparison(days, only_today)
     if not rows:
         st.caption("No data.")
         return
@@ -209,9 +219,9 @@ def _trailing_metrics(df: pd.DataFrame) -> None:
         st.scatter_chart(scatter, x="time_in_trail_seconds", y="net_pnl", color="winner_exit_reason")
 
 
-def _hourly_analysis(coin: str | None, days: int | None) -> None:
+def _hourly_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
     st.markdown("### Avg P&L by Hour of Day (UTC)")
-    hourly = _q_hourly_pnl(coin, days)
+    hourly = _q_hourly_pnl(coin, days, only_today)
     if not hourly:
         st.caption("Not enough data yet (needs 100+ trades for reliable signal).")
         return

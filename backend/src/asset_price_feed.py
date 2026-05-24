@@ -2,12 +2,17 @@
 
 Calls regime.record_asset_price(coin, price) on every tick so regime detection
 has a continuous 30-minute rolling buffer of actual USD prices.
+
+On startup, seeds the buffer with 30 minutes of Binance REST klines so regime
+detection works immediately instead of waiting 20+ minutes for live data.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import time
+
+import httpx
 
 from .config_loader import CONFIG
 from .logger import log
@@ -22,6 +27,7 @@ _COIN_TO_SYMBOL: dict[str, str] = {
 }
 
 _WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+_BINANCE_REST = "https://api.binance.com/api/v3/klines"
 
 
 def _build_url() -> str:
@@ -31,12 +37,39 @@ def _build_url() -> str:
     return _WS_BASE + streams
 
 
+async def _seed_prices() -> None:
+    """Backfill 30 minutes of 1-minute klines from Binance REST before WebSocket starts."""
+    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_SYMBOL]
+    async with httpx.AsyncClient(timeout=15) as client:
+        for coin in coins:
+            symbol = _COIN_TO_SYMBOL[coin].upper()
+            try:
+                resp = await client.get(
+                    _BINANCE_REST,
+                    params={"symbol": symbol, "interval": "1m", "limit": 30},
+                )
+                resp.raise_for_status()
+                klines = resp.json()
+                # kline format: [open_time, open, high, low, close, ...]
+                for kline in klines:
+                    open_time_ms = int(kline[0])
+                    close_price = float(kline[4])
+                    ts = open_time_ms / 1000.0
+                    buf = _regime._asset_prices.setdefault(coin, __import__("collections").deque())
+                    buf.append((ts, close_price))
+                log.info("asset_price_seeded", coin=coin, n=len(klines))
+            except Exception as e:
+                log.warning("asset_price_seed_failed", coin=coin, error=str(e))
+
+
 async def run() -> None:
-    """Connect to Binance combined stream and feed prices to regime module.
+    """Seed price buffer, then connect to Binance combined stream.
 
     Reconnects automatically with exponential backoff (2s → 4s → 8s … cap 60s).
     """
     import websockets
+
+    await _seed_prices()
 
     url = _build_url()
     backoff = 2.0

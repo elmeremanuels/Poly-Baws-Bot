@@ -176,3 +176,48 @@ def get_regime_stats() -> dict:
             "price_stats": get_asset_price_stats(coin),
         }
     return result
+
+
+# ── Per-regime parameter profiles ─────────────────────────────────────────────
+
+# In-memory learned overrides: {regime: {cross_threshold, initial_offset, ...}}
+# Populated by the learning orchestrator after each analysis cycle.
+_learned_profiles: dict[str, dict] = {}
+
+
+def get_regime_params(regime: str) -> dict:
+    """Return parameter overrides for a given regime.
+
+    Layers: config.yaml regime_profiles (baseline) ← _learned_profiles (learned).
+    Only returns keys present in the profile (caller decides which to apply).
+    """
+    base = dict(CONFIG.get("regime_profiles", {}).get(regime, {}))
+    learned = _learned_profiles.get(regime, {})
+    base.update(learned)
+    return base
+
+
+def update_regime_profile(regime: str, params: dict) -> None:
+    """Store learned exit params for a regime (called after a learning cycle).
+
+    Only keys relevant to exit behavior are kept; reasoning/scores are ignored.
+    """
+    _PROFILE_KEYS = ("cross_threshold", "initial_offset", "ratchet_buffer", "trigger_threshold_delta")
+    extracted: dict = {}
+    # Accept both flat dict and nested coin_params structure
+    for k in _PROFILE_KEYS:
+        if k in params:
+            extracted[k] = float(params[k])
+    # If nested under global_params
+    gp = params.get("global_params") or {}
+    if not extracted:
+        # Try to pull cross_threshold from first coin_params entry as representative
+        cp_values = list((params.get("coin_params") or {}).values())
+        if cp_values:
+            for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
+                vals = [cp[k] for cp in cp_values if k in cp]
+                if vals:
+                    extracted[k] = round(sum(vals) / len(vals), 4)
+    if extracted:
+        _learned_profiles[regime] = extracted
+        log.info("regime_profile_updated", regime=regime, params=extracted)

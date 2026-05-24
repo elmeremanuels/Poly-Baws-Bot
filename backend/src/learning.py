@@ -6,7 +6,7 @@ from typing import Optional
 
 from .config_loader import CONFIG
 from .logger import log, _db
-from .db_sync import get_phase_stats, get_cycle_trades, get_cycle_stats
+from .db_sync import get_phase_stats, get_cycle_trades, get_cycle_stats, get_dominant_regime_for_cycle
 
 # ── Module-level state (read by bot.py to stamp trades) ───────────────────────
 _current_cycle_id: Optional[int] = None
@@ -345,6 +345,12 @@ class LearningOrchestrator:
             CONFIG["entry"]["max_token_spread"] = float(gp["max_token_spread"])
         if "hold_for_resolution_mid_threshold" in gp:
             CONFIG["exit"]["hold_for_resolution_mid_threshold"] = float(gp["hold_for_resolution_mid_threshold"])
+        # Update per-regime profile with the learned params
+        if self._cycle_id:
+            dominant_regime = get_dominant_regime_for_cycle(self._cycle_id, "learn")
+            if dominant_regime and dominant_regime not in ("UNKNOWN", "NORMAL", None):
+                from . import regime as _regime
+                _regime.update_regime_profile(dominant_regime, analysis)
         log.info("claude_params_applied", cycle=self._cycle_number)
 
     def _restore_original_params(self) -> None:

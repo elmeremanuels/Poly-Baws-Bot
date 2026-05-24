@@ -98,3 +98,34 @@ dashboard:
 logging:
   level: "INFO"
   db_path: "data/trades.db"
+
+# Learned parameter profiles per detected market regime.
+# Applied on top of global exit: config and per-coin overrides.
+# trigger_threshold_delta: added to the coin's base trigger_threshold (clamped 0.65–0.85).
+# Updated automatically by the learning cycle when a regime is dominant during analysis.
+regime_profiles:
+  TRENDING:
+    cross_threshold: 0.65     # patient — momentum continues, hold the winner longer
+    initial_offset: 0.07      # more ambitious target
+    ratchet_buffer: 0.025
+    trigger_threshold_delta: 0.00
+  CHOPPY:
+    cross_threshold: 0.45     # aggressive exit — reversals are frequent
+    initial_offset: 0.04
+    ratchet_buffer: 0.015
+    trigger_threshold_delta: 0.04   # raise bar — reduce false triggers
+  RANGING:
+    cross_threshold: 0.55
+    initial_offset: 0.05
+    ratchet_buffer: 0.020
+    trigger_threshold_delta: 0.02
+  BREAKOUT:
+    cross_threshold: 0.65
+    initial_offset: 0.04      # lower target — capture the fast initial spike
+    ratchet_buffer: 0.015
+    trigger_threshold_delta: -0.02  # lower bar — fire earlier on explosive moves
+  NORMAL:
+    cross_threshold: 0.65
+    initial_offset: 0.06
+    ratchet_buffer: 0.025
+    trigger_threshold_delta: 0.00

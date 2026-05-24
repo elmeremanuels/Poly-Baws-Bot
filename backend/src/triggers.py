@@ -18,8 +18,12 @@ CUTOFF_MIN = TRADING_CFG["entry_cutoff_minutes_before_window"]
 
 
 def _get_trigger_threshold(coin: str) -> float:
-    """Per-coin trigger threshold, falling back to global trading.trigger_threshold."""
-    return CONFIG["coins"].get(coin, {}).get("trigger_threshold", TRADING_CFG["trigger_threshold"])
+    """Per-coin trigger threshold with regime delta applied."""
+    from . import regime as _regime
+    base = CONFIG["coins"].get(coin, {}).get("trigger_threshold", TRADING_CFG["trigger_threshold"])
+    current_regime = _regime.get_current_regime(coin)
+    delta = _regime.get_regime_params(current_regime).get("trigger_threshold_delta", 0.0)
+    return max(0.65, min(0.85, base + delta))
 
 
 async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
@@ -281,6 +285,19 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     loser_token = no_token if loser_side == "NO" else yes_token
     winner_token = yes_token if winner == "YES" else no_token
 
+    # Directional bias adjustment: RANGING regime with a bias signal.
+    # With-bias win: lower cross_threshold (more patient, expect larger move).
+    # Against-bias win: raise cross_threshold (take profit faster, expect reversal).
+    bias_cross_adj = 0.0
+    trade_regime = trade.get("regime", "UNKNOWN")
+    trade_bias = trade.get("directional_bias")  # "UP", "DOWN", or None
+    if trade_regime == "RANGING" and trade_bias:
+        with_bias = (trade_bias == "DOWN" and winner == "NO") or \
+                    (trade_bias == "UP" and winner == "YES")
+        bias_cross_adj = -0.10 if with_bias else +0.15
+        log.info("bias_cross_adj", trade_id=trade_id, regime=trade_regime,
+                 bias=trade_bias, winner=winner, with_bias=with_bias, adj=bias_cross_adj)
+
     log.info("executing_trigger_action", trade_id=trade_id, winner=winner, loser=loser_side)
 
     # Step 1: sell loser immediately via market order
@@ -310,7 +327,7 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     await write_event(trade_id, "break_even_computed", coin, {"break_even_price": be_price})
 
     # Step 2: single resting target order + stop-market via price monitoring
-    asyncio.create_task(_winner_exit_oco(trade_id, winner_token, size, paper, broadcast_fn))
+    asyncio.create_task(_winner_exit_oco(trade_id, winner_token, size, paper, broadcast_fn, bias_cross_adj))
     update_trade_field(trade_id, "status", "exiting")
     await persist_trade(trade_id)
     if broadcast_fn:
@@ -323,6 +340,7 @@ async def _winner_exit_oco(
     size: float,
     paper: bool,
     broadcast_fn,
+    bias_cross_adj: float = 0.0,
 ) -> None:
     """
     Single resting limit sell @ TARGET_EXIT (80¢) + stop-market trigger at STOP_EXIT (60¢).
@@ -340,9 +358,9 @@ async def _winner_exit_oco(
     window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc) if window_end else None
 
     if paper:
-        await _winner_exit_paper(trade_id, winner_token, size, window_end_dt, broadcast_fn)
+        await _winner_exit_paper(trade_id, winner_token, size, window_end_dt, broadcast_fn, bias_cross_adj)
     else:
-        await _winner_exit_live(trade_id, winner_token, size, window_end_dt, broadcast_fn)
+        await _winner_exit_live(trade_id, winner_token, size, window_end_dt, broadcast_fn, bias_cross_adj)
 
 
 def _store_trail_metrics(trade_id: str, peak_bid: float, ratchet_count: int, time_in_trail: float) -> None:
@@ -449,11 +467,14 @@ async def _winner_exit_paper(
     size: float,
     window_end_dt: datetime | None,
     broadcast_fn,
+    bias_cross_adj: float = 0.0,
 ) -> None:
     """Paper mode: peg-cross exit engine — resting limit + dynamic market conversion."""
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
     es = _vol.get_coin_params(coin)
+    if bias_cross_adj:
+        es["cross_threshold"] = max(0.10, min(0.95, es["cross_threshold"] + bias_cross_adj))
     trigger_price = _get_trigger_threshold(coin)
     break_even_price = trade.get("break_even_price") if trade else None
     # Initial limit is at least break_even + 1¢ so we never rest below profitability
@@ -554,11 +575,14 @@ async def _winner_exit_live(
     size: float,
     window_end_dt: datetime | None,
     broadcast_fn,
+    bias_cross_adj: float = 0.0,
 ) -> None:
     """Live mode: peg-cross exit engine — real limit order + dynamic market conversion."""
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
     es = _vol.get_coin_params(coin)
+    if bias_cross_adj:
+        es["cross_threshold"] = max(0.10, min(0.95, es["cross_threshold"] + bias_cross_adj))
     trigger_price = _get_trigger_threshold(coin)
     break_even_price = trade.get("break_even_price") if trade else None
     raw_limit = round(trigger_price + es["initial_offset"], 2)

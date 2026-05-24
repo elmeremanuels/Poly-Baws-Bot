@@ -37,18 +37,31 @@ def get_realized_vol(asset_id: str) -> float | None:
 
 
 def get_coin_params(coin: str) -> dict:
-    """Return exit config merged with per-coin overrides from coins.<coin>.
+    """Return exit config merged with per-coin overrides, then per-regime overrides.
 
-    Claude can set cross_threshold, initial_offset and ratchet_buffer per coin
-    via _apply_claude_params; those values land in CONFIG["coins"][coin] and are
-    picked up here so the peg-cross engine uses the per-coin tuned values.
+    Priority (highest wins):
+      1. config.yaml regime_profiles + learned profiles for the current regime
+      2. Per-coin Claude-applied overrides in CONFIG["coins"][coin]
+      3. Global CONFIG["exit"] baseline
     """
     from .config_loader import CONFIG
+    from . import regime as _regime
+
     base = dict(CONFIG["exit"])
+
+    # Layer 2: per-coin Claude-applied overrides
     coin_cfg = CONFIG["coins"].get(coin, {})
     for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
         if k in coin_cfg:
             base[k] = coin_cfg[k]
+
+    # Layer 1: per-regime learned overrides (most specific)
+    current_regime = _regime.get_current_regime(coin)
+    regime_params = _regime.get_regime_params(current_regime)
+    for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
+        if k in regime_params:
+            base[k] = regime_params[k]
+
     return base
 
 

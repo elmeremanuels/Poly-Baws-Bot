@@ -165,7 +165,8 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
-def get_analytics_trades(coin: str | None = None, days: int | None = None) -> list[dict]:
+def get_analytics_trades(coin: str | None = None, days: int | None = None,
+                         only_today: bool = False) -> list[dict]:
     """All trades, optionally filtered by coin and date range. No trigger/status filter."""
     if not _db_path.exists():
         return []
@@ -174,7 +175,9 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None) -> li
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if days:
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
@@ -186,7 +189,8 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None) -> li
     return [dict(r) for r in rows]
 
 
-def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> list[dict]:
+def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
+                          only_today: bool = False) -> list[dict]:
     """Aggregate stats grouped by winner_exit_reason."""
     if not _db_path.exists():
         return []
@@ -195,7 +199,9 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> l
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if days:
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -218,13 +224,15 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None) -> l
     return [dict(r) for r in rows]
 
 
-def get_coin_comparison(days: int | None = None) -> list[dict]:
+def get_coin_comparison(days: int | None = None, only_today: bool = False) -> list[dict]:
     """Per-coin aggregated stats for closed triggered trades."""
     if not _db_path.exists():
         return []
     conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
     params: list = []
-    if days:
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -248,7 +256,8 @@ def get_coin_comparison(days: int | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dict]:
+def get_hourly_pnl(coin: str | None = None, days: int | None = None,
+                   only_today: bool = False) -> list[dict]:
     """Average P&L by hour of day (UTC)."""
     if not _db_path.exists():
         return []
@@ -257,7 +266,9 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None) -> list[dic
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if days:
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -484,6 +495,20 @@ def get_cycle_pnl_accuracy(cycle_id: int) -> dict:
         "pnl_accuracy_ratio": accuracy_ratio,
         "note": "held_for_resolution trades excluded (unclaimed = not yet in USDC balance)",
     }
+
+
+def get_dominant_regime_for_cycle(cycle_id: int, phase: str = "learn") -> str | None:
+    """Return the most common regime label among triggered trades in a cycle phase."""
+    if not _db_path.exists():
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT regime, COUNT(*) as n FROM trades
+               WHERE cycle_id=? AND phase=? AND trigger_hit=1 AND regime IS NOT NULL
+               GROUP BY regime ORDER BY n DESC LIMIT 1""",
+            (cycle_id, phase),
+        ).fetchone()
+    return row[0] if row else None
 
 
 def get_portfolio_snapshot() -> dict:
