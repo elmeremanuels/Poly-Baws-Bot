@@ -65,12 +65,26 @@ global_params you can suggest: max_entry_cost, max_token_spread, hold_for_resolu
   Suggest lower values (0.65–0.70) when trades are near break-even; higher (0.75–0.80) when
   you see frequent reversals in the trade sample.
 
+Regime context (regime_stats in the prompt):
+  TRENDING  — momentum continues; use patient cross_threshold (0.65–0.70), lower trigger ok
+  CHOPPY    — winners reverse; raise trigger_threshold (+0.03–0.05), lower cross_threshold (0.45–0.55)
+  RANGING   — asset oscillating in tight band; directional_bias is set (UP/DOWN);
+              standard params but consider enabling the coin only when bias matches recent direction
+  BREAKOUT  — fast explosive move; trigger fires quickly; lower initial_offset to capture early
+  UNKNOWN   — insufficient data; keep conservative defaults
+
+price_stats.price_position: 0.0 = asset at bottom of 30-min range, 1.0 = at top.
+If RANGING and price_position >= 0.75 → recent direction is likely DOWN.
+If RANGING and price_position <= 0.25 → recent direction is likely UP.
+Suggest adjusted thresholds per coin based on its detected regime.
+
 Respond with ONLY a JSON object. No markdown fences, no explanation outside the JSON."""
 
 
 def _build_prompt(trades: list, stats: dict, current_params: dict,
                   adaptive_stats: dict | None = None,
-                  pnl_accuracy: dict | None = None) -> str:
+                  pnl_accuracy: dict | None = None,
+                  regime_stats: dict | None = None) -> str:
     payload: dict = {
         "cycle_stats": stats,
         "current_params": current_params,
@@ -86,6 +100,8 @@ def _build_prompt(trades: list, stats: dict, current_params: dict,
         payload["adaptive_tuner_stats"] = adaptive_stats
     if pnl_accuracy:
         payload["pnl_accuracy"] = pnl_accuracy
+    if regime_stats:
+        payload["regime_stats"] = regime_stats
     return json.dumps(payload, indent=2)
 
 
@@ -142,6 +158,23 @@ async def analyze_cycle(cycle_id: int) -> dict:
     except Exception:
         pass
 
+    # Regime stats (per-coin classification + price range context)
+    try:
+        from . import regime as _regime
+        from .db_sync import get_cycle_trades as _gct
+        regime_stats: dict | None = {}
+        for coin in CONFIG.get("coins", {}):
+            coin_trades = [t for t in (trades or []) if t.get("coin") == coin]
+            label = _regime.detect_regime(coin, coin_trades)
+            price_stats = _regime.get_asset_price_stats(coin)
+            regime_stats[coin] = {
+                "regime": label,
+                "bias": _regime.get_directional_bias(coin),
+                "price_stats": price_stats,
+            }
+    except Exception:
+        regime_stats = None
+
     schema = """{
   "confidence_score": 0.0-1.0,
   "reasoning": "...",
@@ -157,7 +190,7 @@ async def analyze_cycle(cycle_id: int) -> dict:
 }"""
 
     user_prompt = (
-        _build_prompt(trades, stats, current_params, adaptive_stats, pnl_accuracy)
+        _build_prompt(trades, stats, current_params, adaptive_stats, pnl_accuracy, regime_stats)
         + f"\n\nReturn this exact JSON structure:\n{schema}"
     )
 

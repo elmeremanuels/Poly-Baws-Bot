@@ -38,7 +38,7 @@ def get_kill_reason() -> str:
 
 
 async def check_daily_loss_limit() -> bool:
-    """Returns True if we are still within the daily loss limit."""
+    """Returns True if within daily loss limit. Only meaningful for live trades."""
     daily_pnl = await get_daily_pnl()
     limit = CONFIG["risk"]["daily_loss_limit_eur"]
     if daily_pnl <= -limit:
@@ -62,15 +62,19 @@ def check_coin_position_limit(coin: str, active_count: int) -> bool:
     return active_count < coin_max
 
 
-async def pre_trade_checks(coin: str, active_positions: dict[str, int]) -> tuple[bool, str]:
+async def pre_trade_checks(coin: str, active_positions: dict[str, int],
+                           mode: str = "live") -> tuple[bool, str]:
     """
     Run all pre-trade checks. Returns (ok, reason).
     active_positions: dict mapping coin -> count of active positions
+    mode: current trading mode — loss limit is skipped for paper modes so paper
+          trading can freely collect regime and pattern data without stopping.
     """
     if is_killed():
         return False, f"kill_switch_active: {_kill_reason}"
 
-    if not await check_daily_loss_limit():
+    is_paper = mode.startswith("paper")
+    if not is_paper and not await check_daily_loss_limit():
         return False, "daily_loss_limit_exceeded"
 
     if not await check_daily_trade_limit():

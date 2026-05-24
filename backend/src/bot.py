@@ -85,7 +85,7 @@ async def _process_coin_window(coin: str, market: dict) -> None:
             return
 
     active_counts = get_active_count_by_coin()
-    ok, reason = await risk.pre_trade_checks(coin, active_counts)
+    ok, reason = await risk.pre_trade_checks(coin, active_counts, mode=mode)
     if not ok:
         log.info("trade_skipped_risk", coin=coin, reason=reason)
         return
@@ -104,6 +104,16 @@ async def _process_coin_window(coin: str, market: dict) -> None:
             return  # window NOT registered — retried next iteration
 
     trade = create_trade_state(coin, market, mode, triggered_by="bot")
+
+    # Stamp trade with current regime + price context
+    from . import regime as _regime
+    _regime_label = _regime.get_current_regime(coin)
+    _bias = _regime.get_directional_bias(coin)
+    _pstats = _regime.get_asset_price_stats(coin)
+    trade["regime"] = _regime_label
+    trade["directional_bias"] = _bias
+    trade["price_position"] = _pstats["price_position"] if _pstats else None
+    trade["asset_range_pct"] = _pstats["range_pct"] if _pstats else None
 
     # Stamp trade with current learning cycle info
     if mode == "live_learning":
