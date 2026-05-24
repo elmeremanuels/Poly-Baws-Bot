@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timezone
 
-from . import scanner, ws_client, risk
+from . import scanner, ws_client, risk, asset_price_feed
 from .config_loader import CONFIG
 from .logger import log, write_event, save_dashboard_state
 from .state import (
@@ -298,6 +298,7 @@ async def run_bot() -> None:
         asyncio.create_task(risk.risk_monitor_loop(get_active_count_by_coin)),
         asyncio.create_task(_heartbeat_loop()),
         asyncio.create_task(_portfolio_sync_loop()),
+        asyncio.create_task(asset_price_feed.run()),
     ]
     for coin in COINS:
         if CONFIG["coins"][coin]["enabled"]:
