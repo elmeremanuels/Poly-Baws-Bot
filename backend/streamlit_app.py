@@ -637,9 +637,47 @@ def _learning_panel() -> None:
                 except Exception:
                     pass
 
+    # Claude's prediction — what Claude EXPECTED before deploy
+    pred_raw = cycle.get("claude_prediction")
+    if pred_raw:
+        try:
+            pred = json.loads(pred_raw)
+            with st.expander("🔮 Claude's verwachting vóór deploy", expanded=(phase == "deploy")):
+                pc1, pc2, pc3 = st.columns(3)
+                pc1.metric("Verwachte winrate", f"{pred.get('expected_win_rate_pct', '?')}%")
+                pc2.metric("Verwachte gem. P&L", f"€{pred.get('expected_avg_pnl_per_trade', 0):+.4f}")
+                pc3.metric("Horizon (trades)", pred.get("prediction_horizon_trades", "?"))
+                st.markdown(f"**Kernaan­name:** {pred.get('key_assumption', '—')}")
+                st.markdown(f"**Falsificatie­conditie:** _{pred.get('falsifiable_condition', '—')}_")
+                st.caption(
+                    "Dit is Claude's expliciete verwachting VOOR deploy. "
+                    "Als de deploy-resultaten de falsificatieconditie raken, "
+                    "moet Claude zijn aanname herzien in de volgende analyse."
+                )
+                # Compare with actual deploy stats if available
+                cycle_id = cycle.get("id")
+                if cycle_id and phase in ("deploy", "validate", "analyze"):
+                    deploy_stats = get_phase_stats(cycle_id, "deploy")
+                    if deploy_stats and deploy_stats.get("trades", 0) > 0:
+                        st.markdown("**Werkelijk (deploy fase tot nu):**")
+                        dc1, dc2, dc3 = st.columns(3)
+                        actual_wr = deploy_stats.get("win_rate")
+                        actual_pnl = deploy_stats.get("avg_pnl")
+                        expected_wr = pred.get("expected_win_rate_pct")
+                        expected_pnl = pred.get("expected_avg_pnl_per_trade")
+                        wr_delta = round(actual_wr - expected_wr, 1) if (actual_wr and expected_wr) else None
+                        pnl_delta = round(actual_pnl - expected_pnl, 4) if (actual_pnl and expected_pnl) else None
+                        dc1.metric("Werkelijke winrate", f"{actual_wr}%" if actual_wr else "—",
+                                   delta=f"{wr_delta:+.1f}%" if wr_delta is not None else None)
+                        dc2.metric("Werkelijke gem. P&L", f"€{actual_pnl:+.4f}" if actual_pnl else "—",
+                                   delta=f"€{pnl_delta:+.4f}" if pnl_delta is not None else None)
+                        dc3.metric("Deploy trades", deploy_stats.get("trades", 0))
+        except Exception:
+            pass
+
     # Claude's analysis (from learning cycle)
     if cycle.get("claude_analysis"):
-        with st.expander("Claude's latest reasoning"):
+        with st.expander("Claude's redenering"):
             st.markdown(cycle["claude_analysis"][:3000])
 
     # Active Claude params

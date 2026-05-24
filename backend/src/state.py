@@ -112,6 +112,8 @@ def create_trade_state(
         "bias_certainty": None,
         "yes_size": None,
         "no_size": None,
+        "regime_at_entry": None,
+        "bias_direction_at_entry": None,
         # Phase 1 signals stamped at entry
         "ofi_at_entry": None,
         "funding_rate_at_entry": None,
@@ -168,6 +170,7 @@ async def persist_trade(trade_id: str) -> None:
         "yes_depth_at_trigger", "no_depth_at_trigger", "time_since_window_start",
         "phase", "cycle_id", "param_snapshot",
         "break_even_price", "actual_winner",
+        "regime_at_entry", "bias_direction_at_entry",
         "ofi_at_entry", "funding_rate_at_entry", "liq_proxy_at_entry",
         "conviction_at_entry", "conviction_score_at_entry",
         "ofi_at_trigger", "funding_rate_at_trigger", "liq_proxy_at_trigger",

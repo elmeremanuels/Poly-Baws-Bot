@@ -68,6 +68,18 @@ _GROUPS: dict[str, list[tuple[str, str]]] = {
         ("Convictie (trigger)", "conviction_at_trigger"),
         ("Convictie score (trigger)", "conviction_score_at_trigger"),
     ],
+    "🔮 Voorspellingen": [
+        ("Regime bij entry", "regime_at_entry"),
+        ("Bias richting", "bias_direction_at_entry"),
+        ("Bias zekerheid", "bias_certainty"),
+        ("Convictie bij entry", "conviction_at_entry"),
+        ("Convictie score entry", "conviction_score_at_entry"),
+        ("Convictie bij trigger", "conviction_at_trigger"),
+        ("Convictie score trigger", "conviction_score_at_trigger"),
+        ("Bias voorspelling correct", "__bias_pred_correct"),
+        ("Signaal voorspelling correct", "__signal_pred_correct"),
+        ("Signaal uitleg", "__signal_vs_outcome"),
+    ],
     "🏁 Uitkomst": [
         ("Getriggerd", "__triggered"),
         ("Werkelijke winnaar", "actual_winner"),
@@ -85,7 +97,7 @@ _GROUPS: dict[str, list[tuple[str, str]]] = {
 }
 
 # Default groups shown on load
-_DEFAULT_GROUPS = {"🪪 Identiteit", "📥 Entry", "📡 Signalen bij entry", "🎯 Trigger data", "🏁 Uitkomst"}
+_DEFAULT_GROUPS = {"🪪 Identiteit", "📥 Entry", "🔮 Voorspellingen", "🎯 Trigger data", "🏁 Uitkomst"}
 
 _RANGE_DAYS: dict[str, int | None] = {"All time": None, "30 dagen": 30, "7 dagen": 7, "Vandaag": None}
 
@@ -119,6 +131,29 @@ def _enrich(row: dict) -> dict:
         row["__direction_correct"] = "✅" if winner == actual else "❌"
     else:
         row["__direction_correct"] = None
+
+    # Bias prediction: bias_direction_at_entry=UP → predicted YES wins
+    bias_dir = row.get("bias_direction_at_entry")
+    if bias_dir and actual:
+        bias_pred = "YES" if bias_dir == "UP" else "NO"
+        row["__bias_pred_correct"] = "✅" if bias_pred == actual else "❌"
+    else:
+        row["__bias_pred_correct"] = "—"
+
+    # Signal prediction: conviction_at_trigger direction → predicted YES/NO
+    conv_trig = row.get("conviction_at_trigger")
+    if conv_trig and actual:
+        signal_pred = "YES" if conv_trig == "UP" else "NO"
+        row["__signal_pred_correct"] = "✅" if signal_pred == actual else "❌"
+        row["__signal_vs_outcome"] = (
+            f"Signaal: {conv_trig} → {signal_pred} | Werkelijk: {actual}"
+        )
+    else:
+        row["__signal_pred_correct"] = "—"
+        row["__signal_vs_outcome"] = (
+            f"Geen signaal | Werkelijk: {actual}" if actual else "—"
+        )
+
     return row
 
 
@@ -222,7 +257,7 @@ def signal_lab_panel() -> None:
     total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
 
     # ── Summary metrics ───────────────────────────────────────────────────────
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Trades (totaal)", total)
 
     triggered_count = sum(1 for t in trades if t.get("trigger_hit"))
@@ -238,10 +273,32 @@ def signal_lab_panel() -> None:
     total_pnl = round(sum(pnl_vals), 4) if pnl_vals else None
     m4.metric("Netto P&L (pagina)", f"€{total_pnl:+.4f}" if total_pnl is not None else "—")
 
-    ofi_vals = [t.get("ofi_at_trigger") for t in trades if t.get("ofi_at_trigger") is not None]
-    avg_ofi = round(sum(ofi_vals) / len(ofi_vals), 3) if ofi_vals else None
-    m5.metric("Gem. OFI trigger", f"{avg_ofi:.3f}" if avg_ofi is not None else "—",
-              help="Order Flow Imbalance gemiddeld bij trigger (0.5=neutraal)")
+    # Signal prediction accuracy (conviction_at_trigger vs actual_winner)
+    sig_correct = 0; sig_total = 0
+    bias_correct = 0; bias_total = 0
+    for t in trades:
+        actual = t.get("actual_winner")
+        if not actual:
+            continue
+        conv = t.get("conviction_at_trigger")
+        if conv:
+            sig_total += 1
+            if (conv == "UP" and actual == "YES") or (conv == "DOWN" and actual == "NO"):
+                sig_correct += 1
+        bias = t.get("bias_direction_at_entry")
+        if bias:
+            bias_total += 1
+            expected = "YES" if bias == "UP" else "NO"
+            if expected == actual:
+                bias_correct += 1
+
+    sig_acc = round(sig_correct / sig_total * 100, 1) if sig_total else None
+    m5.metric("Signaal acc. (trigger)", f"{sig_acc}%" if sig_acc is not None else "—",
+              help=f"Hoe vaak klopt conviction_at_trigger met werkelijke winnaar ({sig_total} meetpunten)")
+
+    bias_acc = round(bias_correct / bias_total * 100, 1) if bias_total else None
+    m6.metric("Bias acc. (entry)", f"{bias_acc}%" if bias_acc is not None else "—",
+              help=f"Hoe vaak klopt bias_direction_at_entry met werkelijke winnaar ({bias_total} meetpunten)")
 
     # ── Table ─────────────────────────────────────────────────────────────────
     df = _build_df(trades, active_groups)

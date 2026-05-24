@@ -194,6 +194,9 @@ async def init_db() -> None:
             ("bias_certainty", "REAL"),
             ("yes_size", "REAL"),
             ("no_size", "REAL"),
+            # Bot prediction columns
+            ("regime_at_entry", "TEXT"),
+            ("bias_direction_at_entry", "TEXT"),
             # Phase 1 signal columns
             ("ofi_at_entry", "REAL"),
             ("funding_rate_at_entry", "REAL"),
@@ -230,6 +233,8 @@ async def init_db() -> None:
             lc_cols = {row[1] for row in await cur.fetchall()}
         if "usdc_at_start" not in lc_cols:
             await db.execute("ALTER TABLE learning_cycles ADD COLUMN usdc_at_start REAL")
+        if "claude_prediction" not in lc_cols:
+            await db.execute("ALTER TABLE learning_cycles ADD COLUMN claude_prediction TEXT")
         await db.commit()
     log.info("database_initialized", path=str(_db_path))
 

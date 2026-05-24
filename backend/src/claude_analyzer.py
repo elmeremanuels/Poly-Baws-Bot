@@ -178,6 +178,13 @@ async def analyze_cycle(cycle_id: int) -> dict:
     schema = """{
   "confidence_score": 0.0-1.0,
   "reasoning": "...",
+  "prediction": {
+    "expected_win_rate_pct": float,
+    "expected_avg_pnl_per_trade": float,
+    "key_assumption": "The single most important assumption this recommendation rests on — e.g. 'CHOPPY regime will persist for the next 20+ trades'.",
+    "falsifiable_condition": "What outcome in the NEXT deploy phase would prove this assumption wrong — e.g. 'peg_cross_rate drops below 0.30 but win rate does not improve'.",
+    "prediction_horizon_trades": int
+  },
   "coin_params": {
     "BTC": {"trigger_threshold": float, "cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "enabled": bool},
     "ETH": { ... }, "SOL": { ... }, "XRP": { ... }, "DOGE": { ... }

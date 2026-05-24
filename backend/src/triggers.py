@@ -59,6 +59,9 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "bias_certainty", round(_certainty, 3) if _bias else 0.0)
     update_trade_field(trade_id, "yes_size", yes_size)
     update_trade_field(trade_id, "no_size", no_size)
+    # Stamp bot's predictions at entry — used to evaluate prediction accuracy later
+    update_trade_field(trade_id, "regime_at_entry", _regime.get_current_regime(coin))
+    update_trade_field(trade_id, "bias_direction_at_entry", _bias)
 
     # Stamp Phase 1 signals at entry time
     from . import signals as _sig

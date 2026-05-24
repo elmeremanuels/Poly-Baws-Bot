@@ -210,11 +210,13 @@ class LearningOrchestrator:
         try:
             from .claude_analyzer import analyze_cycle
             analysis = await analyze_cycle(self._cycle_id)
+            pred = analysis.get("prediction")
             await _db_update_cycle(
                 self._cycle_id,
                 claude_analysis=analysis.get("reasoning", ""),
                 claude_params=json.dumps(analysis),
                 confidence_score=analysis["confidence_score"],
+                claude_prediction=json.dumps(pred) if pred else None,
             )
             # Phase may have been force-changed while Claude was running; respect it
             if self._phase != "analyze":
