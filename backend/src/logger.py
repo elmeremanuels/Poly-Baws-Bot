@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS learning_cycles (
     confidence_score REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_analytics ON trades(status, trigger_hit, coin, created_at);
 """
 
 

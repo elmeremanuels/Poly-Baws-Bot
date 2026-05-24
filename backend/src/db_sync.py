@@ -10,13 +10,19 @@ from pathlib import Path
 from .config_loader import CONFIG
 
 _db_path = Path(__file__).parent.parent / CONFIG["logging"]["db_path"]
+_indexes_created = False
 
 
 def _conn() -> sqlite3.Connection:
+    global _indexes_created
     conn = sqlite3.connect(str(_db_path), isolation_level=None, timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")  # allow concurrent reads while bot writes
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
+    if not _indexes_created and _db_path.exists():
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_analytics ON trades(status, trigger_hit, coin, created_at)")
+        _indexes_created = True
     return conn
 
 

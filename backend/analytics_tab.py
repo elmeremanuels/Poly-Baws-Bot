@@ -173,18 +173,16 @@ def _coin_comparison(days: int | None) -> None:
 
 def _cumulative_pnl(df: pd.DataFrame) -> None:
     st.markdown("### Cumulative P&L")
-    plot_df = df.sort_values("created_at").copy()
+    plot_df = df[["created_at", "coin", "net_pnl"]].copy()
     plot_df["created_at"] = pd.to_datetime(plot_df["created_at"])
+    plot_df = plot_df.sort_values("created_at")
 
-    chart: pd.DataFrame = pd.DataFrame()
-    for coin in sorted(plot_df["coin"].unique()):
-        sub = plot_df[plot_df["coin"] == coin].set_index("created_at")[["net_pnl"]].copy()
-        sub = sub.rename(columns={"net_pnl": coin})
-        sub[coin] = sub[coin].cumsum()
-        chart = chart.join(sub, how="outer") if not chart.empty else sub
-
-    total = plot_df.set_index("created_at")[["net_pnl"]].cumsum().rename(columns={"net_pnl": "Total"})
-    chart = chart.join(total, how="outer") if not chart.empty else total
+    chart = (
+        plot_df.pivot_table(index="created_at", columns="coin", values="net_pnl", aggfunc="sum")
+        .sort_index().fillna(0).cumsum()
+    )
+    chart.columns.name = None
+    chart["Total"] = plot_df.groupby("created_at")["net_pnl"].sum().cumsum()
     st.line_chart(chart.ffill().fillna(0))
 
 
@@ -233,6 +231,12 @@ def _hourly_analysis(coin: str | None, days: int | None) -> None:
 
 def _trade_history(df: pd.DataFrame) -> None:
     with st.expander(f"📋 Full Trade History ({len(df)} trades)", expanded=False):
+        if not st.session_state.get("_hist_open"):
+            st.caption("Klik 'Toon' om de tabel te laden.")
+            if st.button("Toon", key="hist_open_btn"):
+                st.session_state["_hist_open"] = True
+                st.rerun()
+            return
         display_cols = [
             "created_at", "coin", "status", "mode", "triggered_by",
             "entry_yes_price", "entry_no_price",
@@ -241,7 +245,7 @@ def _trade_history(df: pd.DataFrame) -> None:
             "fees_paid", "net_pnl",
         ]
         available = [c for c in display_cols if c in df.columns]
-        show = df[available].copy().sort_values("created_at", ascending=False).head(500)
+        show = df[available].copy().sort_values("created_at", ascending=False).head(200)
         if "created_at" in show.columns:
             show["created_at"] = pd.to_datetime(show["created_at"]).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)
