@@ -274,17 +274,25 @@ async def get_open_positions() -> list[dict]:
 
 
 async def get_balance() -> float | None:
-    """Get USDC balance. Tries Polymarket US API first, falls back to Polygon RPC."""
-    # Primary: Polymarket US API (requires POLYMARKET_US_KEY_ID + POLYMARKET_US_SECRET_KEY)
-    try:
-        from . import polymarket_us_api
-        result = await polymarket_us_api.get_account_balance()
-        if result is not None and result.get("current_balance") is not None:
-            return result["current_balance"]
-    except Exception:
-        pass
+    """Get USDC balance.
 
-    # Fallback: Polygon RPC (no extra credentials needed)
+    Primary: CLOB /balance-allowance (uses existing wallet credentials, no KYC).
+    Fallback: Polygon RPC (no credentials needed at all).
+    """
+    # Primary: CLOB balance-allowance — same credentials as order placement
+    try:
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+        client = get_client()
+        result = await _run_sync(
+            client.get_balance_allowance,
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+        )
+        if result and "balance" in result:
+            return float(result["balance"])
+    except Exception as e:
+        log.warning("get_balance_clob_failed", error=str(e))
+
+    # Fallback: Polygon RPC (public endpoint, no credentials)
     try:
         import httpx as _httpx
         from eth_account import Account
@@ -295,7 +303,6 @@ async def get_balance() -> float | None:
             pk = get_env("POLYMARKET_PRIVATE_KEY")
             address = Account.from_key(pk).address
         usdc = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        # balanceOf(address) selector
         data = "0x70a08231" + "000000000000000000000000" + address[2:].lower()
         async with _httpx.AsyncClient(timeout=10) as http:
             resp = await http.post(
