@@ -132,6 +132,16 @@ async def analyze_cycle(cycle_id: int) -> dict:
 
     pnl_accuracy = get_cycle_pnl_accuracy(cycle_id)
 
+    # Enrich with realized P&L from Polymarket US API (if credentials are set)
+    try:
+        from . import polymarket_us_api as _pm_us
+        activities = await _pm_us.get_recent_activities(limit=200)
+        if activities:
+            api_pnl = _pm_us.compute_activities_pnl(activities)
+            pnl_accuracy = {**(pnl_accuracy or {}), "api_realized_pnl": api_pnl}
+    except Exception:
+        pass
+
     schema = """{
   "confidence_score": 0.0-1.0,
   "reasoning": "...",

@@ -274,7 +274,17 @@ async def get_open_positions() -> list[dict]:
 
 
 async def get_balance() -> float | None:
-    """Get USDC balance on Polygon via public RPC — no CLOB Level 2 auth needed."""
+    """Get USDC balance. Tries Polymarket US API first, falls back to Polygon RPC."""
+    # Primary: Polymarket US API (requires POLYMARKET_US_KEY_ID + POLYMARKET_US_SECRET_KEY)
+    try:
+        from . import polymarket_us_api
+        result = await polymarket_us_api.get_account_balance()
+        if result is not None and result.get("current_balance") is not None:
+            return result["current_balance"]
+    except Exception:
+        pass
+
+    # Fallback: Polygon RPC (no extra credentials needed)
     try:
         import httpx as _httpx
         from eth_account import Account
