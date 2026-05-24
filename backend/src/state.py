@@ -67,7 +67,7 @@ def create_trade_state(
 
     state = {
         "trade_id": trade_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "coin": coin,
         "market_id": market.get("market_id"),
         "condition_id_yes": market.get("yes_token"),

@@ -184,7 +184,7 @@ def _coin_comparison(days: int | None, only_today: bool = False) -> None:
 def _cumulative_pnl(df: pd.DataFrame) -> None:
     st.markdown("### Cumulative P&L")
     plot_df = df[["created_at", "coin", "net_pnl"]].copy()
-    plot_df["created_at"] = pd.to_datetime(plot_df["created_at"])
+    plot_df["created_at"] = pd.to_datetime(plot_df["created_at"], format="mixed", utc=True)
     plot_df = plot_df.sort_values("created_at")
 
     chart = (
@@ -257,7 +257,7 @@ def _trade_history(df: pd.DataFrame) -> None:
         available = [c for c in display_cols if c in df.columns]
         show = df[available].copy().sort_values("created_at", ascending=False).head(200)
         if "created_at" in show.columns:
-            show["created_at"] = pd.to_datetime(show["created_at"]).dt.strftime("%m-%d %H:%M")
+            show["created_at"] = pd.to_datetime(show["created_at"], format="mixed", utc=True).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)
 
 
