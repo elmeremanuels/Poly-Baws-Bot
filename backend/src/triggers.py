@@ -122,69 +122,34 @@ async def _poll_live_fill(order_id: str | None, cutoff: datetime, poll_interval:
     return {"filled": False, "timed_out": True}
 
 
-async def _sell_loser_with_limit_fallback(
+async def _sell_loser_immediately(
     loser_token: str,
     size: float,
     paper: bool,
-    window_end_dt,
     coin: str,
     trade_id: str,
 ) -> dict:
-    """Sell loser via limit at mid−1¢; fall back to market sell if not filled in time.
+    """Sell loser via immediate market order.
 
-    Eliminates bid-ask slippage when the market pauses after trigger.
-    Timeout protects winner-trail time: always leaves ≥90s for winner to run.
+    A limit order at mid-0.01 was tried but never fills in practice:
+    when loser mid is ~0.27 the bid is ~0.17 (10c spread), so the limit
+    sits 9c above the market and only wastes 30-40s of winner-trail time
+    before falling back to market anyway. Taker fee on a ~0.17 fill is
+    under 0.003 USD/trade — not worth the delay.
     """
     mid = ws_client.get_mid_price(loser_token) or 0.30
-    limit_price = round(max(0.02, mid - 0.01), 2)
-
-    now_utc = datetime.now(timezone.utc)
-    secs_to_end = (window_end_dt - now_utc).total_seconds() if window_end_dt else 300.0
-    timeout = max(0.0, min(40.0, secs_to_end - 90.0))
-
-    log.info("loser_limit_attempt", trade_id=trade_id, coin=coin,
-             limit=limit_price, mid=mid, timeout_s=round(timeout, 1))
+    log.info("loser_market_sell", trade_id=trade_id, coin=coin, mid=round(mid, 4))
 
     if paper:
-        if timeout >= 5.0:
-            result = await paper_trader.poll_for_fill(
-                loser_token, limit_price, size, "sell",
-                timeout_seconds=timeout, poll_interval=3.0,
-            )
-        else:
-            result = {"filled": False}
-        if not result.get("filled"):
-            log.info("loser_limit_fallback", trade_id=trade_id, mode="paper")
-            result = await paper_trader.simulate_market_sell(loser_token, size)
-        return result
-    else:
-        order_id = None
-        if timeout >= 5.0:
-            limit_resp = await orders.place_limit_order(loser_token, "SELL", limit_price, size)
-            order_id = limit_resp.get("order_id") if limit_resp else None
+        return await paper_trader.simulate_market_sell(loser_token, size)
 
-        if order_id:
-            deadline = asyncio.get_event_loop().time() + timeout
-            while asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(3.0)
-                order_info = await orders.get_order(order_id)
-                if order_info:
-                    status = order_info.get("status")
-                    if status in ("MATCHED", "FILLED"):
-                        avg = float(order_info.get("average_price") or order_info.get("price") or limit_price)
-                        log.info("loser_limit_filled", trade_id=trade_id, order_id=order_id, avg_price=avg)
-                        return {"filled": True, "fill_price": avg, "fees": 0.0}  # maker = 0% fee
-                    if status in ("CANCELED", "UNMATCHED"):
-                        break
-            await orders.cancel_order(order_id)
-            log.info("loser_limit_cancelled_fallback", trade_id=trade_id, order_id=order_id)
-
-        # Market fallback
-        market_resp = await orders.place_market_order(loser_token, "SELL", size)
-        if market_resp and market_resp.get("order_id"):
-            fill = await _fetch_market_fill(market_resp["order_id"], fallback=round(mid * 0.7, 2), size=size)
-            return {"filled": True, "fill_price": fill["fill_price"], "fees": fill["fees"]}
-        return {"filled": False, "fill_price": round(mid * 0.7, 2), "fees": 0.0}
+    market_resp = await orders.place_market_order(loser_token, "SELL", size)
+    if market_resp and market_resp.get("order_id"):
+        fill = await _fetch_market_fill(
+            market_resp["order_id"], fallback=round(mid * 0.7, 2), size=size
+        )
+        return {"filled": True, "fill_price": fill["fill_price"], "fees": fill["fees"]}
+    return {"filled": False, "fill_price": round(mid * 0.7, 2), "fees": 0.0}
 
 
 async def _fetch_market_fill(order_id: str, fallback: float, size: float) -> dict:
@@ -318,14 +283,9 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
 
     log.info("executing_trigger_action", trade_id=trade_id, winner=winner, loser=loser_side)
 
-    # Step 1: sell loser via limit at mid−1¢ (maker fill, no slippage) with market fallback
-    window_end_ts = trade.get("window_end_ts")
-    window_end_dt_local = (
-        datetime.fromisoformat(window_end_ts).astimezone(timezone.utc)
-        if window_end_ts else None
-    )
-    loser_result = await _sell_loser_with_limit_fallback(
-        loser_token, size, paper, window_end_dt_local, coin, trade_id
+    # Step 1: sell loser immediately via market order
+    loser_result = await _sell_loser_immediately(
+        loser_token, size, paper, coin, trade_id
     )
 
     loser_price = loser_result.get("fill_price") or 0.30

@@ -43,6 +43,7 @@ coins:
     enabled: true
     max_parallel_positions: 5
     market_filter: "sol-updown-5m"
+    trigger_threshold: 0.75    # volatile like BTC; higher bar reduces false triggers
   XRP:
     enabled: true
     max_parallel_positions: 5
