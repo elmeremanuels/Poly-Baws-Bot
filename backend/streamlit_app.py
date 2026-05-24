@@ -715,12 +715,10 @@ def _learning_panel() -> None:
                      help="Kill-switch: stopt alle nieuwe trades."):
             write_command("kill")
             st.toast("Bot gepauzeerd.", icon="⏸")
-    if phase == "learn" and c4.button("Ga direct live", use_container_width=True,
-                                       help="Sla analyse over en ga direct naar deploy. Gebruikt huidige config-params."):
-        # learn → analyze (skip) → deploy via two forced transitions
-        write_command("force_next_phase")   # learn → analyze
-        write_command("force_next_phase")   # analyze → deploy (bot executes sequentially)
-        st.toast("Direct live aangevraagd (2x phase skip).", icon="🚀")
+    if phase in ("learn", "analyze") and c4.button("Ga direct live", use_container_width=True,
+                                                    help="Ga direct naar live deploy, ongeacht huidige fase."):
+        write_command("force_deploy")
+        st.toast("Direct live aangevraagd.", icon="🚀")
     elif phase != "learn":
         c4.empty()
 

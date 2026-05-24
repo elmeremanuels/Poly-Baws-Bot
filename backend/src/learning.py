@@ -208,6 +208,10 @@ class LearningOrchestrator:
                 claude_params=json.dumps(analysis),
                 confidence_score=analysis["confidence_score"],
             )
+            # Phase may have been force-changed while Claude was running; respect it
+            if self._phase != "analyze":
+                log.info("analyze_phase_overridden", current_phase=self._phase)
+                return
             if self._should_go_live(analysis):
                 self._active_params = analysis
                 self._apply_claude_params(analysis)
@@ -216,14 +220,14 @@ class LearningOrchestrator:
                 log.info("confidence_too_low",
                          score=analysis["confidence_score"],
                          action="starting_new_learn_cycle")
-                self._restore_original_params()  # revert Claude params before paper learn cycle
+                self._restore_original_params()
                 await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
                 await self._start_new_cycle()
         except Exception as e:
             log.error("analyze_failed", error=str(e))
-            # Fall back to new learn cycle on failure
-            await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
-            await self._start_new_cycle()
+            if self._phase == "analyze":
+                await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
+                await self._start_new_cycle()
         finally:
             _analyzing = False
 

@@ -203,6 +203,12 @@ async def _run_command(command: str, payload: dict) -> None:
         await orch._transition_to(next_phase)
         log.info("learning_phase_forced", to=next_phase)
 
+    elif command == "force_deploy":
+        from . import learning as _learning
+        orch = _learning.get_orchestrator()
+        await orch._transition_to("deploy")
+        log.info("learning_force_deploy")
+
     elif command == "reset_learning_cycle":
         from . import learning as _learning
         from .logger import _db as _adb
