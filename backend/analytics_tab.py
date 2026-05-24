@@ -18,7 +18,6 @@ COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð
 _RANGE_DAYS = {"All time": None, "30 days": 30, "7 days": 7, "Today": 1}
 
 
-@st.fragment
 def analytics_panel() -> None:
     # ── Global Filters ────────────────────────────────────────────────────────
     col_coin, col_range, col_export = st.columns([2, 3, 1])

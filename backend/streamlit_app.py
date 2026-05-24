@@ -518,7 +518,8 @@ def _active_positions() -> None:
         c[5].caption(f"NO {t['entry_no_price']:.2f}" if t.get("entry_no_price") else "NO —")
         c[6].caption(f"BE €{be:.2f}" if be is not None else "BE —")
         if c[7].button("ℹ️", key=f"info_{trade_id}", help="Details bekijken"):
-            _trade_detail_dialog(t)
+            st.session_state["_detail_trade_id"] = trade_id
+            st.rerun(scope="app")  # full page rerun so dialog renders outside fragment
         if c[8].button("🛑", key=f"fc_{trade_id}", help="Force close deze positie"):
             write_command("force_close_trade", {"trade_id": trade_id})
             st.toast(f"{coin} force close verstuurd.", icon="🛑")
@@ -803,3 +804,12 @@ with tab_learning:
     _learning_panel()
 with tab_portfolio:
     _portfolio_panel()
+
+# Trade detail dialog — rendered outside all fragments/tabs so it is not
+# affected by the dashboard fragment's 5-second auto-refresh.
+_detail_id = st.session_state.pop("_detail_trade_id", None)
+if _detail_id:
+    _all_open = get_open_trades()
+    _detail_trade = next((t for t in _all_open if t.get("trade_id") == _detail_id), None)
+    if _detail_trade:
+        _trade_detail_dialog(_detail_trade)
