@@ -180,6 +180,70 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
     return direction, round(min(1.0, max_score), 3)
 
 
+# ── aggTrade REST poller (replaces WebSocket stream) ──────────────────────────
+
+_SPOT_REST = "https://api.binance.com/api/v3"
+_POLL_INTERVAL = 5.0  # seconds between aggTrade polls
+
+
+async def run_trade_poll_loop() -> None:
+    """Poll Binance spot aggTrades REST endpoint every 5s per coin for OFI.
+
+    Replaces the WebSocket aggTrade stream which is blocked (HTTP 451) for
+    datacenter IPs.  Tracks the last seen aggTradeId per coin so each trade
+    is recorded exactly once.
+
+    aggTrade fields:
+      a  — aggregate trade ID (used for fromId pagination)
+      q  — quantity (base asset)
+      m  — is buyer the market maker? True = sell-initiated, False = buy-initiated
+    """
+    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
+    _last_id: dict[str, int] = {}
+
+    log.info("trade_poll_loop_starting", coins=coins)
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Seed: fetch last 500 trades per coin to pre-fill the OFI buffer
+        for coin in coins:
+            symbol = _COIN_TO_PERP[coin]
+            try:
+                resp = await client.get(
+                    f"{_SPOT_REST}/aggTrades",
+                    params={"symbol": symbol, "limit": 500},
+                )
+                resp.raise_for_status()
+                trades = resp.json()
+                for t in trades:
+                    record_trade(coin, float(t["q"]), not bool(t["m"]))
+                if trades:
+                    _last_id[coin] = int(trades[-1]["a"])
+                log.info("trade_poll_seeded", coin=coin, n=len(trades))
+            except Exception as e:
+                log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
+
+        # Polling loop — fetch only new trades since last seen ID
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+            for coin in coins:
+                symbol = _COIN_TO_PERP[coin]
+                try:
+                    params: dict = {"symbol": symbol, "limit": 500}
+                    last = _last_id.get(coin)
+                    if last:
+                        params["fromId"] = last + 1
+                    resp = await client.get(f"{_SPOT_REST}/aggTrades", params=params)
+                    resp.raise_for_status()
+                    trades = resp.json()
+                    if not trades:
+                        continue
+                    for t in trades:
+                        record_trade(coin, float(t["q"]), not bool(t["m"]))
+                    _last_id[coin] = int(trades[-1]["a"])
+                except Exception as e:
+                    log.warning("trade_poll_failed", coin=coin, error=str(e))
+
+
 # ── Funding rate background poller ─────────────────────────────────────────────
 
 async def seed_funding_rates() -> None:

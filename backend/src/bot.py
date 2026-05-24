@@ -332,7 +332,7 @@ async def run_bot() -> None:
         asyncio.create_task(_portfolio_sync_loop()),
         asyncio.create_task(_regime_sync_loop()),
         asyncio.create_task(asset_price_feed.run()),
-        asyncio.create_task(asset_price_feed.run_trade_stream()),
+        asyncio.create_task(_signals.run_trade_poll_loop()),
         asyncio.create_task(_signals.funding_rate_loop()),
     ]
     for coin in COINS:

@@ -1,63 +1,54 @@
-"""Real-time underlying asset price feed via Binance WebSocket miniTicker streams.
+"""Real-time underlying asset price feed via Binance REST polling.
 
-Calls regime.record_asset_price(coin, price) on every tick so regime detection
-has a continuous 30-minute rolling buffer of actual USD prices.
+WebSocket streams (wss://stream.binance.com) are blocked for datacenter IPs
+(HTTP 451). The REST API works fine from the same server.
 
-On startup, seeds the buffer with 30 minutes of Binance REST klines so regime
-detection works immediately instead of waiting 20+ minutes for live data.
+Strategy:
+  - Seed: 30 minutes of 1-minute klines on startup (existing, unchanged)
+  - Live:  poll /api/v3/ticker/price for all coins every 5 seconds (one request)
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import time
 
 import httpx
 
 from .config_loader import CONFIG
 from .logger import log
 from . import regime as _regime
-from . import signals as _signals
 
 _COIN_TO_SYMBOL: dict[str, str] = {
-    "BTC": "btcusdt",
-    "ETH": "ethusdt",
-    "SOL": "solusdt",
-    "XRP": "xrpusdt",
-    "DOGE": "dogeusdt",
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "XRP": "XRPUSDT",
+    "DOGE": "DOGEUSDT",
 }
 
-_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
-_BINANCE_REST = "https://api.binance.com/api/v3/klines"
-_AGG_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
-
-
-def _build_url() -> str:
-    coins = list(CONFIG.get("coins", {}).keys())
-    symbols = [_COIN_TO_SYMBOL[c] for c in coins if c in _COIN_TO_SYMBOL]
-    streams = "/".join(f"{s}@miniTicker" for s in symbols)
-    return _WS_BASE + streams
+_REST_BASE = "https://api.binance.com/api/v3"
+_POLL_INTERVAL = 5.0  # seconds between price polls
 
 
 async def _seed_prices() -> None:
-    """Backfill 30 minutes of 1-minute klines from Binance REST before WebSocket starts."""
+    """Backfill 30 minutes of 1-minute klines from Binance REST before polling starts."""
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_SYMBOL]
     async with httpx.AsyncClient(timeout=15) as client:
         for coin in coins:
-            symbol = _COIN_TO_SYMBOL[coin].upper()
+            symbol = _COIN_TO_SYMBOL[coin]
             try:
                 resp = await client.get(
-                    _BINANCE_REST,
+                    f"{_REST_BASE}/klines",
                     params={"symbol": symbol, "interval": "1m", "limit": 30},
                 )
                 resp.raise_for_status()
                 klines = resp.json()
-                # kline format: [open_time, open, high, low, close, ...]
                 for kline in klines:
-                    open_time_ms = int(kline[0])
+                    ts = int(kline[0]) / 1000.0
                     close_price = float(kline[4])
-                    ts = open_time_ms / 1000.0
-                    buf = _regime._asset_prices.setdefault(coin, __import__("collections").deque())
+                    buf = _regime._asset_prices.setdefault(
+                        coin, __import__("collections").deque()
+                    )
                     buf.append((ts, close_price))
                 log.info("asset_price_seeded", coin=coin, n=len(klines))
             except Exception as e:
@@ -65,99 +56,39 @@ async def _seed_prices() -> None:
 
 
 async def run() -> None:
-    """Seed price buffer, then connect to Binance combined stream.
+    """Seed price buffer, then poll Binance ticker/price every 5 seconds.
 
-    Reconnects automatically with exponential backoff (2s → 4s → 8s … cap 60s).
+    One REST call fetches all coins at once.
+    Exponential backoff on errors (2s → 4s → … cap 60s).
     """
-    import websockets
-
     await _seed_prices()
 
-    url = _build_url()
+    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_SYMBOL]
+    symbols = json.dumps([_COIN_TO_SYMBOL[c] for c in coins])
+    upper_map = {v: k for k, v in _COIN_TO_SYMBOL.items()}
+
+    log.info("asset_price_feed_starting", mode="rest_poll", interval=_POLL_INTERVAL)
     backoff = 2.0
-    log.info("asset_price_feed_starting", url=url)
 
     while True:
         try:
-            async with websockets.connect(
-                url,
-                ping_interval=20,
-                ping_timeout=10,
-                open_timeout=15,
-            ) as ws:
-                backoff = 2.0  # reset on successful connect
-                log.info("asset_price_feed_connected")
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        data = msg.get("data", {})
-                        symbol = (data.get("s") or "").upper()  # e.g. "BTCUSDT"
-                        price_str = data.get("c")
-                        if not price_str:
-                            continue
-                        # Reverse lookup: "BTCUSDT" → "BTC"
-                        coin = next(
-                            (c for c, s in _COIN_TO_SYMBOL.items() if s.upper() == symbol),
-                            None,
-                        )
-                        if coin and coin in CONFIG.get("coins", {}):
-                            _regime.record_asset_price(coin, float(price_str))
-                    except Exception as e:
-                        log.warning("asset_price_feed_parse_error", error=str(e))
-        except Exception as e:
-            log.warning("asset_price_feed_disconnected", error=str(e), reconnect_in=backoff)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60.0)
-
-
-def _build_agg_url() -> str:
-    coins = list(CONFIG.get("coins", {}).keys())
-    symbols = [_COIN_TO_SYMBOL[c] for c in coins if c in _COIN_TO_SYMBOL]
-    streams = "/".join(f"{s}@aggTrade" for s in symbols)
-    return _AGG_WS_BASE + streams
-
-
-async def run_trade_stream() -> None:
-    """Connect to Binance aggTrade combined stream and feed _signals.record_trade().
-
-    aggTrade message fields used:
-      s  — symbol (e.g. "BTCUSDT")
-      q  — quantity (base asset)
-      m  — is buyer the market maker? True = sell-initiated, False = buy-initiated
-    """
-    import websockets
-
-    url = _build_agg_url()
-    backoff = 2.0
-    log.info("trade_stream_starting", url=url)
-
-    # Reverse lookup: "BTCUSDT" → "BTC"
-    upper_map = {s.upper(): c for c, s in _COIN_TO_SYMBOL.items()}
-
-    while True:
-        try:
-            async with websockets.connect(
-                url,
-                ping_interval=20,
-                ping_timeout=10,
-                open_timeout=15,
-            ) as ws:
+            async with httpx.AsyncClient(timeout=10) as client:
                 backoff = 2.0
-                log.info("trade_stream_connected")
-                async for raw in ws:
+                while True:
                     try:
-                        msg = json.loads(raw)
-                        data = msg.get("data", {})
-                        symbol = (data.get("s") or "").upper()
-                        coin = upper_map.get(symbol)
-                        if not coin or coin not in CONFIG.get("coins", {}):
-                            continue
-                        qty = float(data.get("q", 0))
-                        is_buy = not bool(data.get("m", True))  # m=True → seller is taker → sell
-                        _signals.record_trade(coin, qty, is_buy)
+                        resp = await client.get(
+                            f"{_REST_BASE}/ticker/price",
+                            params={"symbols": symbols},
+                        )
+                        resp.raise_for_status()
+                        for item in resp.json():
+                            coin = upper_map.get(item.get("symbol", ""))
+                            if coin and coin in CONFIG.get("coins", {}):
+                                _regime.record_asset_price(coin, float(item["price"]))
                     except Exception as e:
-                        log.warning("trade_stream_parse_error", error=str(e))
+                        log.warning("asset_price_poll_error", error=str(e))
+                    await asyncio.sleep(_POLL_INTERVAL)
         except Exception as e:
-            log.warning("trade_stream_disconnected", error=str(e), reconnect_in=backoff)
+            log.warning("asset_price_feed_error", error=str(e), retry_in=backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
