@@ -18,6 +18,26 @@ COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð
 _RANGE_DAYS = {"All time": None, "30 days": 30, "7 days": 7, "Today": 1}
 
 
+@st.cache_data(ttl=60)
+def _q_trades(coin, days):
+    return get_analytics_trades(coin=coin, days=days)
+
+
+@st.cache_data(ttl=60)
+def _q_exit_stats(coin, days):
+    return get_exit_reason_stats(coin=coin, days=days)
+
+
+@st.cache_data(ttl=60)
+def _q_coin_comparison(days):
+    return get_coin_comparison(days=days)
+
+
+@st.cache_data(ttl=60)
+def _q_hourly_pnl(coin, days):
+    return get_hourly_pnl(coin=coin, days=days)
+
+
 def analytics_panel() -> None:
     # ── Global Filters ────────────────────────────────────────────────────────
     col_coin, col_range, col_export = st.columns([2, 3, 1])
@@ -31,7 +51,7 @@ def analytics_panel() -> None:
     coin_filter = selected_coin if selected_coin != "All" else None
     days = _RANGE_DAYS[selected_range]
 
-    trades = get_analytics_trades(coin=coin_filter, days=days)
+    trades = _q_trades(coin_filter, days)
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
     with col_export:
@@ -109,7 +129,7 @@ def _key_metrics(df: pd.DataFrame) -> None:
 
 def _exit_breakdown(coin: str | None, days: int | None) -> None:
     st.markdown("### Exit Reason Breakdown")
-    stats = get_exit_reason_stats(coin=coin, days=days)
+    stats = _q_exit_stats(coin, days)
     if not stats:
         st.caption("No data.")
         return
@@ -135,7 +155,7 @@ def _exit_breakdown(coin: str | None, days: int | None) -> None:
 
 def _coin_comparison(days: int | None) -> None:
     st.markdown("### Per-Coin Comparison")
-    rows = get_coin_comparison(days=days)
+    rows = _q_coin_comparison(days)
     if not rows:
         st.caption("No data.")
         return
@@ -193,7 +213,7 @@ def _trailing_metrics(df: pd.DataFrame) -> None:
 
 def _hourly_analysis(coin: str | None, days: int | None) -> None:
     st.markdown("### Avg P&L by Hour of Day (UTC)")
-    hourly = get_hourly_pnl(coin=coin, days=days)
+    hourly = _q_hourly_pnl(coin, days)
     if not hourly:
         st.caption("Not enough data yet (needs 100+ trades for reliable signal).")
         return

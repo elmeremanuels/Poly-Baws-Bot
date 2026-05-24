@@ -15,6 +15,7 @@ _db_path = Path(__file__).parent.parent / CONFIG["logging"]["db_path"]
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_db_path), isolation_level=None, timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")  # allow concurrent reads while bot writes
     conn.row_factory = sqlite3.Row
     return conn
 
