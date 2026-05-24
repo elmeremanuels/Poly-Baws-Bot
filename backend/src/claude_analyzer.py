@@ -216,9 +216,7 @@ def _parse_response(text: str) -> dict:
         for key, (lo, hi) in BOUNDS.items():
             if key in cp:
                 val = float(cp[key])
-                if not lo <= val <= hi:
-                    raise ValueError(f"{coin}.{key}={val} outside bounds [{lo}, {hi}]")
-                cp[key] = val
+                cp[key] = max(lo, min(hi, val))  # clamp silently instead of failing
 
     gp = params.get("global_params", {})
     if "max_entry_cost" in gp:

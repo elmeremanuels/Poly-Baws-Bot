@@ -489,7 +489,7 @@ async def _winner_exit_paper(
             if mid > peak_mid:
                 peak_mid = mid
 
-            vel = _vol.get_price_velocity(winner_token)
+            vel = _vol.get_price_velocity(winner_token) or 0.0
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
                 size=size, velocity=vel,
@@ -608,7 +608,7 @@ async def _winner_exit_live(
             if mid > peak_mid:
                 peak_mid = mid
 
-            vel = _vol.get_price_velocity(winner_token)
+            vel = _vol.get_price_velocity(winner_token) or 0.0
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
                 size=size, velocity=vel,
