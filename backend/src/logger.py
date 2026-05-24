@@ -194,6 +194,17 @@ async def init_db() -> None:
             ("bias_certainty", "REAL"),
             ("yes_size", "REAL"),
             ("no_size", "REAL"),
+            # Phase 1 signal columns
+            ("ofi_at_entry", "REAL"),
+            ("funding_rate_at_entry", "REAL"),
+            ("liq_proxy_at_entry", "REAL"),
+            ("conviction_at_entry", "TEXT"),
+            ("conviction_score_at_entry", "REAL"),
+            ("ofi_at_trigger", "REAL"),
+            ("funding_rate_at_trigger", "REAL"),
+            ("liq_proxy_at_trigger", "REAL"),
+            ("conviction_at_trigger", "TEXT"),
+            ("conviction_score_at_trigger", "REAL"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

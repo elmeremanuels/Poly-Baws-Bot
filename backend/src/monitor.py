@@ -118,6 +118,15 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             update_trade_field(trade_id, "no_depth_at_trigger", n_depth)
             update_trade_field(trade_id, "time_since_window_start", time_since_start)
 
+            # Phase 1: stamp signals at trigger time
+            from . import signals as _sig
+            _trig_signals = _sig.get_all_signals(coin)
+            update_trade_field(trade_id, "ofi_at_trigger", _trig_signals.get("ofi"))
+            update_trade_field(trade_id, "funding_rate_at_trigger", _trig_signals.get("funding_rate"))
+            update_trade_field(trade_id, "liq_proxy_at_trigger", _trig_signals.get("liq_proxy"))
+            update_trade_field(trade_id, "conviction_at_trigger", _trig_signals.get("conviction"))
+            update_trade_field(trade_id, "conviction_score_at_trigger", _trig_signals.get("conviction_score"))
+
             await on_trigger_callback(trade_id, winner, price)
             break
 

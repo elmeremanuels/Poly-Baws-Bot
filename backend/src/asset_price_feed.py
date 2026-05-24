@@ -17,6 +17,7 @@ import httpx
 from .config_loader import CONFIG
 from .logger import log
 from . import regime as _regime
+from . import signals as _signals
 
 _COIN_TO_SYMBOL: dict[str, str] = {
     "BTC": "btcusdt",
@@ -28,6 +29,7 @@ _COIN_TO_SYMBOL: dict[str, str] = {
 
 _WS_BASE = "wss://stream.binance.com:9443/stream?streams="
 _BINANCE_REST = "https://api.binance.com/api/v3/klines"
+_AGG_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
 
 
 def _build_url() -> str:
@@ -104,5 +106,58 @@ async def run() -> None:
                         log.warning("asset_price_feed_parse_error", error=str(e))
         except Exception as e:
             log.warning("asset_price_feed_disconnected", error=str(e), reconnect_in=backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+
+def _build_agg_url() -> str:
+    coins = list(CONFIG.get("coins", {}).keys())
+    symbols = [_COIN_TO_SYMBOL[c] for c in coins if c in _COIN_TO_SYMBOL]
+    streams = "/".join(f"{s}@aggTrade" for s in symbols)
+    return _AGG_WS_BASE + streams
+
+
+async def run_trade_stream() -> None:
+    """Connect to Binance aggTrade combined stream and feed _signals.record_trade().
+
+    aggTrade message fields used:
+      s  — symbol (e.g. "BTCUSDT")
+      q  — quantity (base asset)
+      m  — is buyer the market maker? True = sell-initiated, False = buy-initiated
+    """
+    import websockets
+
+    url = _build_agg_url()
+    backoff = 2.0
+    log.info("trade_stream_starting", url=url)
+
+    # Reverse lookup: "BTCUSDT" → "BTC"
+    upper_map = {s.upper(): c for c, s in _COIN_TO_SYMBOL.items()}
+
+    while True:
+        try:
+            async with websockets.connect(
+                url,
+                ping_interval=20,
+                ping_timeout=10,
+                open_timeout=15,
+            ) as ws:
+                backoff = 2.0
+                log.info("trade_stream_connected")
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                        data = msg.get("data", {})
+                        symbol = (data.get("s") or "").upper()
+                        coin = upper_map.get(symbol)
+                        if not coin or coin not in CONFIG.get("coins", {}):
+                            continue
+                        qty = float(data.get("q", 0))
+                        is_buy = not bool(data.get("m", True))  # m=True → seller is taker → sell
+                        _signals.record_trade(coin, qty, is_buy)
+                    except Exception as e:
+                        log.warning("trade_stream_parse_error", error=str(e))
+        except Exception as e:
+            log.warning("trade_stream_disconnected", error=str(e), reconnect_in=backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)

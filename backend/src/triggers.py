@@ -59,6 +59,15 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "bias_certainty", round(_certainty, 3) if _bias else 0.0)
     update_trade_field(trade_id, "yes_size", yes_size)
     update_trade_field(trade_id, "no_size", no_size)
+
+    # Stamp Phase 1 signals at entry time
+    from . import signals as _sig
+    _entry_signals = _sig.get_all_signals(coin)
+    update_trade_field(trade_id, "ofi_at_entry", _entry_signals.get("ofi"))
+    update_trade_field(trade_id, "funding_rate_at_entry", _entry_signals.get("funding_rate"))
+    update_trade_field(trade_id, "liq_proxy_at_entry", _entry_signals.get("liq_proxy"))
+    update_trade_field(trade_id, "conviction_at_entry", _entry_signals.get("conviction"))
+    update_trade_field(trade_id, "conviction_score_at_entry", _entry_signals.get("conviction_score"))
     # Use the mode stored in the trade (set at creation time) so that mode changes
     # during an active trade don't switch it between paper/live mid-flight.
     trade_mode = trade.get("mode") or get_mode()

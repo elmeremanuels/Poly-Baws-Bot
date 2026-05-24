@@ -112,6 +112,18 @@ def create_trade_state(
         "bias_certainty": None,
         "yes_size": None,
         "no_size": None,
+        # Phase 1 signals stamped at entry
+        "ofi_at_entry": None,
+        "funding_rate_at_entry": None,
+        "liq_proxy_at_entry": None,
+        "conviction_at_entry": None,
+        "conviction_score_at_entry": None,
+        # Phase 1 signals stamped at trigger
+        "ofi_at_trigger": None,
+        "funding_rate_at_trigger": None,
+        "liq_proxy_at_trigger": None,
+        "conviction_at_trigger": None,
+        "conviction_score_at_trigger": None,
     }
     return state
 
@@ -156,6 +168,10 @@ async def persist_trade(trade_id: str) -> None:
         "yes_depth_at_trigger", "no_depth_at_trigger", "time_since_window_start",
         "phase", "cycle_id", "param_snapshot",
         "break_even_price", "actual_winner",
+        "ofi_at_entry", "funding_rate_at_entry", "liq_proxy_at_entry",
+        "conviction_at_entry", "conviction_score_at_entry",
+        "ofi_at_trigger", "funding_rate_at_trigger", "liq_proxy_at_trigger",
+        "conviction_at_trigger", "conviction_score_at_trigger",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)
