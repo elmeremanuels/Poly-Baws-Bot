@@ -95,7 +95,11 @@ async def pre_trade_checks(coin: str, active_positions: dict[str, int],
 
 
 async def risk_monitor_loop(get_active_count_fn, interval: float = 5.0) -> None:
-    """Background loop that checks kill flag and loss limit periodically."""
+    """Background loop that checks kill flag and loss limit periodically.
+
+    Loss limit is only enforced in live modes — paper trading runs uncapped
+    so it can collect as much signal data as possible.
+    """
     global _killed, _kill_reason
     while True:
         try:
@@ -105,7 +109,9 @@ async def risk_monitor_loop(get_active_count_fn, interval: float = 5.0) -> None:
                 log.critical("kill_flag_file_detected")
 
             if not _killed:
-                await check_daily_loss_limit()
+                from .state import get_mode
+                if not get_mode().startswith("paper"):
+                    await check_daily_loss_limit()
         except Exception as e:
             log.error("risk_monitor_error", error=str(e))
         await asyncio.sleep(interval)
