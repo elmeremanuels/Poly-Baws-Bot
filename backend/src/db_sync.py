@@ -581,6 +581,51 @@ def get_signal_lab_trades(
     return [dict(r) for r in rows], total
 
 
+def export_query_trades(
+    coin: str | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
+    triggered_only: bool = False,
+    outcome: str | None = None,
+    limit: int = 1000,
+) -> tuple[list[dict], int]:
+    """Flexible export query with explicit date range (YYYY-MM-DD strings).
+
+    Independent of the paginated get_signal_lab_trades — no offset, supports
+    arbitrary date ranges, returns (rows, total_matching_count).
+    """
+    if not _db_path.exists():
+        return [], 0
+    conditions: list[str] = []
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if date_start:
+        conditions.append("date(created_at) >= ?")
+        params.append(date_start)
+    if date_end:
+        conditions.append("date(created_at) <= ?")
+        params.append(date_end)
+    if triggered_only:
+        conditions.append("trigger_hit = 1")
+    if outcome == "WIN":
+        conditions.append("trigger_hit = 1 AND net_pnl > 0")
+    elif outcome == "LOSS":
+        conditions.append("trigger_hit = 1 AND net_pnl <= 0")
+    elif outcome == "NO_TRIGGER":
+        conditions.append("(trigger_hit = 0 OR trigger_hit IS NULL)")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    with _conn() as conn:
+        count_row = conn.execute(f"SELECT COUNT(*) FROM trades {where}", params).fetchone()
+        total = int(count_row[0]) if count_row else 0
+        rows = conn.execute(
+            f"SELECT * FROM trades {where} ORDER BY created_at DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+    return [dict(r) for r in rows], total
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():

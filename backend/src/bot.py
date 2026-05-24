@@ -205,6 +205,27 @@ async def _heartbeat_loop() -> None:
         await asyncio.sleep(5)
 
 
+async def _regime_sync_loop() -> None:
+    """Save per-coin regime + bias to dashboard_state every 30s for Live tab display."""
+    import json as _json
+    from . import regime as _regime
+    while True:
+        await asyncio.sleep(30)
+        for coin in COINS:
+            try:
+                stats: dict = {
+                    "regime": _regime.get_current_regime(coin),
+                    "bias": _regime.get_directional_bias(coin),
+                }
+                price = _regime.get_asset_price_stats(coin)
+                if price:
+                    stats["price_position"] = price.get("price_position")
+                    stats["range_pct"] = price.get("range_pct")
+                await save_dashboard_state(f"regime_{coin}", _json.dumps(stats))
+            except Exception as e:
+                log.warning("regime_sync_failed", coin=coin, error=str(e))
+
+
 async def _portfolio_sync_loop() -> None:
     """Sync Polymarket balance and open positions to dashboard_state every 30s."""
     import json as _json
@@ -298,6 +319,7 @@ async def run_bot() -> None:
         asyncio.create_task(risk.risk_monitor_loop(get_active_count_by_coin)),
         asyncio.create_task(_heartbeat_loop()),
         asyncio.create_task(_portfolio_sync_loop()),
+        asyncio.create_task(_regime_sync_loop()),
         asyncio.create_task(asset_price_feed.run()),
         asyncio.create_task(asset_price_feed.run_trade_stream()),
         asyncio.create_task(_signals.funding_rate_loop()),

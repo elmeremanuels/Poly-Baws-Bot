@@ -45,6 +45,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+_REGIME_STYLE: dict[str, tuple[str, str]] = {
+    "TRENDING":  ("rgba(16,185,129,0.15)", "#34d399"),   # green
+    "BREAKOUT":  ("rgba(59,130,246,0.15)", "#93c5fd"),   # blue
+    "CHOPPY":    ("rgba(245,158,11,0.15)", "#fbbf24"),   # amber
+    "RANGING":   ("rgba(139,92,246,0.15)", "#c4b5fd"),   # purple
+    "NORMAL":    ("rgba(55,65,81,0.20)",   "#9ca3af"),   # gray
+    "UNKNOWN":   ("rgba(55,65,81,0.10)",   "#4b5563"),   # dark gray
+}
+
 st.markdown("""
 <style>
 [data-testid="stAppViewContainer"] { background: #030712; }
@@ -394,6 +403,34 @@ def _coin_grid() -> None:
             _coin_card(coin, open_trades, online)
 
 
+def _regime_chip_html(coin: str) -> str:
+    """Render a small regime badge using saved dashboard_state."""
+    raw = get_state(f"regime_{coin}")
+    if not raw:
+        return ""
+    try:
+        import json as _j
+        data = _j.loads(raw)
+    except Exception:
+        return ""
+    regime = data.get("regime", "UNKNOWN")
+    bias = data.get("bias")
+    rng = data.get("range_pct")
+    bg, fg = _REGIME_STYLE.get(regime, _REGIME_STYLE["UNKNOWN"])
+    label = regime
+    if bias:
+        label += f" {'↑' if bias == 'UP' else '↓'}"
+    tooltip = regime
+    if rng is not None:
+        tooltip += f" · range {rng:.1f}%"
+    return (
+        f'<span title="{tooltip}" style="'
+        f'background:{bg};color:{fg};'
+        f'border-radius:5px;padding:2px 7px;font-size:11px;font-weight:600;'
+        f'margin-left:4px;vertical-align:middle">{label}</span>'
+    )
+
+
 def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     cfg = CONFIG["coins"][coin]
     pnl = get_daily_pnl(coin)
@@ -412,7 +449,13 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     pnl_color = "#34d399" if pnl >= 0 else "#f87171"
     chip_cls, chip_label = _coin_status(coin, open_trades, online)
 
-    st.markdown(f"#### {COIN_EMOJI.get(coin, '')} {coin}")
+    st.markdown(
+        f'<div style="margin-bottom:4px">'
+        f'<span style="font-weight:700;font-size:15px">{COIN_EMOJI.get(coin,"")} {coin}</span>'
+        f'{_regime_chip_html(coin)}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(f'<div class="status-chip {chip_cls}">{chip_label}</div>', unsafe_allow_html=True)
 
     new_enabled = st.toggle("Enabled", value=display_en, key=f"en_{coin}")

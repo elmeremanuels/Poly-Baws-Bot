@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-from src.db_sync import get_signal_lab_trades
+from src.db_sync import get_signal_lab_trades, export_query_trades
 from src.config_loader import CONFIG
 
 COINS = list(CONFIG["coins"].keys())
@@ -198,6 +198,25 @@ def _color_pnl(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     return styler
 
 
+def _export_query(
+    coin: str | None,
+    date_start: str | None,
+    date_end: str | None,
+    triggered_only: bool,
+    outcome: str | None,
+    limit: int,
+) -> tuple[list[dict], int]:
+    """Wrapper that maps date_start/end to db_sync export_query_trades."""
+    return export_query_trades(
+        coin=coin,
+        date_start=date_start,
+        date_end=date_end,
+        triggered_only=triggered_only,
+        outcome=outcome,
+        limit=limit,
+    )
+
+
 # ── Main panel ─────────────────────────────────────────────────────────────────
 
 @st.fragment
@@ -325,51 +344,103 @@ def signal_lab_panel() -> None:
 
     # ── Export ────────────────────────────────────────────────────────────────
     st.divider()
-    st.markdown("#### 📤 Export")
-    ex1, ex2, ex3 = st.columns([2, 2, 2])
-    export_n = ex1.number_input(
-        "Rijen om te exporteren", min_value=10, max_value=5000, value=500, step=50,
-        key="slab_export_n", help="Maximaal aantal rijen in de CSV export"
-    )
-    export_all_cols = ex2.checkbox(
-        "Alle kolommen exporteren", value=True, key="slab_export_all_cols",
-        help="Exporteer alle DB kolommen, niet alleen de geselecteerde groepen"
-    )
+    with st.expander("📤 Export — eigen filters en kolomselectie", expanded=False):
+        st.caption(
+            "⚠️ Export haalt **rechtstreeks uit de database**, onafhankelijk van de tabel hierboven. "
+            "Je kunt andere filters en kolommen kiezen. De paginering (50/pagina) geldt NIET voor exports."
+        )
 
-    if ex3.button("🔄 Laad export data", key="slab_load_export"):
-        with st.spinner("Data laden..."):
-            export_trades, export_total = get_signal_lab_trades(
-                coin=coin_filter,
-                days=days_filter,
-                only_today=only_today,
-                triggered_only=triggered_only,
-                outcome=outcome_filter,
-                limit=int(export_n),
-                offset=0,
-            )
-        if export_all_cols:
-            export_df = pd.DataFrame([_enrich(t) for t in export_trades])
-            # Drop internal __ columns for cleaner export
-            export_df = export_df[[c for c in export_df.columns if not c.startswith("__")]]
-        else:
-            export_df = _build_df(export_trades, active_groups)
+        # Export-specifieke filters
+        ecol1, ecol2, ecol3, ecol4 = st.columns(4)
+        exp_coin_options = ["Alle coins"] + COINS
+        exp_coin = ecol1.selectbox("Coin (export)", exp_coin_options, key="exp_coin")
+        exp_coin_filter = None if exp_coin == "Alle coins" else exp_coin
 
-        if not export_df.empty:
-            buf = io.StringIO()
-            export_df.to_csv(buf, index=False)
-            csv_bytes = buf.getvalue().encode("utf-8")
-            ts = datetime.now().strftime("%Y%m%d_%H%M")
-            filename = f"signal_lab_{coin_filter or 'all'}_{ts}.csv"
-            st.download_button(
-                label=f"⬇ Download {len(export_df)} rijen als CSV",
-                data=csv_bytes,
-                file_name=filename,
-                mime="text/csv",
-                key="slab_download",
+        exp_start = ecol2.date_input(
+            "Startdatum", value=None, key="exp_start",
+            help="Leeg = geen ondergrens"
+        )
+        exp_end = ecol3.date_input(
+            "Einddatum", value=None, key="exp_end",
+            help="Leeg = tot vandaag"
+        )
+        exp_outcome_lbl = ecol4.selectbox(
+            "Uitkomst (export)",
+            ["Alles", "Winst", "Verlies", "Geen trigger"],
+            key="exp_outcome",
+        )
+        exp_outcome_map = {"Alles": None, "Winst": "WIN", "Verlies": "LOSS", "Geen trigger": "NO_TRIGGER"}
+        exp_outcome_filter = exp_outcome_map[exp_outcome_lbl]
+
+        exp_triggered = st.checkbox("Alleen getriggerd (export)", value=False, key="exp_trig")
+        exp_max_rows = st.number_input(
+            "Max rijen", min_value=10, max_value=10_000, value=1000, step=100, key="exp_max_rows"
+        )
+
+        # Kolomselectie
+        st.markdown("**Kolommen voor export:**")
+        # Raw DB columns + computed columns per group
+        all_group_names = list(_GROUPS.keys())
+        exp_groups = st.multiselect(
+            "Kolomgroepen",
+            options=all_group_names,
+            default=all_group_names,
+            key="exp_groups",
+            help="Vink groepen uit om kolommen die leeg zijn voor oudere trades te verwijderen",
+        )
+
+        # Show null-column warning for groups added after the project start
+        _new_groups = {"📡 Signalen bij entry", "📡 Signalen bij trigger", "🔮 Voorspellingen"}
+        new_selected = _new_groups & set(exp_groups)
+        if new_selected:
+            st.info(
+                f"Let op: {', '.join(sorted(new_selected))} bevatten NULL-waarden voor trades "
+                "van vóór de Phase 1 update. Zet ze uit voor een schonere export van oudere data."
             )
-            st.caption(f"Export bevat {len(export_df)} van {export_total} totale trades (gesorteerd op nieuwste eerst).")
-        else:
-            st.warning("Geen data om te exporteren.")
+
+        if st.button("🔄 Genereer export", key="slab_gen_export", type="primary"):
+            # Build date-range conditions
+            exp_days = None
+            exp_only_today = False
+            if exp_start or exp_end:
+                # Use raw SQL via a custom query — we'll pass a custom date filter
+                st.session_state["exp_date_start"] = str(exp_start) if exp_start else None
+                st.session_state["exp_date_end"] = str(exp_end) if exp_end else None
+            else:
+                st.session_state["exp_date_start"] = None
+                st.session_state["exp_date_end"] = None
+
+            with st.spinner(f"Max {exp_max_rows} rijen ophalen..."):
+                export_trades, export_total = _export_query(
+                    coin=exp_coin_filter,
+                    date_start=st.session_state.get("exp_date_start"),
+                    date_end=st.session_state.get("exp_date_end"),
+                    triggered_only=exp_triggered,
+                    outcome=exp_outcome_filter,
+                    limit=int(exp_max_rows),
+                )
+
+            if exp_groups:
+                export_df = _build_df(export_trades, set(exp_groups))
+            else:
+                export_df = pd.DataFrame(export_trades)
+
+            if not export_df.empty:
+                buf = io.StringIO()
+                export_df.to_csv(buf, index=False)
+                csv_bytes = buf.getvalue().encode("utf-8")
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                filename = f"signal_lab_{exp_coin_filter or 'all'}_{ts}.csv"
+                st.success(f"✅ {len(export_df)} rijen klaar (van {export_total} totaal met deze filters)")
+                st.download_button(
+                    label=f"⬇ Download {len(export_df)} rijen als CSV",
+                    data=csv_bytes,
+                    file_name=filename,
+                    mime="text/csv",
+                    key="slab_download",
+                )
+            else:
+                st.warning("Geen trades gevonden met deze exportfilters.")
 
     # ── Pattern hints ─────────────────────────────────────────────────────────
     if trades and "📡 Signalen bij trigger" in active_groups and triggered_count > 5:
