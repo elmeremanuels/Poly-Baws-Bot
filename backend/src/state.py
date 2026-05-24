@@ -67,6 +67,7 @@ def create_trade_state(
 
     state = {
         "trade_id": trade_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "coin": coin,
         "market_id": market.get("market_id"),
         "condition_id_yes": market.get("yes_token"),
@@ -159,7 +160,8 @@ async def persist_trade(trade_id: str) -> None:
     state = _active_trades[trade_id]
     # Filter to DB columns only (exclude runtime-only fields)
     db_fields = {
-        "trade_id", "coin", "market_id", "condition_id_yes", "condition_id_no",
+        "trade_id", "created_at",
+        "coin", "market_id", "condition_id_yes", "condition_id_no",
         "mode", "triggered_by", "window_start_ts", "window_end_ts",
         "entry_placed_ts", "entry_filled_ts", "entry_yes_price", "entry_no_price",
         "entry_size", "yes_size", "no_size", "bias_certainty",

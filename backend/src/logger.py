@@ -236,15 +236,47 @@ async def init_db() -> None:
         if "claude_prediction" not in lc_cols:
             await db.execute("ALTER TABLE learning_cycles ADD COLUMN claude_prediction TEXT")
         await db.commit()
+        # Backfill: yes_size / no_size default to entry_size for pre-bias trades
+        await db.execute(
+            "UPDATE trades SET yes_size = entry_size WHERE yes_size IS NULL AND entry_size IS NOT NULL"
+        )
+        await db.execute(
+            "UPDATE trades SET no_size = entry_size WHERE no_size IS NULL AND entry_size IS NOT NULL"
+        )
+        # Backfill: bias_certainty = 0 (no bias) for old trades
+        await db.execute(
+            "UPDATE trades SET bias_certainty = 0.0 WHERE bias_certainty IS NULL"
+        )
+        # Backfill: regime_at_entry = 'UNKNOWN' for old trades (explicit vs NULL)
+        await db.execute(
+            "UPDATE trades SET regime_at_entry = 'UNKNOWN' WHERE regime_at_entry IS NULL"
+        )
+        await db.commit()
     log.info("database_initialized", path=str(_db_path))
 
 
 async def write_trade(trade: dict) -> None:
+    """Upsert a trade record without clobbering created_at or unrelated columns.
+
+    INSERT OR IGNORE creates the row on first call (preserving the created_at
+    DEFAULT).  The subsequent UPDATE patches only the supplied fields, leaving
+    any columns not in `trade` untouched.  This replaces the old
+    INSERT OR REPLACE which deleted and re-inserted the row — losing created_at
+    and any columns that happened to be absent from the current dict.
+    """
     cols = ", ".join(trade.keys())
     placeholders = ", ".join(f":{k}" for k in trade.keys())
-    sql = f"INSERT OR REPLACE INTO trades ({cols}) VALUES ({placeholders})"
+    insert_sql = f"INSERT OR IGNORE INTO trades ({cols}) VALUES ({placeholders})"
+    trade_id = trade.get("trade_id")
+    update_fields = [k for k in trade.keys() if k != "trade_id"]
+    update_sql = ""
+    if trade_id and update_fields:
+        sets = ", ".join(f"{k} = :{k}" for k in update_fields)
+        update_sql = f"UPDATE trades SET {sets} WHERE trade_id = :trade_id"
     async with _db() as db:
-        await db.execute(sql, trade)
+        await db.execute(insert_sql, trade)
+        if update_sql:
+            await db.execute(update_sql, trade)
         await db.commit()
 
 
