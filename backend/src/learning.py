@@ -322,17 +322,22 @@ class LearningOrchestrator:
 
     def _apply_claude_params(self, analysis: dict) -> None:
         self._original_coin_cfg = {}
+        _COIN_KEYS = ("trigger_threshold", "cross_threshold",
+                      "initial_offset", "ratchet_buffer", "enabled")
         for coin, cp in analysis.get("coin_params", {}).items():
             if coin not in CONFIG["coins"]:
                 continue
+            # Snapshot all adjustable keys so we can restore if cycle is abandoned
             self._original_coin_cfg[coin] = {
-                k: CONFIG["coins"][coin].get(k)
-                for k in ("trigger_threshold", "enabled")
+                k: CONFIG["coins"][coin].get(k) for k in _COIN_KEYS
             }
-            if "trigger_threshold" in cp:
-                CONFIG["coins"][coin]["trigger_threshold"] = float(cp["trigger_threshold"])
-            if "enabled" in cp:
-                CONFIG["coins"][coin]["enabled"] = bool(cp["enabled"])
+            for key in _COIN_KEYS:
+                if key not in cp:
+                    continue
+                if key == "enabled":
+                    CONFIG["coins"][coin][key] = bool(cp[key])
+                else:
+                    CONFIG["coins"][coin][key] = float(cp[key])
         gp = analysis.get("global_params", {})
         if "max_entry_cost" in gp:
             CONFIG["entry"]["max_combined_cost"] = float(gp["max_entry_cost"])

@@ -37,11 +37,16 @@ def get_realized_vol(asset_id: str) -> float | None:
 
 
 def get_coin_params(coin: str) -> dict:
-    """Return exit config merged with per-coin overrides from coins.<coin>."""
+    """Return exit config merged with per-coin overrides from coins.<coin>.
+
+    Claude can set cross_threshold, initial_offset and ratchet_buffer per coin
+    via _apply_claude_params; those values land in CONFIG["coins"][coin] and are
+    picked up here so the peg-cross engine uses the per-coin tuned values.
+    """
     from .config_loader import CONFIG
     base = dict(CONFIG["exit"])
     coin_cfg = CONFIG["coins"].get(coin, {})
-    for k in ("initial_offset", "ratchet_buffer"):
+    for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
         if k in coin_cfg:
             base[k] = coin_cfg[k]
     return base
