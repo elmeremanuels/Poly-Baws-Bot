@@ -206,15 +206,26 @@ async def _heartbeat_loop() -> None:
 
 
 async def _regime_sync_loop() -> None:
-    """Save per-coin regime + bias to dashboard_state every 30s for Live tab display."""
+    """Detect regime per coin and save to dashboard_state every 30s for Live tab display.
+
+    Calls detect_regime() with recent DB trades so the in-memory _current_regime dict
+    stays current even outside learning/analysis cycles.
+    """
     import json as _json
     from . import regime as _regime
+    from .logger import get_recent_trades as _get_recent_trades
     while True:
         await asyncio.sleep(30)
+        try:
+            recent = await _get_recent_trades(100)
+        except Exception:
+            recent = []
         for coin in COINS:
             try:
+                coin_trades = [t for t in recent if t.get("coin") == coin]
+                regime = _regime.detect_regime(coin, coin_trades)
                 stats: dict = {
-                    "regime": _regime.get_current_regime(coin),
+                    "regime": regime,
                     "bias": _regime.get_directional_bias(coin),
                 }
                 price = _regime.get_asset_price_stats(coin)
