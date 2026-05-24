@@ -342,9 +342,40 @@ def signal_lab_panel() -> None:
         st.session_state["slab_page"] = page + 1
         st.rerun()
 
-    # ── Export ────────────────────────────────────────────────────────────────
+    # ── Quick download — same filters as the table, all pages ─────────────────
     st.divider()
-    with st.expander("📤 Export — eigen filters en kolomselectie", expanded=False):
+    qd1, qd2 = st.columns([3, 1])
+    qd1.markdown(
+        f"<span style='color:#6b7280;font-size:13px'>⬇ Download alle <b>{total}</b> trades die aan de bovenstaande filters voldoen (geen paginering)</span>",
+        unsafe_allow_html=True,
+    )
+    if qd2.button("📥 Download CSV", key="slab_quick_dl", type="secondary"):
+        with st.spinner(f"Alle {total} trades ophalen..."):
+            all_trades, _ = export_query_trades(
+                coin=coin_filter,
+                date_start=None,
+                date_end=None,
+                triggered_only=triggered_only,
+                outcome=outcome_filter,
+                limit=10_000,
+                days=days_filter,
+                only_today=only_today,
+            )
+        dl_df = _build_df(all_trades, active_groups)
+        if not dl_df.empty:
+            buf = io.StringIO()
+            dl_df.to_csv(buf, index=False)
+            ts = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                label=f"⬇ Sla {len(dl_df)} rijen op",
+                data=buf.getvalue().encode("utf-8"),
+                file_name=f"signal_lab_{coin_filter or 'all'}_{ts}.csv",
+                mime="text/csv",
+                key="slab_quick_dl_btn",
+            )
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    with st.expander("📤 Geavanceerde export — eigen filters en kolomselectie", expanded=False):
         st.caption(
             "⚠️ Export haalt **rechtstreeks uit de database**, onafhankelijk van de tabel hierboven. "
             "Je kunt andere filters en kolommen kiezen. De paginering (50/pagina) geldt NIET voor exports."

@@ -588,8 +588,11 @@ def export_query_trades(
     triggered_only: bool = False,
     outcome: str | None = None,
     limit: int = 1000,
+    days: int | None = None,
+    only_today: bool = False,
 ) -> tuple[list[dict], int]:
-    """Flexible export query with explicit date range (YYYY-MM-DD strings).
+    """Flexible export query with explicit date range (YYYY-MM-DD strings) or
+    relative days/today filters (same semantics as get_signal_lab_trades).
 
     Independent of the paginated get_signal_lab_trades — no offset, supports
     arbitrary date ranges, returns (rows, total_matching_count).
@@ -601,12 +604,19 @@ def export_query_trades(
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
+    # Explicit date range takes precedence over relative days/today
     if date_start:
         conditions.append("date(created_at) >= ?")
         params.append(date_start)
     if date_end:
         conditions.append("date(created_at) <= ?")
         params.append(date_end)
+    if not date_start and not date_end:
+        if only_today:
+            conditions.append("date(created_at) = date('now')")
+        elif days:
+            conditions.append("created_at >= datetime('now', ?)")
+            params.append(f"-{days} days")
     if triggered_only:
         conditions.append("trigger_hit = 1")
     if outcome == "WIN":
