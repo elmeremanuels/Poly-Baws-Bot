@@ -59,8 +59,13 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "bias_certainty", round(_certainty, 3) if _bias else 0.0)
     update_trade_field(trade_id, "yes_size", yes_size)
     update_trade_field(trade_id, "no_size", no_size)
-    # Stamp bot's predictions at entry — used to evaluate prediction accuracy later
-    update_trade_field(trade_id, "regime_at_entry", _regime.get_current_regime(coin))
+    # Stamp bot's predictions at entry — call detect_regime() directly so the stamped
+    # value is always fresh (not stale from the 30s sync loop cache).
+    from .logger import get_recent_trades as _get_recent_trades
+    _recent_trades = await _get_recent_trades(50)
+    _coin_trades = [t for t in _recent_trades if t.get("coin") == coin]
+    _regime_label = _regime.detect_regime(coin, _coin_trades)
+    update_trade_field(trade_id, "regime_at_entry", _regime_label)
     update_trade_field(trade_id, "bias_direction_at_entry", _bias)
 
     # Stamp Phase 1 signals at entry time — refresh first so data is ≤1s old

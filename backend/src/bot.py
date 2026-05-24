@@ -210,12 +210,12 @@ async def _regime_sync_loop() -> None:
 
     Calls detect_regime() with recent DB trades so the in-memory _current_regime dict
     stays current even outside learning/analysis cycles.
+    Runs immediately on first iteration so regime is ready before the first trade entry.
     """
     import json as _json
     from . import regime as _regime
     from .logger import get_recent_trades as _get_recent_trades
     while True:
-        await asyncio.sleep(30)
         try:
             recent = await _get_recent_trades(100)
         except Exception:
@@ -235,6 +235,7 @@ async def _regime_sync_loop() -> None:
                 await save_dashboard_state(f"regime_{coin}", _json.dumps(stats))
             except Exception as e:
                 log.warning("regime_sync_failed", coin=coin, error=str(e))
+        await asyncio.sleep(30)
 
 
 async def _portfolio_sync_loop() -> None:
