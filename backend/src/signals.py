@@ -183,7 +183,38 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
 # ── aggTrade REST poller (replaces WebSocket stream) ──────────────────────────
 
 _SPOT_REST = "https://api.binance.com/api/v3"
-_POLL_INTERVAL = 5.0  # seconds between aggTrade polls
+_POLL_INTERVAL = 10.0  # seconds between background aggTrade polls (10s is enough for rolling OFI)
+
+# Per-coin last seen aggTradeId — shared between background loop and on-demand refresh
+_last_trade_id: dict[str, int] = {}
+
+
+async def refresh_ofi(coin: str) -> None:
+    """Fetch the latest aggTrades for one coin right now (on-demand).
+
+    Called directly before signal stamping at entry and trigger time so the
+    OFI value is always ≤1 second old at the exact moment it matters, regardless
+    of where the background poll cycle is.
+    """
+    if coin not in _COIN_TO_PERP:
+        return
+    symbol = _COIN_TO_PERP[coin]
+    try:
+        params: dict = {"symbol": symbol, "limit": 500}
+        last = _last_trade_id.get(coin)
+        if last:
+            params["fromId"] = last + 1
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{_SPOT_REST}/aggTrades", params=params)
+            resp.raise_for_status()
+            trades = resp.json()
+        if not trades:
+            return
+        for t in trades:
+            record_trade(coin, float(t["q"]), not bool(t["m"]))
+        _last_trade_id[coin] = int(trades[-1]["a"])
+    except Exception as e:
+        log.warning("ofi_refresh_failed", coin=coin, error=str(e))
 
 
 async def run_trade_poll_loop() -> None:
@@ -199,8 +230,6 @@ async def run_trade_poll_loop() -> None:
       m  — is buyer the market maker? True = sell-initiated, False = buy-initiated
     """
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
-    _last_id: dict[str, int] = {}
-
     log.info("trade_poll_loop_starting", coins=coins)
 
     async with httpx.AsyncClient(timeout=10) as client:
@@ -217,19 +246,19 @@ async def run_trade_poll_loop() -> None:
                 for t in trades:
                     record_trade(coin, float(t["q"]), not bool(t["m"]))
                 if trades:
-                    _last_id[coin] = int(trades[-1]["a"])
+                    _last_trade_id[coin] = int(trades[-1]["a"])
                 log.info("trade_poll_seeded", coin=coin, n=len(trades))
             except Exception as e:
                 log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
 
-        # Polling loop — fetch only new trades since last seen ID
+        # Background polling loop — keeps rolling buffer current between on-demand refreshes
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
             for coin in coins:
                 symbol = _COIN_TO_PERP[coin]
                 try:
                     params: dict = {"symbol": symbol, "limit": 500}
-                    last = _last_id.get(coin)
+                    last = _last_trade_id.get(coin)
                     if last:
                         params["fromId"] = last + 1
                     resp = await client.get(f"{_SPOT_REST}/aggTrades", params=params)
@@ -239,7 +268,7 @@ async def run_trade_poll_loop() -> None:
                         continue
                     for t in trades:
                         record_trade(coin, float(t["q"]), not bool(t["m"]))
-                    _last_id[coin] = int(trades[-1]["a"])
+                    _last_trade_id[coin] = int(trades[-1]["a"])
                 except Exception as e:
                     log.warning("trade_poll_failed", coin=coin, error=str(e))
 

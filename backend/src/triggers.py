@@ -63,8 +63,9 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "regime_at_entry", _regime.get_current_regime(coin))
     update_trade_field(trade_id, "bias_direction_at_entry", _bias)
 
-    # Stamp Phase 1 signals at entry time
+    # Stamp Phase 1 signals at entry time — refresh first so data is ≤1s old
     from . import signals as _sig
+    await _sig.refresh_ofi(coin)
     _entry_signals = _sig.get_all_signals(coin)
     update_trade_field(trade_id, "ofi_at_entry", _entry_signals.get("ofi"))
     update_trade_field(trade_id, "funding_rate_at_entry", _entry_signals.get("funding_rate"))

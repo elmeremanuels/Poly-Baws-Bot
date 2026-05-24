@@ -118,8 +118,9 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             update_trade_field(trade_id, "no_depth_at_trigger", n_depth)
             update_trade_field(trade_id, "time_since_window_start", time_since_start)
 
-            # Phase 1: stamp signals at trigger time
+            # Phase 1: stamp signals at trigger time — refresh first so data is ≤1s old
             from . import signals as _sig
+            await _sig.refresh_ofi(coin)
             _trig_signals = _sig.get_all_signals(coin)
             update_trade_field(trade_id, "ofi_at_trigger", _trig_signals.get("ofi"))
             update_trade_field(trade_id, "funding_rate_at_trigger", _trig_signals.get("funding_rate"))
