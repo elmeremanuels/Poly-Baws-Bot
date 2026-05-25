@@ -296,13 +296,15 @@ async def _learning_tick_loop() -> None:
 
     Always runs as a task and gates on the current mode internally, so switching
     into live_learning at runtime (via the dashboard) starts a cycle without
-    requiring a full bot restart. orch.start() is idempotent.
+    requiring a full bot restart. The orchestrator is re-fetched each tick so a
+    reset_learning_cycle (which nulls the singleton) is picked up immediately
+    instead of leaving the loop bound to a stale, closed orchestrator.
     """
     from . import learning as _learning
-    orch = _learning.get_orchestrator()
     while True:
         try:
             if get_mode() == "live_learning":
+                orch = _learning.get_orchestrator()
                 await orch.start()
                 await orch.tick()
         except Exception as e:
