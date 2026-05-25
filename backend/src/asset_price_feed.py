@@ -64,7 +64,7 @@ async def run() -> None:
     await _seed_prices()
 
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_SYMBOL]
-    symbols = json.dumps([_COIN_TO_SYMBOL[c] for c in coins])
+    symbols = json.dumps([_COIN_TO_SYMBOL[c] for c in coins], separators=(",", ":"))
     upper_map = {v: k for k, v in _COIN_TO_SYMBOL.items()}
 
     log.info("asset_price_feed_starting", mode="rest_poll", interval=_POLL_INTERVAL)
