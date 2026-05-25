@@ -133,7 +133,7 @@ def get_all_signals(coin: str) -> dict:
 
 
 def get_conviction(coin: str) -> tuple[str | None, float]:
-    """Combine OFI + funding rate into (direction, certainty 0–1).
+    """Combine OFI + funding rate + liq_proxy + price_position + regime into (direction, certainty 0–1).
 
     Direction: "UP", "DOWN", or None.
     Score: 0.0 = no signal, 1.0 = all signals aligned strongly.
@@ -141,13 +141,20 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
     Rules:
       OFI > 0.55 → bullish raw signal (+score)
       OFI < 0.45 → bearish raw signal (+score)
-      Funding rate > 0.001 (0.1%) → contrarian bearish pressure (-slight bullish, +bearish)
-      Funding rate < -0.001       → contrarian bullish pressure (+slight bullish)
+      Funding rate > 0.001 (0.1%) → contrarian bearish pressure (+bear)
+      Funding rate < -0.001       → contrarian bullish pressure (+bull)
       Liquidation proxy > 2.0 → amplify direction signal (+0.1 bonus)
+      price_position < 0.20 → price at 30-min range bottom → mean-revert UP (+0.15)
+      price_position > 0.80 → price at 30-min range top → mean-revert DOWN (+0.15)
+      TRENDING/BREAKOUT regime → amplify score ×1.20/×1.15
+      CHOPPY regime → dampen score ×0.80
     """
     ofi = get_order_flow_imbalance(coin)
     fr = get_funding_rate(coin)
     liq = get_liquidation_proxy(coin)
+
+    # Lazy import to avoid circular dependency at module level
+    from . import regime as _regime
 
     bull_score = 0.0
     bear_score = 0.0
@@ -171,6 +178,28 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
             bull_score += bonus
         else:
             bear_score += bonus
+
+    # Price position within 30-min range — mean-reversion signal
+    price_stats = _regime.get_asset_price_stats(coin)
+    if price_stats:
+        pp = price_stats.get("price_position")
+        if pp is not None:
+            if pp < 0.20:
+                bull_score += 0.15 * (0.20 - pp) / 0.20
+            elif pp > 0.80:
+                bear_score += 0.15 * (pp - 0.80) / 0.20
+
+    # Regime multiplier — amplify strong trends, dampen choppy noise
+    current_regime = _regime.get_current_regime(coin)
+    multiplier = {
+        "TRENDING": 1.20,
+        "BREAKOUT": 1.15,
+        "CHOPPY": 0.80,
+        "RANGING": 1.0,
+        "NORMAL": 1.0,
+    }.get(current_regime, 1.0)
+    bull_score *= multiplier
+    bear_score *= multiplier
 
     max_score = max(bull_score, bear_score)
     if max_score < 0.05:

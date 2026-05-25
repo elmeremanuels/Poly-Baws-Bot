@@ -7,8 +7,12 @@ from src.commands import write_command
 from src.db_sync import (
     get_analytics_trades,
     get_coin_comparison,
+    get_conviction_bucket_stats,
+    get_conviction_threshold_sweep,
     get_exit_reason_stats,
     get_hourly_pnl,
+    get_ofi_bucket_stats,
+    get_regime_bucket_stats,
     save_manual_analysis_to_db,
 )
 from src.claude_analyzer import analyze_trades_sync
@@ -36,6 +40,26 @@ def _q_coin_comparison(days, only_today):
 @st.cache_data(ttl=60)
 def _q_hourly_pnl(coin, days, only_today):
     return get_hourly_pnl(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_conviction_buckets(coin, days, only_today):
+    return get_conviction_bucket_stats(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_regime_buckets(coin, days, only_today):
+    return get_regime_bucket_stats(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_ofi_buckets(coin, days, only_today):
+    return get_ofi_bucket_stats(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_conviction_sweep(coin, days, only_today):
+    return get_conviction_threshold_sweep(coin=coin, days=days, only_today=only_today)
 
 
 @st.fragment
@@ -106,6 +130,9 @@ def analytics_panel() -> None:
 
     # ── Hourly Analysis ───────────────────────────────────────────────────────
     _hourly_analysis(coin_filter, days, only_today)
+
+    # ── Signal Analytics ──────────────────────────────────────────────────────
+    _signal_analytics(coin_filter, days, only_today)
 
     # ── Full Trade History ────────────────────────────────────────────────────
     _trade_history(df)
@@ -259,6 +286,96 @@ def _trade_history(df: pd.DataFrame) -> None:
         if "created_at" in show.columns:
             show["created_at"] = pd.to_datetime(show["created_at"], format="mixed", utc=True).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+def _signal_analytics(coin: str | None, days: int | None, only_today: bool = False) -> None:
+    st.markdown("### Signal Analytics")
+    st.caption(
+        "Win rate en P&L per signaalklasse — gebaseerd op getriggerde + gesloten trades. "
+        "Gebruik dit om te bepalen welke signaalcombinaties daadwerkelijk een edge geven."
+    )
+
+    tab_conv, tab_regime, tab_ofi, tab_backtest = st.tabs(
+        ["Conviction", "Regime", "OFI", "Backtest (drempel)"]
+    )
+
+    with tab_conv:
+        rows = _q_conviction_buckets(coin, days, only_today)
+        if rows:
+            bdf = pd.DataFrame(rows)
+            st.dataframe(
+                bdf.rename(columns={
+                    "bucket": "Conviction bucket", "n": "Trades",
+                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            valid = bdf[bdf["bucket"] != "Geen signaal"]
+            if not valid.empty:
+                st.bar_chart(valid.set_index("bucket")[["win_pct"]])
+        else:
+            st.caption("Nog geen data (trades moeten getriggerd + gesloten zijn).")
+
+    with tab_regime:
+        rows = _q_regime_buckets(coin, days, only_today)
+        if rows:
+            rdf = pd.DataFrame(rows)
+            st.dataframe(
+                rdf.rename(columns={
+                    "regime": "Regime", "n": "Trades",
+                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L",
+                    "total_pnl": "Totaal P&L", "peg_cross_pct": "PegCross %",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            st.bar_chart(rdf.set_index("regime")[["win_pct", "avg_net_pnl"]])
+        else:
+            st.caption("Nog geen data.")
+
+    with tab_ofi:
+        rows = _q_ofi_buckets(coin, days, only_today)
+        if rows:
+            odf = pd.DataFrame(rows)
+            st.dataframe(
+                odf.rename(columns={
+                    "bucket": "OFI bucket", "n": "Trades",
+                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            valid = odf[odf["bucket"] != "Geen data"]
+            if not valid.empty:
+                st.bar_chart(valid.set_index("bucket")[["win_pct"]])
+        else:
+            st.caption("Nog geen data.")
+
+    with tab_backtest:
+        sweep = _q_conviction_sweep(coin, days, only_today)
+        if sweep:
+            sdf = pd.DataFrame(sweep)
+            baseline = sdf[sdf["min_conviction"] == 0.0].iloc[0] if len(sdf) else None
+            st.dataframe(
+                sdf.rename(columns={
+                    "min_conviction": "Min conviction", "n": "Trades",
+                    "win_pct": "Win %", "avg_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            if baseline is not None:
+                st.caption(
+                    f"Baseline (alle trades): {int(baseline['n'])} trades · "
+                    f"win {baseline['win_pct']}% · totaal €{baseline['total_pnl']:+.4f}. "
+                    "Verhoog de drempel om te zien hoeveel trades je uitfiltert en wat het effect is."
+                )
+            col_wl, col_pnl = st.columns(2)
+            with col_wl:
+                st.caption("Win % bij elke drempel")
+                st.line_chart(sdf.set_index("min_conviction")[["win_pct"]])
+            with col_pnl:
+                st.caption("Totaal P&L bij elke drempel")
+                st.line_chart(sdf.set_index("min_conviction")[["total_pnl"]])
+        else:
+            st.caption("Nog geen data.")
 
 
 def _build_current_params() -> dict:

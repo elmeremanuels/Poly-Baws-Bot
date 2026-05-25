@@ -103,6 +103,9 @@ logging:
   level: "INFO"
   db_path: "data/trades.db"
 
+ab_test:
+  conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
+
 # Learned parameter profiles per detected market regime.
 # Applied on top of global exit: config and per-coin overrides.
 # trigger_threshold_delta: added to the coin's base trigger_threshold (clamped 0.65–0.85).

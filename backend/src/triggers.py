@@ -298,6 +298,26 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     if not trade:
         return
 
+    # A/B gate — skip actual exit if conviction is below threshold (configurable).
+    # Set ab_test.conviction_threshold > 0 in config.yaml to activate.
+    _ab_threshold = float(CONFIG.get("ab_test", {}).get("conviction_threshold", 0.0))
+    if _ab_threshold > 0:
+        _score = float(trade.get("conviction_score_at_trigger") or 0.0)
+        _direction = trade.get("conviction_at_trigger")
+        if _score < _ab_threshold or _direction is None:
+            update_trade_field(trade_id, "ab_group", "B_skip")
+            update_trade_field(trade_id, "winner_exit_reason", "conviction_skip")
+            update_trade_field(trade_id, "status", "closed")
+            update_trade_field(trade_id, "net_pnl", 0.0)
+            await persist_trade(trade_id)
+            remove_active_trade(trade_id)
+            log.info("ab_conviction_skip", trade_id=trade_id,
+                     score=_score, threshold=_ab_threshold, direction=_direction)
+            return
+        update_trade_field(trade_id, "ab_group", "B_trade")
+    else:
+        update_trade_field(trade_id, "ab_group", "A")
+
     # Use the mode stored at trade creation time so a mode change mid-trade
     # doesn't switch between paper/live execution.
     trade_mode = trade.get("mode") or get_mode()

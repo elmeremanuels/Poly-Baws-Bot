@@ -208,6 +208,8 @@ async def init_db() -> None:
             ("liq_proxy_at_trigger", "REAL"),
             ("conviction_at_trigger", "TEXT"),
             ("conviction_score_at_trigger", "REAL"),
+            # Phase 2: A/B test group tracking
+            ("ab_group", "TEXT"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

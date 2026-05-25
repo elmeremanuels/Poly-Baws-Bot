@@ -636,6 +636,145 @@ def export_query_trades(
     return [dict(r) for r in rows], total
 
 
+# ── Phase 2: Signal Analytics ─────────────────────────────────────────────────
+
+def _signal_where(
+    coin: str | None,
+    days: int | None,
+    only_today: bool,
+    extra_conditions: list[str] | None = None,
+) -> tuple[str, list]:
+    """Build WHERE clause + params for signal analytics queries."""
+    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    if extra_conditions:
+        conditions.extend(extra_conditions)
+    return " AND ".join(conditions), params
+
+
+def get_conviction_bucket_stats(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """Win rate + avg P&L grouped by conviction_score_at_trigger bucket."""
+    if not _db_path.exists():
+        return []
+    where, params = _signal_where(coin, days, only_today)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                CASE
+                  WHEN conviction_score_at_trigger IS NULL OR conviction_score_at_trigger = 0
+                    THEN 'Geen signaal'
+                  WHEN conviction_score_at_trigger < 0.3 THEN '0.0–0.3 zwak'
+                  WHEN conviction_score_at_trigger < 0.5 THEN '0.3–0.5 matig'
+                  WHEN conviction_score_at_trigger < 0.7 THEN '0.5–0.7 sterk'
+                  ELSE '0.7–1.0 zeer sterk'
+                END AS bucket,
+                COUNT(*) AS n,
+                ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                ROUND(AVG(net_pnl), 4) AS avg_net_pnl,
+                ROUND(SUM(net_pnl), 4) AS total_pnl
+              FROM trades WHERE {where}
+              GROUP BY bucket
+              ORDER BY MIN(COALESCE(conviction_score_at_trigger, -1))""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_regime_bucket_stats(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """Win rate + avg P&L grouped by regime_at_entry."""
+    if not _db_path.exists():
+        return []
+    where, params = _signal_where(coin, days, only_today)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                COALESCE(regime_at_entry, 'UNKNOWN') AS regime,
+                COUNT(*) AS n,
+                ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                ROUND(AVG(net_pnl), 4) AS avg_net_pnl,
+                ROUND(SUM(net_pnl), 4) AS total_pnl,
+                ROUND(AVG(CASE WHEN winner_exit_reason = 'peg_cross' THEN 1.0 ELSE 0.0 END)*100, 1)
+                  AS peg_cross_pct
+              FROM trades WHERE {where}
+              GROUP BY regime
+              ORDER BY total_pnl DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_ofi_bucket_stats(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """Win rate + avg P&L grouped by OFI-at-trigger bucket."""
+    if not _db_path.exists():
+        return []
+    where, params = _signal_where(coin, days, only_today)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                CASE
+                  WHEN ofi_at_trigger IS NULL THEN 'Geen data'
+                  WHEN ofi_at_trigger < 0.40 THEN '<0.40 sterk bear'
+                  WHEN ofi_at_trigger < 0.45 THEN '0.40–0.45 zwak bear'
+                  WHEN ofi_at_trigger <= 0.55 THEN '0.45–0.55 neutraal'
+                  WHEN ofi_at_trigger <= 0.60 THEN '0.55–0.60 zwak bull'
+                  ELSE '>0.60 sterk bull'
+                END AS bucket,
+                COUNT(*) AS n,
+                ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                ROUND(AVG(net_pnl), 4) AS avg_net_pnl,
+                ROUND(SUM(net_pnl), 4) AS total_pnl
+              FROM trades WHERE {where}
+              GROUP BY bucket
+              ORDER BY MIN(COALESCE(ofi_at_trigger, -1))""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_conviction_threshold_sweep(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """For each threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
+    return trades included, win%, avg_net_pnl, total_pnl.
+    Allows retroactive A/B testing on existing data.
+    """
+    if not _db_path.exists():
+        return []
+    base_where, base_params = _signal_where(coin, days, only_today)
+    results = []
+    with _conn() as conn:
+        for threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
+            thr_where = base_where
+            thr_params = list(base_params)
+            if threshold > 0:
+                thr_where += " AND COALESCE(conviction_score_at_trigger, 0) >= ?"
+                thr_params.append(threshold)
+            row = conn.execute(
+                f"""SELECT COUNT(*) n,
+                    ROUND(AVG(CASE WHEN actual_winner=winner_side THEN 1.0 ELSE 0.0 END)*100,1) win_pct,
+                    ROUND(AVG(net_pnl),4) avg_pnl,
+                    ROUND(SUM(net_pnl),4) total_pnl
+                    FROM trades WHERE {thr_where}""",
+                thr_params,
+            ).fetchone()
+            results.append({"min_conviction": threshold, **dict(row)})
+    return results
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():
