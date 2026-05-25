@@ -21,6 +21,12 @@ exit:
   spread_avg_window: 60        # reserved for future spread averaging
   force_exit_seconds: 30       # market-sell with this many seconds left
   hold_for_resolution_mid_threshold: 0.55  # if mid >= this at force_exit, hold to $1.00 resolution
+  # Loser-side passive limit at trigger time (live mode only).
+  # Places a resting limit at effective_bid + bid_buffer, undercutting existing asks.
+  # Any incoming buyer fills against our order. Falls back to market if timeout expires.
+  pre_exit_limit_bid_buffer: 0.04   # limit price = effective_bid + this (e.g. 0.17 bid → 0.21 limit)
+  pre_exit_limit_timeout: 20        # seconds to wait before cancelling and doing market sell
+  pre_exit_limit_min_seconds_left: 90  # skip passive limit if window expires within this many seconds
 
 entry:
   max_combined_cost: 1.02      # YES ask + NO ask must be ≤ this (stricter = lower break-even)
