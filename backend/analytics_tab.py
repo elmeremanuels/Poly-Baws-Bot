@@ -315,8 +315,8 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
         "Gebruik dit om te bepalen welke signaalcombinaties daadwerkelijk een edge geven."
     )
 
-    tab_conv, tab_regime, tab_ofi, tab_backtest = st.tabs(
-        ["Conviction", "Regime", "OFI", "Scenario Replay"]
+    tab_conv, tab_regime, tab_ofi, tab_backtest, tab_weighting = st.tabs(
+        ["Conviction", "Regime", "OFI", "Scenario Replay", "Gewogen inkoop"]
     )
 
     with tab_conv:
@@ -425,10 +425,65 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
                 st.markdown("**Equity curve: baseline vs beste strategie**")
                 n = min(len(best.cumulative_pnl), len(baseline.cumulative_pnl))
                 curve_df = pd.DataFrame({
-                    f"Baseline (alle trades)": baseline.cumulative_pnl[:n],
+                    "Baseline (alle trades)": baseline.cumulative_pnl[:n],
                     f"Beste: {best.name}": best.cumulative_pnl[:n],
                 })
                 st.line_chart(curve_df)
+
+    with tab_weighting:
+        bt = _run_backtest_engine(coin, days)
+        if bt is None:
+            st.caption("Nog geen gesloten trades met signaaldata beschikbaar.")
+        else:
+            st.markdown("### Gewogen inkoop simulatie")
+            st.caption(
+                "Simuleert wat de historische P&L was geweest als de biased kant "
+                "meer ingekocht was op basis van de conviction score. "
+                "**Let op:** een hogere max ratio vergroot ook het verlies als de richting fout is. "
+                "Zet dit alleen aan als 'Delta P&L' consistent positief is én 'Fout gewogen' laag."
+            )
+
+            max_ratio = st.slider("Max gewichtsverhouding (biased/neutraal)", 1.2, 3.0, 2.0, 0.1,
+                                   key="sim_max_ratio")
+
+            engine = BacktestEngine(coin=coin if coin != "All" else None, days=days)
+            sim_rows = engine.simulate_weighting(max_ratio=max_ratio)
+
+            if sim_rows:
+                sdf = pd.DataFrame(sim_rows)
+                st.dataframe(sdf, use_container_width=True, hide_index=True)
+
+                col_delta, col_dd = st.columns(2)
+                with col_delta:
+                    st.caption("Delta P&L per min_score (positief = weging helpt)")
+                    st.bar_chart(sdf.set_index("Min score")[["Delta P&L"]])
+                with col_dd:
+                    st.caption("Max drawdown (sim) per min_score")
+                    st.bar_chart(sdf.set_index("Min score")[["Max drawdown (sim)"]])
+
+                best_row = max(sim_rows, key=lambda r: r["Delta P&L"])
+                st.divider()
+                st.markdown(f"**Beste drempel: min_score = {best_row['Min score']}**")
+                col_a, col_b, col_c, col_d = st.columns(4)
+                col_a.metric("Delta P&L", f"€{best_row['Delta P&L']:+.4f}")
+                col_b.metric("Correct gewogen", best_row["Correct gewogen"])
+                col_c.metric("Fout gewogen", best_row["Fout gewogen"])
+                col_d.metric("Max drawdown (sim)", f"€{best_row['Max drawdown (sim)']:.4f}")
+
+                cw_on = CONFIG.get("conviction_weighting", {}).get("enabled", False)
+                if cw_on:
+                    st.success("Gewogen inkoop staat AAN (`conviction_weighting.enabled: true` in config.yaml)")
+                else:
+                    st.info(
+                        "Gewogen inkoop staat UIT. Zet aan via `config.yaml`:\n\n"
+                        "```yaml\nconviction_weighting:\n  enabled: true\n"
+                        f"  min_score: {best_row['Min score']}\n  max_ratio: {max_ratio}\n```"
+                    )
+            else:
+                st.caption(
+                    "Nog geen data. De simulatie vereist trades met `conviction_at_entry` "
+                    "en `winner_exit_price` gevuld — dit zijn trades na de Phase 2 deploy."
+                )
 
 
 def _build_current_params() -> dict:

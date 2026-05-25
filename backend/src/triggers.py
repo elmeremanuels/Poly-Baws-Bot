@@ -39,44 +39,63 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     size = round(trade_size_eur / ENTRY_PRICE, 2)
     update_trade_field(trade_id, "entry_size", size)
 
-    # Compute bias-weighted sizes — biased side gets up to max_weight_ratio× more
     from . import regime as _regime
-    _bias_cfg = CONFIG.get("bias", {})
-    _max_ratio = float(_bias_cfg.get("max_weight_ratio", 2.0))
-    _min_cert = float(_bias_cfg.get("min_certainty", 0.20))
-    _bias, _certainty = _regime.get_bias_certainty(coin)
-    yes_size = size
-    no_size = size
-    if _bias and _certainty >= _min_cert:
-        _weight = round(1.0 + _certainty * (_max_ratio - 1.0), 3)
-        if _bias == "UP":
-            yes_size = round(size * _weight, 2)
-        else:
-            no_size = round(size * _weight, 2)
-        log.info("weighted_entry", trade_id=trade_id, coin=coin, bias=_bias,
-                 certainty=round(_certainty, 3), weight=_weight,
-                 yes_size=yes_size, no_size=no_size)
-    update_trade_field(trade_id, "bias_certainty", round(_certainty, 3) if _bias else 0.0)
-    update_trade_field(trade_id, "yes_size", yes_size)
-    update_trade_field(trade_id, "no_size", no_size)
-    # Stamp bot's predictions at entry — call detect_regime() directly so the stamped
-    # value is always fresh (not stale from the 30s sync loop cache).
+    from . import signals as _sig
+
+    # ── Stamp Phase 1 signals at entry (refresh so data is ≤1s old) ──────────
+    await _sig.refresh_ofi(coin)
+    _entry_signals = _sig.get_all_signals(coin)
+    _conv_dir: str | None = _entry_signals.get("conviction")
+    _conv_score: float = float(_entry_signals.get("conviction_score") or 0.0)
+    update_trade_field(trade_id, "ofi_at_entry", _entry_signals.get("ofi"))
+    update_trade_field(trade_id, "funding_rate_at_entry", _entry_signals.get("funding_rate"))
+    update_trade_field(trade_id, "liq_proxy_at_entry", _entry_signals.get("liq_proxy"))
+    update_trade_field(trade_id, "conviction_at_entry", _conv_dir)
+    update_trade_field(trade_id, "conviction_score_at_entry", _conv_score)
+
+    # ── Stamp regime at entry ─────────────────────────────────────────────────
     from .logger import get_recent_trades as _get_recent_trades
     _recent_trades = await _get_recent_trades(50)
     _coin_trades = [t for t in _recent_trades if t.get("coin") == coin]
     _regime_label = _regime.detect_regime(coin, _coin_trades)
     update_trade_field(trade_id, "regime_at_entry", _regime_label)
-    update_trade_field(trade_id, "bias_direction_at_entry", _bias)
+    update_trade_field(trade_id, "bias_direction_at_entry", _conv_dir)
 
-    # Stamp Phase 1 signals at entry time — refresh first so data is ≤1s old
-    from . import signals as _sig
-    await _sig.refresh_ofi(coin)
-    _entry_signals = _sig.get_all_signals(coin)
-    update_trade_field(trade_id, "ofi_at_entry", _entry_signals.get("ofi"))
-    update_trade_field(trade_id, "funding_rate_at_entry", _entry_signals.get("funding_rate"))
-    update_trade_field(trade_id, "liq_proxy_at_entry", _entry_signals.get("liq_proxy"))
-    update_trade_field(trade_id, "conviction_at_entry", _entry_signals.get("conviction"))
-    update_trade_field(trade_id, "conviction_score_at_entry", _entry_signals.get("conviction_score"))
+    # ── Conviction-weighted sizing ────────────────────────────────────────────
+    # When conviction_weighting.enabled and score >= min_score, the biased side
+    # gets up to max_ratio× the base size. Falls back to price_position bias
+    # (RANGING only) when conviction_weighting is off.
+    yes_size = size
+    no_size = size
+    _cw_cfg = CONFIG.get("conviction_weighting", {})
+    if _cw_cfg.get("enabled") and _conv_dir and _conv_score >= float(_cw_cfg.get("min_score", 0.45)):
+        _max_ratio = float(_cw_cfg.get("max_ratio", 2.0))
+        _range = max(0.001, 1.0 - float(_cw_cfg.get("min_score", 0.45)))
+        _weight = round(1.0 + (_conv_score - float(_cw_cfg.get("min_score", 0.45))) / _range * (_max_ratio - 1.0), 3)
+        if _conv_dir == "UP":
+            yes_size = round(size * _weight, 2)
+        else:
+            no_size = round(size * _weight, 2)
+        log.info("conviction_weighted_entry", trade_id=trade_id, coin=coin,
+                 direction=_conv_dir, score=round(_conv_score, 3), weight=_weight,
+                 yes_size=yes_size, no_size=no_size)
+    else:
+        # Fallback: price_position bias in RANGING regime only
+        _bias_cfg = CONFIG.get("bias", {})
+        _bias, _certainty = _regime.get_bias_certainty(coin)
+        if _bias and _certainty >= float(_bias_cfg.get("min_certainty", 0.20)):
+            _max_ratio = float(_bias_cfg.get("max_weight_ratio", 2.0))
+            _weight = round(1.0 + _certainty * (_max_ratio - 1.0), 3)
+            if _bias == "UP":
+                yes_size = round(size * _weight, 2)
+            else:
+                no_size = round(size * _weight, 2)
+            log.info("price_position_weighted_entry", trade_id=trade_id, coin=coin,
+                     bias=_bias, certainty=round(_certainty, 3), weight=_weight,
+                     yes_size=yes_size, no_size=no_size)
+    update_trade_field(trade_id, "yes_size", yes_size)
+    update_trade_field(trade_id, "no_size", no_size)
+    update_trade_field(trade_id, "bias_certainty", round(_conv_score, 3))
     # Use the mode stored in the trade (set at creation time) so that mode changes
     # during an active trade don't switch it between paper/live mid-flight.
     trade_mode = trade.get("mode") or get_mode()

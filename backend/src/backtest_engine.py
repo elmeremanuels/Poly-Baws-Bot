@@ -104,10 +104,14 @@ class BacktestEngine:
         rows = conn.execute(
             f"""SELECT
                     trade_id, coin, created_at,
-                    conviction_score_at_entry,
+                    entry_size,
+                    yes_size, no_size,
+                    entry_yes_price, entry_no_price,
+                    conviction_at_entry, conviction_score_at_entry,
                     ofi_at_entry,
                     regime_at_entry,
                     winner_exit_reason,
+                    loser_exit_price, winner_exit_price,
                     net_pnl, fees_paid,
                     actual_winner, winner_side
                 FROM trades
@@ -251,3 +255,99 @@ class BacktestEngine:
                     name=name, conviction_min=thresh, regimes=regimes
                 )))
         return sorted(results, key=lambda r: r.total_pnl, reverse=True)
+
+    # ── Conviction-weighted entry simulation ──────────────────────────────────
+
+    def simulate_weighting(
+        self,
+        min_scores: Optional[list[float]] = None,
+        max_ratio: float = 2.0,
+    ) -> list[dict]:
+        """
+        Simulate what historical P&L would have been with conviction-weighted entry sizes.
+
+        For each closed trade:
+        - If conviction_at_entry aligns with actual_winner → winner side was bigger → better P&L
+        - If conviction was wrong → loser side was bigger → worse P&L
+
+        Returns one row per min_score threshold, showing simulated vs. actual P&L.
+        Uses actual fill prices (entry, winner exit, loser exit) from the DB.
+        """
+        if min_scores is None:
+            min_scores = [0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
+
+        rows = []
+        for min_score in min_scores:
+            sim_pnls, actual_pnls = [], []
+            correct, wrong, neutral = 0, 0, 0
+
+            for t in self.trades:
+                actual_pnl = t.get("net_pnl") or 0.0
+                actual_pnls.append(actual_pnl)
+
+                conv_dir = t.get("conviction_at_entry")
+                conv_score = float(t.get("conviction_score_at_entry") or 0.0)
+                actual_winner = t.get("actual_winner")  # "YES" or "NO"
+
+                base = float(t.get("entry_size") or 2.0)
+                entry_yes = float(t.get("entry_yes_price") or 0.50)
+                entry_no = float(t.get("entry_no_price") or 0.50)
+                loser_price = float(t.get("loser_exit_price") or 0.17)
+                winner_price = float(t.get("winner_exit_price") or 0.80)
+                fees = float(t.get("fees_paid") or 0.0)
+
+                if conv_dir and conv_score >= min_score and actual_winner:
+                    _range = max(0.001, 1.0 - min_score)
+                    weight = 1.0 + (conv_score - min_score) / _range * (max_ratio - 1.0)
+                    if conv_dir == "UP":
+                        sim_yes, sim_no = base * weight, base
+                    else:
+                        sim_yes, sim_no = base, base * weight
+
+                    # Did conviction align with actual winner?
+                    conv_winner = "YES" if conv_dir == "UP" else "NO"
+                    if conv_winner == actual_winner:
+                        correct += 1
+                    else:
+                        wrong += 1
+
+                    sim_entry = entry_yes * sim_yes + entry_no * sim_no
+                    if actual_winner == "YES":
+                        sim_winner_sz, sim_loser_sz = sim_yes, sim_no
+                    else:
+                        sim_winner_sz, sim_loser_sz = sim_no, sim_yes
+
+                    sim_gross = winner_price * sim_winner_sz + loser_price * sim_loser_sz - sim_entry
+                    # Scale fees proportionally to total size change
+                    actual_total = float(t.get("yes_size") or base) + float(t.get("no_size") or base)
+                    sim_total = sim_yes + sim_no
+                    fee_scale = sim_total / actual_total if actual_total > 0 else 1.0
+                    sim_net = sim_gross - fees * fee_scale
+                else:
+                    neutral += 1
+                    sim_net = actual_pnl  # unchanged
+
+                sim_pnls.append(sim_net)
+
+            n = len(sim_pnls)
+            if n == 0:
+                continue
+
+            sim_total = sum(sim_pnls)
+            actual_total_pnl = sum(actual_pnls)
+            sim_wins = sum(1 for p in sim_pnls if p > 0)
+
+            rows.append({
+                "Min score": min_score,
+                "Trades gewogen": correct + wrong,
+                "Correct gewogen": correct,
+                "Fout gewogen": wrong,
+                "Ongewijzigd": neutral,
+                "Winrate % (sim)": round(sim_wins / n * 100, 1),
+                "Totaal P&L (sim)": round(sim_total, 4),
+                "Totaal P&L (echt)": round(actual_total_pnl, 4),
+                "Delta P&L": round(sim_total - actual_total_pnl, 4),
+                "Max drawdown (sim)": round(self._max_drawdown(sim_pnls), 4),
+            })
+
+        return rows
