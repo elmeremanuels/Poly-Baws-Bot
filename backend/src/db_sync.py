@@ -892,6 +892,44 @@ def get_directional_stats(
     return [dict(r) for r in rows]
 
 
+def get_pnl_by_exit_reason(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """P&L breakdown per winner_exit_reason — quantifies which exit channel causes the most losses.
+
+    Returns rows ordered by total_pnl ascending (worst at top) so the biggest loss driver
+    is immediately visible in the dashboard.
+    """
+    if not _db_path.exists():
+        return []
+    conditions, params = ["trigger_hit = 1", "status IN ('closed','resolved')"], []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                COALESCE(winner_exit_reason, 'unknown') AS exit_reason,
+                COUNT(*) AS n,
+                ROUND(SUM(net_pnl), 4) AS total_pnl,
+                ROUND(AVG(net_pnl), 4) AS avg_pnl,
+                ROUND(AVG(CASE WHEN net_pnl < 0 THEN net_pnl ELSE NULL END), 4) AS avg_loss,
+                ROUND(SUM(CASE WHEN net_pnl < 0 THEN net_pnl ELSE 0 END), 4) AS total_loss,
+                ROUND(AVG(winner_exit_price), 4) AS avg_exit_price
+              FROM trades WHERE {where}
+              GROUP BY exit_reason
+              ORDER BY total_pnl ASC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():

@@ -12,6 +12,7 @@ from src.db_sync import (
     get_exit_reason_stats,
     get_hourly_pnl,
     get_ofi_bucket_stats,
+    get_pnl_by_exit_reason,
     get_regime_bucket_stats,
     save_manual_analysis_to_db,
 )
@@ -61,6 +62,11 @@ def _q_ofi_buckets(coin, days, only_today):
 @st.cache_data(ttl=60)
 def _q_conviction_sweep(coin, days, only_today):
     return get_conviction_threshold_sweep(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_pnl_by_exit_reason(coin, days, only_today):
+    return get_pnl_by_exit_reason(coin=coin, days=days, only_today=only_today)
 
 
 @st.cache_data(ttl=120)
@@ -148,6 +154,9 @@ def analytics_panel() -> None:
 
     # ── Trailing Metrics ──────────────────────────────────────────────────────
     _trailing_metrics(df)
+
+    # ── Exit Loss Analysis ────────────────────────────────────────────────────
+    _exit_loss_analysis(coin_filter, days, only_today)
 
     # ── Hourly Analysis ───────────────────────────────────────────────────────
     _hourly_analysis(coin_filter, days, only_today)
@@ -307,6 +316,65 @@ def _trade_history(df: pd.DataFrame) -> None:
         if "created_at" in show.columns:
             show["created_at"] = pd.to_datetime(show["created_at"], format="mixed", utc=True).dt.strftime("%m-%d %H:%M")
         st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
+    st.markdown("### Exit Analyse")
+    st.caption(
+        "P&L per exit-reden — laat zien welk exit-kanaal het meeste verlies veroorzaakt. "
+        "Rood = verliesgevend kanaal; groen = winstgevend. Gesorteerd van slechtste naar beste."
+    )
+    rows = _q_pnl_by_exit_reason(coin, days, only_today)
+    if not rows:
+        st.caption("Geen getriggerde + gesloten trades in deze periode.")
+        return
+
+    edf = pd.DataFrame(rows)
+    rename_map = {
+        "exit_reason": "Exit reden",
+        "n": "Trades",
+        "total_pnl": "Totaal P&L",
+        "avg_pnl": "Gem. P&L",
+        "avg_loss": "Gem. verlies",
+        "total_loss": "Totaal verlies",
+        "avg_exit_price": "Gem. exit-prijs",
+    }
+    display = edf.rename(columns=rename_map)
+
+    def _color_pnl(val):
+        if isinstance(val, (int, float)):
+            return "color: #e05b5b" if val < 0 else "color: #4caf50"
+        return ""
+
+    pnl_cols = ["Totaal P&L", "Gem. P&L", "Gem. verlies", "Totaal verlies"]
+    available_pnl_cols = [c for c in pnl_cols if c in display.columns]
+    st.dataframe(
+        display.style.applymap(_color_pnl, subset=available_pnl_cols),
+        use_container_width=True, hide_index=True,
+    )
+
+    # Bar chart: total P&L per exit reason (sorted worst → best = left → right)
+    chart_data = edf.set_index("exit_reason")[["total_pnl"]].sort_values("total_pnl")
+    st.bar_chart(chart_data, use_container_width=True)
+
+    # Summary: biggest loss driver highlighted
+    worst = edf.iloc[0]
+    best = edf.iloc[-1]
+    col_w, col_b = st.columns(2)
+    with col_w:
+        st.metric(
+            "Grootste verliesbron",
+            worst["exit_reason"],
+            f"€{worst['total_pnl']:.2f} ({int(worst['n'])} trades)",
+            delta_color="off",
+        )
+    with col_b:
+        st.metric(
+            "Grootste winstbron",
+            best["exit_reason"],
+            f"€{best['total_pnl']:.2f} ({int(best['n'])} trades)",
+            delta_color="off",
+        )
 
 
 def _signal_analytics(coin: str | None, days: int | None, only_today: bool = False) -> None:

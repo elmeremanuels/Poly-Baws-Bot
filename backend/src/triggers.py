@@ -868,10 +868,16 @@ async def _winner_exit_paper(
     peak_mid = trigger_price
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
+    # Pre-compute loss-control constants (stable per trade)
+    _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
+    _vel_stop = float(es.get("winner_velocity_stop", -0.004))
+    _winner_stop_bid = (
+        round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
+    )
 
     await write_event(trade_id, "trailing_started", coin, {
         "initial_limit": current_limit, "trigger_price": trigger_price,
-        "break_even_price": break_even_price,
+        "break_even_price": break_even_price, "winner_stop_bid": _winner_stop_bid,
     })
 
     while True:
@@ -880,14 +886,17 @@ async def _winner_exit_paper(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
-            # Resolution at $1.00 is always better in expectation than market sell at bid.
-            # Only market-sell when winner probability is too low to risk holding.
+            # Fix 2: only hold to resolution when EV-positive (mid >= break_even).
+            # At mid=0.55 with break_even=0.78, holding has negative EV — raises hold threshold.
             hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.70)
+            if es.get("hold_for_resolution_ev_floor", True) and break_even_price:
+                hold_threshold = max(hold_threshold, break_even_price)
             mid_check = ws_client.get_mid_price(winner_token)
             if mid_check is not None and mid_check >= hold_threshold:
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await write_event(trade_id, "held_for_resolution", coin, {
                     "mid": mid_check, "seconds_left": round(seconds_left, 1),
+                    "hold_threshold_used": round(hold_threshold, 4),
                 })
                 await _close_trade(trade_id, 1.0, "held_for_resolution", broadcast_fn)
                 return
@@ -919,6 +928,36 @@ async def _winner_exit_paper(
 
             vel = _vol.get_price_velocity(winner_token) or 0.0
             eff_bid = _estimate_sell_fill(winner_token, size)
+
+            # Fix 1: Hard stop-loss — cap loss magnitude to winner_max_loss_per_trade_eur.
+            # Fires when depth-aware fill price would produce > max loss, regardless of score.
+            _check_bid = eff_bid if eff_bid is not None else mid
+            if _check_bid <= _winner_stop_bid:
+                result = await paper_trader.simulate_market_sell(winner_token, size)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                _add_winner_fees(trade_id, result.get("fees", 0.0))
+                await write_event(trade_id, "winner_stop_loss_triggered", coin, {
+                    "mid": mid, "eff_bid": round(_check_bid, 4),
+                    "stop_bid": _winner_stop_bid, "break_even": break_even_price,
+                })
+                await _close_trade(trade_id, result.get("fill_price"), "winner_stop_loss", broadcast_fn)
+                return
+
+            # Fix 3: Velocity stop — exit early on fast reversal while still above the hard stop.
+            # Only fires when mid has already dropped meaningfully below our limit target.
+            if vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
+                result = await paper_trader.simulate_market_sell(winner_token, size)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                _add_winner_fees(trade_id, result.get("fees", 0.0))
+                await write_event(trade_id, "winner_velocity_stop", coin, {
+                    "mid": mid, "velocity": round(vel, 5),
+                    "eff_bid": round(eff_bid, 4) if eff_bid else None,
+                })
+                await _close_trade(trade_id, result.get("fill_price"), "winner_velocity_stop", broadcast_fn)
+                return
+
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
                 size=size, velocity=vel, effective_bid=eff_bid,
@@ -980,6 +1019,12 @@ async def _winner_exit_live(
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
     last_status_check = trail_start
+    # Pre-compute loss-control constants (stable per trade)
+    _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
+    _vel_stop = float(es.get("winner_velocity_stop", -0.004))
+    _winner_stop_bid = (
+        round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
+    )
 
     limit_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
     current_order_id = limit_resp["order_id"] if limit_resp else None
@@ -997,6 +1042,7 @@ async def _winner_exit_live(
 
     await write_event(trade_id, "trailing_started", coin, {
         "initial_limit": current_limit, "trigger_price": trigger_price,
+        "break_even_price": break_even_price, "winner_stop_bid": _winner_stop_bid,
     })
 
     while True:
@@ -1005,13 +1051,17 @@ async def _winner_exit_live(
         seconds_left = (window_end_dt - now_dt).total_seconds() if window_end_dt else 300.0
 
         if seconds_left <= es["force_exit_seconds"]:
+            # Fix 2: only hold to resolution when EV-positive (mid >= break_even).
             hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.70)
+            if es.get("hold_for_resolution_ev_floor", True) and break_even_price:
+                hold_threshold = max(hold_threshold, break_even_price)
             mid_check = ws_client.get_mid_price(winner_token)
             await orders.cancel_order(current_order_id)
             if mid_check is not None and mid_check >= hold_threshold:
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await write_event(trade_id, "held_for_resolution", coin, {
                     "mid": mid_check, "seconds_left": round(seconds_left, 1),
+                    "hold_threshold_used": round(hold_threshold, 4),
                     "note": "winner_tokens_need_redemption_in_polymarket_wallet",
                 })
                 # Token resolves to exactly $1.00 on-chain; mid at hold time is just confirmation
@@ -1043,6 +1093,48 @@ async def _winner_exit_live(
 
             vel = _vol.get_price_velocity(winner_token) or 0.0
             eff_bid = _estimate_sell_fill(winner_token, size)
+
+            # Fix 1: Hard stop-loss — cap loss magnitude regardless of cross_score or hold-guards.
+            _check_bid = eff_bid if eff_bid is not None else mid
+            if _check_bid <= _winner_stop_bid:
+                await orders.cancel_order(current_order_id)
+                mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                fill_price = mid
+                if mkt_resp and mkt_resp.get("order_id"):
+                    f = await _fetch_market_fill(mkt_resp["order_id"], fallback=mid or 0.5, size=size)
+                    fill_price = f["fill_price"]
+                    _add_winner_fees(trade_id, f["fees"])
+                else:
+                    _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
+                await write_event(trade_id, "winner_stop_loss_triggered", coin, {
+                    "mid": mid, "eff_bid": round(_check_bid, 4),
+                    "stop_bid": _winner_stop_bid, "break_even": break_even_price,
+                })
+                await _close_trade(trade_id, fill_price, "winner_stop_loss", broadcast_fn)
+                return
+
+            # Fix 3: Velocity stop — early exit on fast reversal while still above the hard stop.
+            if vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
+                await orders.cancel_order(current_order_id)
+                mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
+                _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
+                await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
+                fill_price = mid
+                if mkt_resp and mkt_resp.get("order_id"):
+                    f = await _fetch_market_fill(mkt_resp["order_id"], fallback=mid or 0.5, size=size)
+                    fill_price = f["fill_price"]
+                    _add_winner_fees(trade_id, f["fees"])
+                else:
+                    _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
+                await write_event(trade_id, "winner_velocity_stop", coin, {
+                    "mid": mid, "velocity": round(vel, 5),
+                    "eff_bid": round(eff_bid, 4) if eff_bid else None,
+                })
+                await _close_trade(trade_id, fill_price, "winner_velocity_stop", broadcast_fn)
+                return
+
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
                 size=size, velocity=vel, effective_bid=eff_bid,

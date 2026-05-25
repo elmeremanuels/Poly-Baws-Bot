@@ -24,16 +24,20 @@ exit:
   # Loser-side passive limit at trigger time (live mode only).
   # Places a resting limit at effective_bid + bid_buffer, undercutting existing asks.
   # Any incoming buyer fills against our order. Falls back to market if timeout expires.
-  pre_exit_limit_bid_buffer: 0.04   # limit price = effective_bid + this (e.g. 0.17 bid → 0.21 limit)
-  pre_exit_limit_timeout: 20        # seconds to wait before cancelling and doing market sell
+  pre_exit_limit_bid_buffer: 0.06   # limit price = effective_bid + this — raised 0.04→0.06 for lower break-even
+  pre_exit_limit_timeout: 25        # seconds to wait — raised 20→25 for more fill time
   pre_exit_limit_min_seconds_left: 90  # skip passive limit if window expires within this many seconds
   # Early loser sell: market-sell the declining side during monitoring (before trigger fires).
   # Data shows bid ~0.316 at 0.45 mid vs ~0.165 at trigger — nearly double the exit price.
   # Override per regime in regime_profiles (use null to disable for a specific regime).
-  early_loser_threshold: 0.45       # sell loser when its mid drops below this
+  early_loser_threshold: 0.47       # sell loser when its mid drops below this (raised 0.45→0.47 for earlier capture)
   early_loser_winner_min: 0.57      # other side must be above this (confirms direction)
   early_loser_rebuy_threshold: 0.55 # rebuy if sold side recovers above this (null = disabled)
   early_loser_cooldown_secs: 90     # wait at least this long after entry fill before selling early
+  # Loss-control knobs — cap the magnitude of peg_cross / force-exit losses.
+  winner_max_loss_per_trade_eur: 0.70  # hard stop: exit winner when (break_even - eff_bid)*size >= this
+  winner_velocity_stop: -0.004         # ¢/sec decline rate that triggers early exit (must be < current_limit - 0.05)
+  hold_for_resolution_ev_floor: true   # only hold to resolution if mid >= break_even (EV-positive)
 
 entry:
   max_combined_cost: 1.02      # YES ask + NO ask must be ≤ this (stricter = lower break-even)
