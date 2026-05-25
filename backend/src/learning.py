@@ -194,19 +194,19 @@ class LearningOrchestrator:
         lcfg = CONFIG["learning"]
         per_coin_needed = lcfg["min_trades_per_coin"]
         max_hours = lcfg["max_learn_hours"]
-        # Count enabled coins
         enabled_coins = [c for c, v in CONFIG["coins"].items() if v.get("enabled", True)]
-        total_needed = per_coin_needed * len(enabled_coins)
-        count = 0
+        # Per-coin coverage check: every enabled coin must meet minimum before advancing
+        per_coin_counts: dict[str, int] = {}
         if self._cycle_id:
             async with _db() as db:
                 async with db.execute(
-                    "SELECT COUNT(*) FROM trades WHERE cycle_id=? AND phase='learn'",
+                    "SELECT coin, COUNT(*) FROM trades WHERE cycle_id=? AND phase='learn' GROUP BY coin",
                     (self._cycle_id,),
                 ) as cur:
-                    row = await cur.fetchone()
-                count = row[0] if row else 0
-        if count >= total_needed or self._phase_hours() >= max_hours:
+                    async for row in cur:
+                        per_coin_counts[row[0]] = row[1]
+        all_covered = all(per_coin_counts.get(c, 0) >= per_coin_needed for c in enabled_coins)
+        if all_covered or self._phase_hours() >= max_hours:
             await self._transition_to("analyze")
 
     async def _tick_analyze(self) -> None:
@@ -256,11 +256,16 @@ class LearningOrchestrator:
         pnl = await _db_get_phase_pnl(self._cycle_id, "deploy")
         hours = self._phase_hours()
         peg_rate = await _db_recent_peg_cross_rate(self._cycle_id, n=10)
-        # Check exit conditions — re-analyze with live data instead of going to validate
+        # Regime-aware peg_cross threshold: TRENDING/BREAKOUT tolerate higher peg_cross;
+        # CHOPPY should re-analyze quickly when exits are noisy (price reversals).
+        dominant = get_dominant_regime_for_cycle(self._cycle_id, "deploy")
+        peg_threshold = {
+            "TRENDING": 0.70, "BREAKOUT": 0.65, "RANGING": 0.50, "CHOPPY": 0.35,
+        }.get(dominant or "NORMAL", 0.50)
         if (count >= lcfg["max_live_trades"]
                 or hours >= lcfg["max_live_hours"]
                 or pnl < -lcfg["max_live_loss"]
-                or (count >= 10 and peg_rate > 0.50)):
+                or (count >= 10 and peg_rate > peg_threshold)):
             await self._transition_to("analyze")
 
     async def _tick_validate(self) -> None:
@@ -354,8 +359,16 @@ class LearningOrchestrator:
             CONFIG["entry"]["max_token_spread"] = float(gp["max_token_spread"])
         if "hold_for_resolution_mid_threshold" in gp:
             CONFIG["exit"]["hold_for_resolution_mid_threshold"] = float(gp["hold_for_resolution_mid_threshold"])
-        # Update per-regime profile with the learned params
-        if self._cycle_id:
+        # Apply explicit per-regime params if Claude returned them (highest priority)
+        rp = analysis.get("regime_params", {})
+        if rp:
+            from . import regime as _regime
+            for regime_name, rparams in rp.items():
+                if isinstance(rparams, dict):
+                    _regime.update_regime_profile(regime_name, rparams)
+            log.info("regime_params_applied", regimes=list(rp.keys()))
+        elif self._cycle_id:
+            # Fallback: infer regime params from dominant regime in learn phase
             dominant_regime = get_dominant_regime_for_cycle(self._cycle_id, "learn")
             if dominant_regime and dominant_regime not in ("UNKNOWN", "NORMAL", None):
                 from . import regime as _regime

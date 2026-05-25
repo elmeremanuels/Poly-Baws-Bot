@@ -77,6 +77,12 @@ price_stats.price_position: 0.0 = asset at bottom of 30-min range, 1.0 = at top.
 If RANGING and price_position >= 0.75 → recent direction is likely DOWN.
 If RANGING and price_position <= 0.25 → recent direction is likely UP.
 Suggest adjusted thresholds per coin based on its detected regime.
+Also populate regime_params in the response: for each regime that appeared in the cycle data
+(or is expected based on upcoming_windows), suggest the optimal cross_threshold, initial_offset,
+ratchet_buffer, and trigger_threshold_delta. These are applied globally when that regime is active.
+
+upcoming_windows in the prompt shows which markets open in the next 45 minutes and their
+expected conditions — use this to bias regime_params toward the incoming regime.
 
 Respond with ONLY a JSON object. No markdown fences, no explanation outside the JSON."""
 
@@ -90,6 +96,7 @@ def _build_prompt(
     regime_stats: dict | None = None,
     conviction_bucket_stats: dict | None = None,
     pattern_context: str | None = None,
+    upcoming_context: str | None = None,
 ) -> str:
     payload: dict = {
         "cycle_stats": stats,
@@ -101,7 +108,9 @@ def _build_prompt(
             "If pnl_accuracy_ratio is far from 1.0, reduce confidence score accordingly — "
             "the computed data may not reflect reality. "
             "cycle_stats now includes per-coin regime_distribution and conviction_distribution — "
-            "use these to calibrate regime-specific params in the response."
+            "use these to calibrate regime-specific params in the response. "
+            "upcoming_windows shows what conditions are expected in the next 45 minutes — "
+            "prioritize regime_params for the incoming regime."
         ),
     }
     if adaptive_stats:
@@ -114,6 +123,8 @@ def _build_prompt(
         payload["conviction_bucket_stats_alltime"] = conviction_bucket_stats
     if pattern_context:
         payload["current_market_pattern_vs_history"] = pattern_context
+    if upcoming_context:
+        payload["upcoming_windows"] = upcoming_context
     return json.dumps(payload, indent=2)
 
 
@@ -206,9 +217,43 @@ async def analyze_cycle(cycle_id: int) -> dict:
         if pm_results:
             pattern_context = _pm.build_pattern_context_for_prompt(pm_results)
         else:
-            # Compute on-the-fly if no cached results
             pm_results = _pm.run_pattern_backtest_sync()
             pattern_context = _pm.build_pattern_context_for_prompt(pm_results)
+    except Exception:
+        pass
+
+    # Upcoming markets — what windows open in the next 45 min and their current fingerprint
+    upcoming_context: str | None = None
+    try:
+        from . import scanner as _scanner, pattern_matcher as _pm2
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        upcoming_lines = []
+        for coin in CONFIG.get("coins", {}):
+            windows = _scanner.get_upcoming_markets(coin, within_minutes=45)
+            if not windows:
+                windows = _scanner.get_next_windows(coin, n=2)
+            for mkt in windows[:2]:
+                ws = mkt.get("window_start")
+                if not ws:
+                    continue
+                mins_away = (ws - now).total_seconds() / 60
+                try:
+                    fp = _pm2.get_current_fingerprint(coin)
+                    match = _pm2.match_fingerprint(coin, fp)
+                    upcoming_lines.append(
+                        f"{coin} @{ws.strftime('%H:%M')}UTC ({mins_away:.0f}min): "
+                        f"regime={fp.get('regime','?')} conviction={fp.get('conviction_bucket','?')} "
+                        f"ofi={fp.get('ofi_bucket','?')} | "
+                        f"hist {match.get('n',0)}trades {match.get('win_pct','?')}%win "
+                        f"avg€{match.get('avg_pnl',0):.4f} [{match.get('match_quality','?')}]"
+                    )
+                except Exception:
+                    upcoming_lines.append(
+                        f"{coin} @{ws.strftime('%H:%M')}UTC ({mins_away:.0f}min away)"
+                    )
+        if upcoming_lines:
+            upcoming_context = "\n".join(upcoming_lines)
     except Exception:
         pass
 
@@ -230,6 +275,12 @@ async def analyze_cycle(cycle_id: int) -> dict:
     "max_entry_cost": float,
     "max_token_spread": float,
     "hold_for_resolution_mid_threshold": float
+  },
+  "regime_params": {
+    "TRENDING":  {"cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "trigger_threshold_delta": float},
+    "CHOPPY":    {"cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "trigger_threshold_delta": float},
+    "RANGING":   {"cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "trigger_threshold_delta": float},
+    "BREAKOUT":  {"cross_threshold": float, "initial_offset": float, "ratchet_buffer": float, "trigger_threshold_delta": float}
   }
 }"""
 
@@ -239,6 +290,7 @@ async def analyze_cycle(cycle_id: int) -> dict:
             adaptive_stats, pnl_accuracy, regime_stats,
             conviction_bucket_stats=conviction_bucket_stats,
             pattern_context=pattern_context,
+            upcoming_context=upcoming_context,
         )
         + f"\n\nReturn this exact JSON structure:\n{schema}"
     )
