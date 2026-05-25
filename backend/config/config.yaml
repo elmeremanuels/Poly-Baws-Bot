@@ -12,15 +12,15 @@ trading:
 
 exit:
   # Peg-Cross exit engine (Höschler/Bulthuis V2)
-  cross_threshold: 0.65        # peg-cross score threshold (0-1) to convert limit→market
-  initial_offset: 0.06         # limit starts trigger_price + offset above trigger
-  ratchet_buffer: 0.025        # limit stays this far above mid when ratcheting
+  cross_threshold: 0.72        # peg-cross score threshold (0-1) to convert limit→market
+  initial_offset: 0.07         # limit starts trigger_price + offset above trigger
+  ratchet_buffer: 0.03         # limit stays this far above mid when ratcheting
   min_winner_profit_margin: 0.01  # resting limit sits at least break_even + this
   check_interval_seconds: 1.5  # polling interval in patient phase
   time_urgency_window: 120     # seconds over which time_urgency ramps 0→1
   spread_avg_window: 60        # reserved for future spread averaging
   force_exit_seconds: 30       # market-sell with this many seconds left
-  hold_for_resolution_mid_threshold: 0.65  # if mid >= this at force_exit, hold to $1.00 resolution
+  hold_for_resolution_mid_threshold: 0.55  # if mid >= this at force_exit, hold to $1.00 resolution
 
 entry:
   max_combined_cost: 1.02      # YES ask + NO ask must be ≤ this (stricter = lower break-even)
@@ -109,27 +109,27 @@ logging:
 # Updated automatically by the learning cycle when a regime is dominant during analysis.
 regime_profiles:
   TRENDING:
-    cross_threshold: 0.65     # patient — momentum continues, hold the winner longer
-    initial_offset: 0.07      # more ambitious target
-    ratchet_buffer: 0.025
+    cross_threshold: 0.72     # patient — momentum continues, hold the winner longer
+    initial_offset: 0.08      # more ambitious target
+    ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00
   CHOPPY:
-    cross_threshold: 0.45     # aggressive exit — reversals are frequent
+    cross_threshold: 0.55     # aggressive exit — reversals are frequent
     initial_offset: 0.04
-    ratchet_buffer: 0.015
+    ratchet_buffer: 0.02
     trigger_threshold_delta: 0.04   # raise bar — reduce false triggers
   RANGING:
-    cross_threshold: 0.55
+    cross_threshold: 0.65
     initial_offset: 0.05
-    ratchet_buffer: 0.020
+    ratchet_buffer: 0.025
     trigger_threshold_delta: 0.02
   BREAKOUT:
-    cross_threshold: 0.65
+    cross_threshold: 0.72
     initial_offset: 0.04      # lower target — capture the fast initial spike
-    ratchet_buffer: 0.015
+    ratchet_buffer: 0.02
     trigger_threshold_delta: -0.02  # lower bar — fire earlier on explosive moves
   NORMAL:
-    cross_threshold: 0.65
-    initial_offset: 0.06
-    ratchet_buffer: 0.025
+    cross_threshold: 0.72
+    initial_offset: 0.07
+    ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00

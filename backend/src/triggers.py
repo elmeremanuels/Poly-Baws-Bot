@@ -584,6 +584,8 @@ async def _winner_exit_paper(
                 # let the resting limit fill or force_exit handle it.
                 if break_even_price and mid > break_even_price and phase != "force":
                     pass
+                elif seconds_left < 90 and mid >= 0.55:
+                    pass  # 90s hold zone: prefer limit fill or held_for_resolution over guaranteed loss
                 else:
                     result = await paper_trader.simulate_market_sell(winner_token, size)
                     _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
@@ -702,6 +704,8 @@ async def _winner_exit_live(
             if score >= params["cross_threshold"]:
                 if break_even_price and mid > break_even_price and phase != "force":
                     pass
+                elif seconds_left < 90 and mid >= 0.55:
+                    pass  # 90s hold zone: prefer limit fill or held_for_resolution over guaranteed loss
                 else:
                     await orders.cancel_order(current_order_id)
                     mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
