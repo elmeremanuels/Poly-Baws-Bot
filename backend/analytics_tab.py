@@ -16,6 +16,7 @@ from src.db_sync import (
     save_manual_analysis_to_db,
 )
 from src.claude_analyzer import analyze_trades_sync
+from src.backtest_engine import BacktestEngine, BacktestResult
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -60,6 +61,25 @@ def _q_ofi_buckets(coin, days, only_today):
 @st.cache_data(ttl=60)
 def _q_conviction_sweep(coin, days, only_today):
     return get_conviction_threshold_sweep(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=120)
+def _run_backtest_engine(coin, days):
+    """Cache BacktestEngine results for 2 minutes to avoid re-running on every widget interaction."""
+    engine = BacktestEngine(coin=coin if coin != "All" else None, days=days)
+    if not engine.trades:
+        return None
+    return {
+        "conviction": engine.sweep_conviction(),
+        "regime": engine.sweep_regime(),
+        "exit_reason": engine.sweep_exit_reason(),
+        "grid": engine.grid_search(),
+        "n_trades": len(engine.trades),
+    }
+
+
+def _results_to_df(results: list[BacktestResult]) -> pd.DataFrame:
+    return pd.DataFrame([r.as_dict() for r in results])
 
 
 @st.fragment
@@ -296,7 +316,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
     )
 
     tab_conv, tab_regime, tab_ofi, tab_backtest = st.tabs(
-        ["Conviction", "Regime", "OFI", "Backtest (drempel)"]
+        ["Conviction", "Regime", "OFI", "Scenario Replay"]
     )
 
     with tab_conv:
@@ -350,32 +370,65 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.caption("Nog geen data.")
 
     with tab_backtest:
-        sweep = _q_conviction_sweep(coin, days, only_today)
-        if sweep:
-            sdf = pd.DataFrame(sweep)
-            baseline = sdf[sdf["min_conviction"] == 0.0].iloc[0] if len(sdf) else None
-            st.dataframe(
-                sdf.rename(columns={
-                    "min_conviction": "Min conviction", "n": "Trades",
-                    "win_pct": "Win %", "avg_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
-                }),
-                use_container_width=True, hide_index=True,
+        bt = _run_backtest_engine(coin, days)
+        if bt is None:
+            st.caption("Nog geen gesloten trades met signaaldata beschikbaar.")
+        else:
+            st.caption(
+                f"Replay van {bt['n_trades']} gesloten trades. "
+                "Elke rij toont wat er was gebeurd als je alleen onder die conditie had gehandeld. "
+                "Sharpe = dagelijkse gemiddelde P&L / standaarddeviatie (min. 5 handelsdagen vereist)."
             )
-            if baseline is not None:
-                st.caption(
-                    f"Baseline (alle trades): {int(baseline['n'])} trades · "
-                    f"win {baseline['win_pct']}% · totaal €{baseline['total_pnl']:+.4f}. "
-                    "Verhoog de drempel om te zien hoeveel trades je uitfiltert en wat het effect is."
-                )
+
+            # ── 1. Conviction sweep ───────────────────────────────────────────
+            st.markdown("**Conviction drempel**")
+            cdf = _results_to_df(bt["conviction"])
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
             col_wl, col_pnl = st.columns(2)
             with col_wl:
-                st.caption("Win % bij elke drempel")
-                st.line_chart(sdf.set_index("min_conviction")[["win_pct"]])
+                st.caption("Win % per drempel")
+                st.line_chart(cdf.set_index("Strategie")[["Winrate %"]])
             with col_pnl:
-                st.caption("Totaal P&L bij elke drempel")
-                st.line_chart(sdf.set_index("min_conviction")[["total_pnl"]])
-        else:
-            st.caption("Nog geen data.")
+                st.caption("Totaal P&L per drempel")
+                st.line_chart(cdf.set_index("Strategie")[["Totaal P&L"]])
+
+            st.divider()
+
+            # ── 2. Regime sweep ──────────────────────────────────────────────
+            st.markdown("**Regime filter**")
+            rdf = _results_to_df(bt["regime"])
+            st.dataframe(rdf, use_container_width=True, hide_index=True)
+            st.bar_chart(rdf.set_index("Strategie")[["Totaal P&L", "Winrate %"]])
+
+            st.divider()
+
+            # ── 3. Exit reason breakdown ─────────────────────────────────────
+            st.markdown("**Exit-reden analyse**")
+            st.caption("Hoe presteren peg_cross, limit_filled en held_for_resolution apart?")
+            edf = _results_to_df(bt["exit_reason"])
+            st.dataframe(edf, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 4. Grid search ───────────────────────────────────────────────
+            st.markdown("**Grid search: conviction × regime** *(gesorteerd op P&L)*")
+            gdf = _results_to_df(bt["grid"])
+            st.dataframe(gdf, use_container_width=True, hide_index=True)
+
+            # Best vs baseline equity curve
+            grid_results: list[BacktestResult] = bt["grid"]
+            conv_results: list[BacktestResult] = bt["conviction"]
+            baseline = next((r for r in conv_results if r.name == "≥0.00"), None)
+            best = grid_results[0] if grid_results else None
+            if best and baseline and best.cumulative_pnl and baseline.cumulative_pnl:
+                st.divider()
+                st.markdown("**Equity curve: baseline vs beste strategie**")
+                n = min(len(best.cumulative_pnl), len(baseline.cumulative_pnl))
+                curve_df = pd.DataFrame({
+                    f"Baseline (alle trades)": baseline.cumulative_pnl[:n],
+                    f"Beste: {best.name}": best.cumulative_pnl[:n],
+                })
+                st.line_chart(curve_df)
 
 
 def _build_current_params() -> dict:
