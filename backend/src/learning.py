@@ -172,7 +172,13 @@ class LearningOrchestrator:
             await self._transition_to("analyze")
 
     async def _start_new_cycle(self) -> None:
-        self._cycle_number += 1
+        # Derive the next cycle_number from the DB max, not an in-memory counter —
+        # manual-analysis rows (save_manual_analysis_to_db) also consume cycle_numbers,
+        # so an in-memory increment collides with them after a resume.
+        async with _db() as db:
+            async with db.execute("SELECT COALESCE(MAX(cycle_number), 0) FROM learning_cycles") as cur:
+                row = await cur.fetchone()
+        self._cycle_number = (row[0] if row else 0) + 1
         params_json = json.dumps(self._current_config_snapshot())
         # Snapshot current USDC so Claude can compare computed vs actual P&L later
         usdc_at_start: float | None = None
