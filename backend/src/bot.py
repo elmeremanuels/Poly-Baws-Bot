@@ -292,13 +292,19 @@ async def _portfolio_sync_loop() -> None:
 
 
 async def _learning_tick_loop() -> None:
-    """Drive the learning orchestrator — ticks every 10s to check phase transitions."""
+    """Drive the learning orchestrator — ticks every 10s while in live_learning mode.
+
+    Always runs as a task and gates on the current mode internally, so switching
+    into live_learning at runtime (via the dashboard) starts a cycle without
+    requiring a full bot restart. orch.start() is idempotent.
+    """
     from . import learning as _learning
     orch = _learning.get_orchestrator()
-    await orch.start()
     while True:
         try:
-            await orch.tick()
+            if get_mode() == "live_learning":
+                await orch.start()
+                await orch.tick()
         except Exception as e:
             log.error("learning_tick_error", error=str(e))
         await asyncio.sleep(10)
@@ -340,7 +346,8 @@ async def run_bot() -> None:
         if CONFIG["coins"][coin]["enabled"]:
             tasks.append(asyncio.create_task(_coin_loop(coin)))
 
-    if get_mode() == "live_learning":
-        tasks.append(asyncio.create_task(_learning_tick_loop()))
+    # Always spawn the learning loop; it self-gates on live_learning mode so a
+    # runtime mode switch (not just a restart-into-live_learning) activates it.
+    tasks.append(asyncio.create_task(_learning_tick_loop()))
 
     await asyncio.gather(*tasks)
