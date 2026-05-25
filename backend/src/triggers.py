@@ -435,12 +435,35 @@ def _add_winner_fees(trade_id: str, fees: float) -> None:
 
 # ── Peg-Cross Exit Engine ─────────────────────────────────────────────────────
 
-def crossing_cost(mid: float, spread: float, size: float) -> float:
+def _estimate_sell_fill(token_id: str, size: float) -> float | None:
+    """Walk live bid book to estimate average fill price for a market sell of `size` shares.
+
+    Returns None if the book is empty. Falls back to best_bid when book has less depth than needed.
+    This gives a more realistic crossing cost than assuming full fill at best_bid.
+    """
+    book = ws_client.get_orderbook(token_id)
+    bids = sorted([(float(p), s) for p, s in book["bids"].items()], key=lambda x: -x[0])
+    if not bids:
+        return None
+    filled, cost = 0.0, 0.0
+    for price, avail in bids:
+        take = min(float(avail), size - filled)
+        cost += take * price
+        filled += take
+        if filled >= size:
+            break
+    return cost / filled if filled > 0 else None
+
+
+def crossing_cost(mid: float, spread: float, size: float, effective_bid: float | None = None) -> float:
     """Cost (€) of converting a resting limit sell to a market sell.
-    Includes taker fee + selling at bid instead of mid."""
-    bid = max(0.01, mid - spread / 2)
+
+    Uses effective_bid when provided (depth-aware estimate from walking the book);
+    otherwise falls back to mid - spread/2, which equals best_bid when mid = (bid+ask)/2.
+    """
+    bid = max(0.01, effective_bid if effective_bid is not None else mid - spread / 2)
     taker = bid * paper_trader.taker_fee_rate(bid) * size
-    spread_loss = (spread / 2) * size
+    spread_loss = (mid - bid) * size  # gap between mid and actual execution price
     return taker + spread_loss
 
 
@@ -454,13 +477,14 @@ def compute_cross_score(
     cfg: dict,
     size: float = 2.0,
     velocity: float = 0.0,
+    effective_bid: float | None = None,
 ) -> tuple[float, str]:
     """
     Returns (score 0–1, dominant_reason). score ≥ cross_threshold → market sell.
 
     Components:
       0.30 time_urgency         — rises as window end approaches
-      0.30 fee_adjusted         — expected peg loss vs €0.11 crossing cost
+      0.30 fee_adjusted         — expected peg loss vs crossing cost (depth-aware)
       0.25 mid_decay            — mid dropped from peak → momentum reversed
       0.15 fill_unlikely        — limit above best ask → passive fill impossible
     """
@@ -470,7 +494,7 @@ def compute_cross_score(
     spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else 0.06
 
     if velocity < 0:
-        cost = crossing_cost(mid, spread, size)
+        cost = crossing_cost(mid, spread, size, effective_bid=effective_bid)
         expected_peg_loss = abs(velocity) * min(seconds_left, 60) * size
         fee_adjusted = min(1.0, min(2.0, expected_peg_loss / max(0.001, cost)) / 2.0)
     else:
@@ -594,9 +618,10 @@ async def _winner_exit_paper(
                 peak_mid = mid
 
             vel = _vol.get_price_velocity(winner_token) or 0.0
+            eff_bid = _estimate_sell_fill(winner_token, size)
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
-                size=size, velocity=vel,
+                size=size, velocity=vel, effective_bid=eff_bid,
             )
 
             if score >= params["cross_threshold"]:
@@ -613,7 +638,8 @@ async def _winner_exit_paper(
                     _add_winner_fees(trade_id, result.get("fees", 0.0))
                     await write_event(trade_id, "peg_cross_triggered", coin, {
                         "score": score, "reason": reason, "phase": phase,
-                        "mid": mid, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
+                        "mid": mid, "eff_bid": round(eff_bid, 4) if eff_bid else None,
+                        "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
                     })
                     await _close_trade(trade_id, result.get("fill_price"), "peg_cross", broadcast_fn)
                     return
@@ -716,9 +742,10 @@ async def _winner_exit_live(
                 peak_mid = mid
 
             vel = _vol.get_price_velocity(winner_token) or 0.0
+            eff_bid = _estimate_sell_fill(winner_token, size)
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
-                size=size, velocity=vel,
+                size=size, velocity=vel, effective_bid=eff_bid,
             )
 
             if score >= params["cross_threshold"]:
@@ -740,7 +767,9 @@ async def _winner_exit_live(
                         _add_winner_fees(trade_id, paper_trader.taker_fee_rate(mid or 0.5) * size)
                     await write_event(trade_id, "peg_cross_triggered", coin, {
                         "score": score, "reason": reason, "phase": phase,
-                        "mid": mid, "fill_price": fill_price, "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
+                        "mid": mid, "fill_price": fill_price,
+                        "eff_bid": round(eff_bid, 4) if eff_bid else None,
+                        "velocity": round(vel, 5), "seconds_left": round(seconds_left, 1),
                     })
                     await _close_trade(trade_id, fill_price, "peg_cross", broadcast_fn)
                     return
