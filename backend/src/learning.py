@@ -114,6 +114,7 @@ class LearningOrchestrator:
         self._active_params: Optional[dict] = None
         self._original_coin_cfg: dict = {}
         self._started: bool = False
+        self._analyze_retries: int = 0
 
     async def start(self) -> None:
         if self._started:
@@ -144,9 +145,31 @@ class LearningOrchestrator:
                     self._phase_started_at = datetime.fromisoformat(ps).astimezone(timezone.utc)
                 except Exception:
                     self._phase_started_at = datetime.now(timezone.utc)
+            # Process restart resets CONFIG to the config.yaml baseline. If we resume a
+            # live (deploy) or validate phase, the Claude-optimized params must be
+            # re-applied from the DB — otherwise the bot would trade real money (deploy)
+            # on un-optimized params and the validate comparison would be meaningless.
+            if self._phase in ("deploy", "validate"):
+                await self._reapply_params_on_resume(existing.get("claude_params"))
             log.info("learning_resumed", cycle=self._cycle_number, phase=self._phase)
         else:
             await self._start_new_cycle()
+
+    async def _reapply_params_on_resume(self, claude_params_json: str | None) -> None:
+        if not claude_params_json:
+            log.warning("resume_phase_missing_params_demoting_to_analyze",
+                        cycle=self._cycle_number, phase=self._phase)
+            await self._transition_to("analyze")
+            return
+        try:
+            self._active_params = json.loads(claude_params_json)
+            self._apply_claude_params(self._active_params)
+            log.info("learned_params_reapplied_on_resume",
+                     cycle=self._cycle_number, phase=self._phase)
+        except Exception as exc:
+            log.error("resume_reapply_failed_demoting_to_analyze", error=str(exc))
+            self._active_params = None
+            await self._transition_to("analyze")
 
     async def _start_new_cycle(self) -> None:
         self._cycle_number += 1
@@ -241,8 +264,16 @@ class LearningOrchestrator:
                 await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
                 await self._start_new_cycle()
         except Exception as e:
-            log.error("analyze_failed", error=str(e))
-            if self._phase == "analyze":
+            self._analyze_retries += 1
+            max_retries = CONFIG["learning"].get("analyze_max_retries", 3)
+            log.error("analyze_failed", error=str(e),
+                      retry=self._analyze_retries, max_retries=max_retries)
+            # Transient Claude failures (timeout, rate limit) shouldn't throw away an
+            # expensive learn phase. Stay in analyze and retry on the next tick (10s);
+            # only abandon the cycle once the retry budget is exhausted.
+            if self._phase == "analyze" and self._analyze_retries >= max_retries:
+                log.warning("analyze_retries_exhausted_restarting_cycle",
+                            cycle=self._cycle_number)
                 await _db_update_cycle(self._cycle_id, ended_at=datetime.now(timezone.utc).isoformat())
                 await self._start_new_cycle()
         finally:
@@ -300,6 +331,8 @@ class LearningOrchestrator:
 
     async def _transition_to(self, new_phase: str) -> None:
         old = self._phase
+        if new_phase == "analyze":
+            self._analyze_retries = 0
         self._set_phase(new_phase)
         await _db_update_cycle(
             self._cycle_id,
@@ -332,7 +365,13 @@ class LearningOrchestrator:
             1 for cp in analysis.get("coin_params", {}).values()
             if cp.get("enabled", True)
         )
-        return enabled >= 3
+        # Deadlock guard: never require more confident coins than are actually enabled
+        # in config. A 1-2 coin test setup would otherwise never satisfy a fixed gate
+        # and loop learn→analyze→learn forever, never deploying.
+        configured_min = CONFIG["learning"].get("min_deploy_coins", 3)
+        num_enabled = sum(1 for c in CONFIG["coins"].values() if c.get("enabled", True))
+        required = max(1, min(configured_min, num_enabled))
+        return enabled >= required
 
     def _apply_claude_params(self, analysis: dict) -> None:
         self._original_coin_cfg = {}

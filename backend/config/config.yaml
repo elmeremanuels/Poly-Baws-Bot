@@ -103,6 +103,8 @@ learning:
   min_validate_trades: 15
   max_validate_hours: 1
   confidence_threshold: 0.60
+  min_deploy_coins: 3          # require Claude-confidence on ≥ this many coins to go live (auto-capped to # enabled)
+  analyze_max_retries: 3       # retry transient Claude analyze failures before abandoning the cycle
 
 claude:
   model: "claude-sonnet-4-6"

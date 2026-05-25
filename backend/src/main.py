@@ -144,7 +144,13 @@ async def _run() -> None:
         if saved_enabled is not None:
             CONFIG["coins"][coin]["enabled"] = saved_enabled.lower() == "true"
 
-    if await load_dashboard_state("apply_learnings") == "true":
+    # In live_learning the orchestrator owns param application (and re-applies the
+    # active cycle's params on resume). Running the manual apply hook here too would
+    # mutate CONFIG before the orchestrator snapshots its restore baseline, corrupting
+    # later restoration — so skip it in that mode.
+    from .state import get_mode as _get_mode_for_apply
+    if (await load_dashboard_state("apply_learnings") == "true"
+            and _get_mode_for_apply() != "live_learning"):
         from . import learning as _learning
         ok = await _learning.load_and_apply_latest_params()
         if not ok:
