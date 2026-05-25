@@ -375,19 +375,50 @@ Geef parameter-aanbevelingen per regime (TRENDING, CHOPPY, RANGING, BREAKOUT, NO
 Antwoord ALLEEN in het gevraagde JSON formaat, geen markdown code blocks."""
 
 
-def analyze_coin_strategy_sync(coin: str, trades: list[dict]) -> dict:
-    """Sync Claude analysis for a single coin — called from Streamlit's Herzie Strategie button."""
+def analyze_coin_strategy_sync(coin: str, trades: list[dict]) -> dict:  # noqa: C901
+    """Sync Claude analysis for a single coin — called from Streamlit's Herzie Strategie button.
+
+    Gathers ALL available data sources:
+      - Trade aggregates + microstructure (spread, depth, velocity, timing)
+      - Conviction bucket stats + threshold sweep
+      - OFI bucket stats
+      - Hourly P&L pattern
+      - Early loser sell effectiveness
+      - Break-even crossing analysis
+      - Previous Claude / learning cycle findings
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
     if not api_key or api_key.startswith("${"):
         raise ValueError("ANTHROPIC_API_KEY niet ingesteld — kan analyse niet uitvoeren")
 
     model = CONFIG.get("claude", {}).get("model", "claude-sonnet-4-6")
-    max_tokens = CONFIG.get("claude", {}).get("max_tokens", 4096)
+    max_tokens = int(CONFIG.get("claude", {}).get("max_tokens", 4096))
+
+    # Detect the days window used (infer from trade timestamps for DB queries)
+    from datetime import datetime, timezone, timedelta
+    days: int | None = None
+    if trades:
+        oldest = min(
+            (t.get("created_at") or "") for t in trades if t.get("created_at")
+        )
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(oldest.replace("Z", "+00:00"))).days
+            days = age + 1
+        except Exception:
+            days = 30
+
+    # ── 1. Basic trade aggregates ─────────────────────────────────────────────
+    from collections import defaultdict
 
     triggered = [t for t in trades if t.get("trigger_hit")]
     wins = [t for t in triggered if (t.get("net_pnl") or 0) > 0]
+    total_pnl = sum(t.get("net_pnl") or 0 for t in triggered)
 
-    from collections import defaultdict
+    loser_ps  = [t["loser_exit_price"]  for t in triggered if t.get("loser_exit_price")  is not None]
+    winner_ps = [t["winner_exit_price"] for t in triggered if t.get("winner_exit_price") is not None]
+    be_ps     = [t["break_even_price"]  for t in triggered if t.get("break_even_price")  is not None]
+
+    # ── 2. Per-regime breakdown ───────────────────────────────────────────────
     by_regime: dict = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0})
     for t in triggered:
         r = t.get("regime_at_entry") or "NORMAL"
@@ -396,92 +427,254 @@ def analyze_coin_strategy_sync(coin: str, trades: list[dict]) -> dict:
         if (t.get("net_pnl") or 0) > 0:
             by_regime[r]["wins"] += 1
 
+    # ── 3. Exit reason breakdown ──────────────────────────────────────────────
     by_exit: dict = defaultdict(lambda: {"n": 0, "pnl": 0.0})
     for t in triggered:
         e = t.get("winner_exit_reason") or "unknown"
         by_exit[e]["n"] += 1
         by_exit[e]["pnl"] += t.get("net_pnl") or 0
 
-    loser_ps = [t["loser_exit_price"] for t in triggered if t.get("loser_exit_price") is not None]
-    winner_ps = [t["winner_exit_price"] for t in triggered if t.get("winner_exit_price") is not None]
-    be_ps = [t["break_even_price"] for t in triggered if t.get("break_even_price") is not None]
-    conv_scores = [t["conviction_score_at_trigger"] for t in triggered
-                   if t.get("conviction_score_at_trigger") is not None]
-    early_sells = [t for t in triggered if t.get("early_loser_side")]
+    # ── 4. Microstructure at trigger ──────────────────────────────────────────
+    spreads   = [t["spread_at_trigger"]       for t in triggered if t.get("spread_at_trigger")       is not None]
+    depths_y  = [t["yes_depth_at_trigger"]    for t in triggered if t.get("yes_depth_at_trigger")    is not None]
+    depths_n  = [t["no_depth_at_trigger"]     for t in triggered if t.get("no_depth_at_trigger")     is not None]
+    velocities = [t["mid_velocity_at_trigger"] for t in triggered if t.get("mid_velocity_at_trigger") is not None]
+    timings   = [t["time_since_window_start"] for t in triggered if t.get("time_since_window_start") is not None]
 
-    coin_cfg = CONFIG.get("coins", {}).get(coin, {})
-    exit_cfg = CONFIG.get("exit", {})
+    def _avg(lst): return sum(lst) / len(lst) if lst else None
+    def _fmt(v, decimals=3): return f"{v:.{decimals}f}" if v is not None else "n.v.t."
+
+    # ── 5. Signal quality (OFI, funding, liq) ─────────────────────────────────
+    ofi_wins  = [t["ofi_at_trigger"] for t in triggered if t.get("ofi_at_trigger") is not None and (t.get("net_pnl") or 0) > 0]
+    ofi_loss  = [t["ofi_at_trigger"] for t in triggered if t.get("ofi_at_trigger") is not None and (t.get("net_pnl") or 0) <= 0]
+    conv_scores = [t["conviction_score_at_trigger"] for t in triggered if t.get("conviction_score_at_trigger") is not None]
+    conv_wins = [t["conviction_score_at_trigger"] for t in triggered
+                 if t.get("conviction_score_at_trigger") is not None and (t.get("net_pnl") or 0) > 0]
+    conv_loss = [t["conviction_score_at_trigger"] for t in triggered
+                 if t.get("conviction_score_at_trigger") is not None and (t.get("net_pnl") or 0) <= 0]
+
+    # ── 6. Early loser sell effectiveness ────────────────────────────────────
+    early_sells = [t for t in triggered if t.get("early_loser_side")]
+    early_prices = [t["early_loser_price"] for t in early_sells if t.get("early_loser_price") is not None]
+    # Estimate what loser would have fetched at trigger time (avg of non-early trades)
+    trigger_loser_prices = [t["loser_exit_price"] for t in triggered
+                            if not t.get("early_loser_side") and t.get("loser_exit_price") is not None]
+
+    # ── 7. Break-even crossing analysis ──────────────────────────────────────
+    above_be = [t for t in triggered
+                if t.get("winner_exit_price") is not None and t.get("break_even_price") is not None
+                and t["winner_exit_price"] > t["break_even_price"]]
+    gaps_pos = [t["winner_exit_price"] - t["break_even_price"] for t in above_be]
+    below_be = [t for t in triggered
+                if t.get("winner_exit_price") is not None and t.get("break_even_price") is not None
+                and t["winner_exit_price"] <= t["break_even_price"]]
+    gaps_neg = [t["winner_exit_price"] - t["break_even_price"] for t in below_be]
+
+    # ── 8. DB-backed bucket stats & sweep ────────────────────────────────────
+    from .db_sync import (
+        get_conviction_bucket_stats,
+        get_conviction_threshold_sweep,
+        get_ofi_bucket_stats,
+        get_hourly_pnl,
+        get_latest_completed_cycle,
+        get_latest_manual_analysis,
+    )
+
+    def _safe(fn, **kw):
+        try:
+            return fn(**kw)
+        except Exception:
+            return []
+
+    conv_buckets  = _safe(get_conviction_bucket_stats,  coin=coin, days=days)
+    ofi_buckets   = _safe(get_ofi_bucket_stats,         coin=coin, days=days)
+    sweep         = _safe(get_conviction_threshold_sweep, coin=coin, days=days)
+    hourly        = _safe(get_hourly_pnl,               coin=coin, days=days)
+
+    def _bucket_lines(rows, key="bucket"):
+        return "\n".join(
+            f"  {r.get(key,'?')}: {r.get('n',0)} trades, "
+            f"{r.get('win_pct','?')}% win, gem €{r.get('avg_net_pnl',0):.4f}"
+            for r in rows
+        ) or "  (geen data)"
+
+    sweep_lines = "\n".join(
+        f"  >= {r.get('min_conviction',0):.1f}: {r.get('n',0)} trades, "
+        f"{r.get('win_pct','?')}% win, totaal €{r.get('total_pnl',0):.2f}"
+        for r in sweep
+    ) or "  (geen data)"
+
+    # Hourly: find best/worst 4h blocks
+    hourly_summary = ""
+    if hourly:
+        by_block: dict = defaultdict(lambda: {"n": 0, "pnl": 0.0})
+        for h in hourly:
+            block = (int(h.get("hour_utc", 0)) // 4) * 4
+            by_block[block]["n"] += h.get("n", 0)
+            by_block[block]["pnl"] += h.get("total_pnl", 0)
+        sorted_blocks = sorted(by_block.items(), key=lambda x: x[1]["pnl"])
+        worst = sorted_blocks[:2]
+        best  = sorted_blocks[-2:]
+        hourly_summary = (
+            "Beste tijdblokken (UTC):  " +
+            ", ".join(f"{b:02d}:00–{b+4:02d}:00 (€{d['pnl']:+.2f}, {d['n']} trades)" for b, d in reversed(best)) +
+            "\nSlechtste tijdblokken: " +
+            ", ".join(f"{b:02d}:00–{b+4:02d}:00 (€{d['pnl']:+.2f}, {d['n']} trades)" for b, d in worst)
+        )
+
+    # ── 9. Previous analysis context ─────────────────────────────────────────
+    prev_context = ""
+    try:
+        prev_manual = get_latest_manual_analysis()
+        if prev_manual and prev_manual.get("coin_params", {}).get(coin):
+            cp = prev_manual["coin_params"][coin]
+            prev_context = (
+                f"Vorige handmatige analyse ({prev_manual.get('created_at','?')[:10]}): "
+                f"confidence={prev_manual.get('confidence_score','?')}, "
+                f"aanbevolen params={json.dumps(cp)}\n"
+                f"Redenering: {prev_manual.get('reasoning','')[:300]}"
+            )
+    except Exception:
+        pass
+
+    try:
+        last_cycle = get_latest_completed_cycle()
+        if last_cycle and last_cycle.get("claude_params"):
+            cp_raw = last_cycle["claude_params"]
+            cp = json.loads(cp_raw) if isinstance(cp_raw, str) else cp_raw
+            coin_cp = cp.get("coin_params", {}).get(coin, {})
+            if coin_cp:
+                prev_context += (
+                    f"\nLaatste learning cycle ({last_cycle.get('ended_at','?')[:10]}): "
+                    f"confidence={cp.get('confidence_score','?')}, "
+                    f"aanbevolen voor {coin}: {json.dumps(coin_cp)}"
+                )
+    except Exception:
+        pass
+
+    # ── 10. Current config ────────────────────────────────────────────────────
+    coin_cfg    = CONFIG.get("coins", {}).get(coin, {})
+    exit_cfg    = CONFIG.get("exit", {})
     trading_cfg = CONFIG.get("trading", {})
 
+    # ── Assemble prompt ───────────────────────────────────────────────────────
     regime_lines = "\n".join(
         f"  {r}: {d['n']} trades, {d['wins']/max(d['n'],1)*100:.1f}% win, "
-        f"gem. P&L €{d['pnl']/max(d['n'],1):.4f}, totaal €{d['pnl']:.2f}"
+        f"gem €{d['pnl']/max(d['n'],1):.4f}, totaal €{d['pnl']:.2f}"
         for r, d in sorted(by_regime.items())
     )
     exit_lines = "\n".join(
-        f"  {e}: {d['n']}× (gem. €{d['pnl']/max(d['n'],1):.4f})"
+        f"  {e}: {d['n']}× (gem €{d['pnl']/max(d['n'],1):.4f}, totaal €{d['pnl']:.2f})"
         for e, d in sorted(by_exit.items(), key=lambda x: -x[1]["n"])
     )
 
     stats_text = f"""
-COIN: {coin}
-Analyse periode: {len(trades)} trades totaal, {len(triggered)} getriggerd
-Win rate: {len(wins)/max(len(triggered),1)*100:.1f}% ({len(wins)}/{len(triggered)})
-Totaal P&L: €{sum(t.get("net_pnl") or 0 for t in triggered):.2f}
-Gem. P&L per getriggerde trade: €{sum(t.get("net_pnl") or 0 for t in triggered)/max(len(triggered),1):.4f}
-Gem. loser exit prijs: {f"{sum(loser_ps)/len(loser_ps):.3f}" if loser_ps else "n.v.t."} (incl. spread)
-Gem. winner exit prijs: {f"{sum(winner_ps)/len(winner_ps):.3f}" if winner_ps else "n.v.t."}
-Gem. break-even prijs: {f"{sum(be_ps)/len(be_ps):.3f}" if be_ps else "n.v.t."}
-Gem. conviction score bij trigger: {f"{sum(conv_scores)/len(conv_scores):.3f}" if conv_scores else "n.v.t."}
-Vroeg loser verkopen (early sell): {len(early_sells)} trades
+══ COIN: {coin}  |  ANALYSE PERIODE: {len(trades)} trades totaal, {len(triggered)} getriggerd ══
 
-RESULTATEN PER REGIME:
+── KERN PERFORMANCE ─────────────────────────────────────────────────────────
+Win rate:           {len(wins)/max(len(triggered),1)*100:.1f}%  ({len(wins)}/{len(triggered)})
+Totaal P&L:         €{total_pnl:.2f}
+Gem. P&L/trade:     €{total_pnl/max(len(triggered),1):.4f}
+Gem. loser prijs:   {_fmt(_avg(loser_ps))} (werkelijk ontvangen incl. spread)
+Gem. winner prijs:  {_fmt(_avg(winner_ps))}
+Gem. break-even:    {_fmt(_avg(be_ps))}
+Winner > BE:        {len(above_be)}/{len(triggered)} trades ({len(above_be)/max(len(triggered),1)*100:.1f}%)
+  Gem. overschot:   +{_fmt(_avg(gaps_pos))} als winner > break-even
+  Gem. tekort:      {_fmt(_avg(gaps_neg))} als winner < break-even
+
+── RESULTATEN PER REGIME ────────────────────────────────────────────────────
 {regime_lines}
 
-EXIT REDENEN:
+── EXIT REDENEN ─────────────────────────────────────────────────────────────
 {exit_lines}
 
-HUIDIGE PARAMETERS VOOR {coin}:
-  trigger_threshold: {coin_cfg.get("trigger_threshold", trading_cfg.get("trigger_threshold", 0.73))}
-  initial_offset: {coin_cfg.get("initial_offset", exit_cfg.get("initial_offset", 0.07))}
-  ratchet_buffer: {coin_cfg.get("ratchet_buffer", exit_cfg.get("ratchet_buffer", 0.03))}
-  cross_threshold: {coin_cfg.get("cross_threshold", exit_cfg.get("cross_threshold", 0.72))}
-  early_loser_threshold: {exit_cfg.get("early_loser_threshold", 0.45)} (globaal)
+── MARKTMICROSTRUCTUUR BIJ TRIGGER ──────────────────────────────────────────
+Gem. spread bij trigger:     {_fmt(_avg(spreads))}  (bid-ask spread van winnende kant)
+Gem. top-of-book diepte YES: {_fmt(_avg(depths_y), 2)} shares
+Gem. top-of-book diepte NO:  {_fmt(_avg(depths_n), 2)} shares
+Gem. prijs-velocity:         {_fmt(_avg(velocities))} per seconde
+Gem. tijd na window-start:   {_fmt(_avg(timings), 0)} seconden  (hoe lang duurt trigger?)
 
-HUIDIGE REGIME PROFIELEN:
+── CONVICTION SIGNAAL KWALITEIT ─────────────────────────────────────────────
+Gem. conviction score (wins):   {_fmt(_avg(conv_wins))}
+Gem. conviction score (losses): {_fmt(_avg(conv_loss))}
+Gem. OFI bij trigger (wins):    {_fmt(_avg(ofi_wins))}
+Gem. OFI bij trigger (losses):  {_fmt(_avg(ofi_loss))}
+
+Conviction buckets (win% + P&L per score-range):
+{_bucket_lines(conv_buckets)}
+
+OFI buckets (win% + P&L per OFI-range):
+{_bucket_lines(ofi_buckets, key="bucket")}
+
+Conviction threshold sweep (wat als we alleen handelen bij score >= X):
+{sweep_lines}
+
+── VROEG VERKOPEN EFFECTIVITEIT ─────────────────────────────────────────────
+Vroeg verkochte losers:      {len(early_sells)} trades
+Gem. vroeg-verkoop prijs:    {_fmt(_avg(early_prices))}
+Gem. loser prijs bij trigger (overige trades): {_fmt(_avg(trigger_loser_prices))}
+Vroeg-verkoop voordeel:      {_fmt((_avg(early_prices) or 0) - (_avg(trigger_loser_prices) or 0))} per share (positief = vroeg beter)
+
+── TIJDSTIP ANALYSE (UTC) ───────────────────────────────────────────────────
+{hourly_summary or "(geen data)"}
+
+── HUIDIGE PARAMETERS VOOR {coin} ───────────────────────────────────────────
+trigger_threshold:      {coin_cfg.get("trigger_threshold", trading_cfg.get("trigger_threshold", 0.73))}
+initial_offset:         {coin_cfg.get("initial_offset", exit_cfg.get("initial_offset", 0.07))}
+ratchet_buffer:         {coin_cfg.get("ratchet_buffer", exit_cfg.get("ratchet_buffer", 0.03))}
+cross_threshold:        {coin_cfg.get("cross_threshold", exit_cfg.get("cross_threshold", 0.72))}
+early_loser_threshold:  {exit_cfg.get("early_loser_threshold", 0.45)}
+early_loser_rebuy:      {exit_cfg.get("early_loser_rebuy_threshold", 0.55)}
+hold_for_resolution:    {exit_cfg.get("hold_for_resolution_mid_threshold", 0.55)}
+force_exit_seconds:     {exit_cfg.get("force_exit_seconds", 30)}
+
+Regime profielen (actief):
 {json.dumps({k: v for k, v in CONFIG.get("regime_profiles", {}).items()}, indent=2)}
-"""
+{f"── VORIGE ANALYSE CONTEXT ────────────────────────────────────────────────{chr(10)}{prev_context}" if prev_context else ""}"""
 
     schema = """{
   "coin": "TICKER",
-  "performance_summary": "2-3 zinnen samenvatting in het Nederlands",
-  "key_issues": ["probleem 1 in Nederlands", "probleem 2"],
+  "performance_summary": "2-3 zinnen samenvatting in het Nederlands — wat gaat goed, wat niet",
+  "key_issues": [
+    "Meest urgente probleem in 1 zin",
+    "Tweede probleem"
+  ],
   "regime_specific": {
     "TRENDING": {
-      "assessment": "Korte beoordeling in Nederlands",
+      "assessment": "Korte beoordeling (1-2 zinnen) in het Nederlands",
       "suggested_params": {
-        "trigger_threshold_delta": 0.0,
+        "trigger_threshold_delta": 0.00,
         "initial_offset": 0.07,
+        "cross_threshold": 0.72,
         "early_loser_threshold": 0.45,
-        "cross_threshold": 0.72
+        "early_loser_rebuy_threshold": null
       }
     },
-    "CHOPPY": {"assessment": "...", "suggested_params": {}},
-    "RANGING": {"assessment": "...", "suggested_params": {}},
+    "CHOPPY":   {"assessment": "...", "suggested_params": {}},
+    "RANGING":  {"assessment": "...", "suggested_params": {}},
     "BREAKOUT": {"assessment": "...", "suggested_params": {}},
-    "NORMAL": {"assessment": "...", "suggested_params": {}}
+    "NORMAL":   {"assessment": "...", "suggested_params": {}}
   },
   "global_coin_params": {
     "trigger_threshold": 0.75,
-    "ratchet_buffer": 0.03
+    "ratchet_buffer": 0.03,
+    "hold_for_resolution_mid_threshold": 0.55
   },
+  "conviction_gate_advice": {
+    "recommended_min_score": 0.0,
+    "reasoning": "Dutch explanation of whether a conviction gate helps"
+  },
+  "timing_advice": "Dutch text about time-of-day patterns, if actionable",
   "confidence": 0.70,
   "reasoning": "3-5 zinnen volledige redenering in het Nederlands"
 }"""
 
     user_prompt = (
         f"{stats_text.strip()}\n\n"
-        "Analyseer deze data en geef een herziene handelsstrategie voor dit coin. "
+        "Analyseer ALLE bovenstaande data zorgvuldig en geef een herziene handelsstrategie "
+        f"voor {coin}. Gebruik de microstructuur, conviction buckets, threshold sweep en "
+        "tijdstip-patronen als bewijs voor je aanbevelingen. "
         f"Return exact dit JSON schema:\n{schema}"
     )
 

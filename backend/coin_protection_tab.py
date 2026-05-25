@@ -85,6 +85,21 @@ def _render_herzie_result(coin: str, result: dict) -> None:
         with st.expander("Volledige redenering"):
             st.markdown(reasoning)
 
+    # Conviction gate advies
+    cg = result.get("conviction_gate_advice", {})
+    if cg:
+        min_score = cg.get("recommended_min_score", 0.0)
+        cg_reasoning = cg.get("reasoning", "")
+        if min_score and min_score > 0:
+            st.info(f"**Conviction gate:** handel alleen bij score ≥ {min_score:.2f} — {cg_reasoning}")
+        elif cg_reasoning:
+            st.caption(f"Conviction gate: {cg_reasoning}")
+
+    # Tijdstip advies
+    timing = result.get("timing_advice", "")
+    if timing:
+        st.info(f"**Tijdstip:** {timing}")
+
     # YAML snippet for easy copy-paste into config.yaml
     yaml_lines = [f"  # {coin} — herziene parameters (gegenereerd door Herzie Strategie):"]
     for k, v in global_params.items():
