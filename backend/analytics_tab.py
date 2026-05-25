@@ -74,6 +74,7 @@ def _run_backtest_engine(coin, days):
         "regime": engine.sweep_regime(),
         "exit_reason": engine.sweep_exit_reason(),
         "grid": engine.grid_search(),
+        "early_loser": engine.simulate_early_loser_sell(),
         "n_trades": len(engine.trades),
     }
 
@@ -315,8 +316,8 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
         "Gebruik dit om te bepalen welke signaalcombinaties daadwerkelijk een edge geven."
     )
 
-    tab_conv, tab_regime, tab_ofi, tab_backtest, tab_weighting = st.tabs(
-        ["Conviction", "Regime", "OFI", "Scenario Replay", "Gewogen inkoop"]
+    tab_conv, tab_regime, tab_ofi, tab_backtest, tab_weighting, tab_vroeg = st.tabs(
+        ["Conviction", "Regime", "OFI", "Scenario Replay", "Gewogen inkoop", "Vroeg verkopen"]
     )
 
     with tab_conv:
@@ -484,6 +485,58 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
                     "Nog geen data. De simulatie vereist trades met `conviction_at_entry` "
                     "en `winner_exit_price` gevuld — dit zijn trades na de Phase 2 deploy."
                 )
+
+    with tab_vroeg:
+        bt = _run_backtest_engine(coin, days)
+        if bt is None or not bt.get("early_loser"):
+            st.caption(
+                "Nog geen data. Vereist gesloten triggered trades met snapshot-geschiedenis "
+                "(snapshots worden elke 30s opgeslagen tijdens monitoring)."
+            )
+        else:
+            st.markdown("### Vroeg verkopen simulatie")
+            st.caption(
+                "Per drempel: wat was de P&L als we de loser hadden verkocht op het moment "
+                "dat zijn mid-prijs onder die drempel zakte — in plaats van bij de trigger (~27¢)? "
+                "Winner trail blijft ongewijzigd (zelfde uitkomst). "
+                "Bied-schatting voor NO-loser via spread-model (gecalibreerd op mid=0.27→bid=0.17)."
+            )
+
+            eldf = pd.DataFrame(bt["early_loser"])
+            st.dataframe(eldf, use_container_width=True, hide_index=True)
+
+            if not eldf.empty and "Delta P&L" in eldf.columns:
+                col_delta, col_price = st.columns(2)
+                with col_delta:
+                    st.caption("Delta P&L per drempel (positief = vroeg verkopen helpt)")
+                    st.bar_chart(eldf.set_index("Loser mid drempel")[["Delta P&L"]])
+                with col_price:
+                    st.caption("Gem. loser exit prijs: vroeg vs. huidig")
+                    price_cols = [c for c in ["Gem. loser bid (vroeg)", "Gem. loser bid (huidig)"]
+                                  if c in eldf.columns]
+                    if price_cols:
+                        plot_df = eldf.set_index("Loser mid drempel")[price_cols].dropna()
+                        if not plot_df.empty:
+                            st.line_chart(plot_df)
+
+                # Recommendation: best threshold by Delta P&L
+                best = max(bt["early_loser"], key=lambda r: r.get("Delta P&L", 0))
+                if best["Delta P&L"] > 0:
+                    st.divider()
+                    st.markdown(f"**Beste drempel: loser mid ≤ {best['Loser mid drempel']}**")
+                    col_a, col_b, col_c, col_d = st.columns(4)
+                    col_a.metric("Delta P&L", f"€{best['Delta P&L']:+.4f}")
+                    col_b.metric("Gem. loser bid (vroeg)", f"{best.get('Gem. loser bid (vroeg)', 0):.3f}")
+                    col_c.metric("Gem. loser bid (huidig)", f"{best.get('Gem. loser bid (huidig)', 0):.3f}")
+                    col_d.metric("Trades vroeg exit", best["Trades vroeg exit"])
+                    early_threshold = best["Loser mid drempel"]
+                    st.info(
+                        f"Aanbevolen: verkoop de loser zodra zijn mid ≤ **{early_threshold}** (ca. "
+                        f"{best.get('Gem. loser bid (vroeg)', 0):.2f} bid). "
+                        f"Dit is te implementeren in de monitoring loop."
+                    )
+                else:
+                    st.caption("Geen drempel verbetert de P&L t.o.v. de huidige aanpak — vroeg verkopen helpt hier niet.")
 
 
 def _build_current_params() -> dict:

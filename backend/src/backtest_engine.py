@@ -79,6 +79,7 @@ class BacktestEngine:
     def __init__(self, db_path: Path = _DEFAULT_DB,
                  coin: Optional[str] = None,
                  days: Optional[int] = None):
+        self.db_path = db_path
         self.trades = self._load(db_path, coin, days)
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -351,3 +352,152 @@ class BacktestEngine:
             })
 
         return rows
+
+    # ── Early loser sell simulation ───────────────────────────────────────────
+
+    def simulate_early_loser_sell(
+        self,
+        thresholds: Optional[list[float]] = None,
+    ) -> list[dict]:
+        """Simulate selling the loser early when it first drops below each mid threshold.
+
+        Uses 30-second snapshots recorded during monitoring to replay the loser
+        price history. For each threshold, finds the first snapshot where
+        loser_mid <= threshold and estimates the sell price at that moment.
+
+        Winner exit is assumed unchanged (uses actual winner_exit_price).
+        This isolates the P&L improvement from the loser side only.
+
+        Returns one row per threshold for comparison vs. actual P&L.
+        """
+        if thresholds is None:
+            thresholds = [0.48, 0.45, 0.42, 0.40, 0.38, 0.35, 0.30]
+
+        if not self.trades:
+            return []
+
+        trade_ids = [t["trade_id"] for t in self.trades]
+        snapshots = self._load_snapshots(trade_ids)
+
+        snaps_by_trade: dict[str, list[dict]] = defaultdict(list)
+        for s in snapshots:
+            snaps_by_trade[s["trade_id"]].append(s)
+
+        rows = []
+        for threshold in thresholds:
+            sim_pnls: list[float] = []
+            actual_pnls: list[float] = []
+            n_early = 0
+            early_prices: list[float] = []
+            actual_loser_prices: list[float] = []
+
+            for t in self.trades:
+                actual_pnl = float(t.get("net_pnl") or 0.0)
+                actual_pnls.append(actual_pnl)
+
+                winner = t.get("actual_winner") or t.get("winner_side")
+                if not winner:
+                    sim_pnls.append(actual_pnl)
+                    continue
+
+                loser_is_yes = (winner == "NO")
+                base = float(t.get("entry_size") or 2.0)
+                entry_yes = float(t.get("entry_yes_price") or 0.50)
+                entry_no = float(t.get("entry_no_price") or 0.50)
+                yes_size = float(t.get("yes_size") or base)
+                no_size = float(t.get("no_size") or base)
+                winner_size = yes_size if winner == "YES" else no_size
+                loser_size = no_size if winner == "YES" else yes_size
+                winner_price = float(t.get("winner_exit_price") or 0.80)
+                fees = float(t.get("fees_paid") or 0.0)
+                actual_loser_price = float(t.get("loser_exit_price") or 0.17)
+                actual_loser_prices.append(actual_loser_price)
+
+                # Find first snapshot where loser_mid <= threshold
+                early_bid: Optional[float] = None
+                for snap in snaps_by_trade.get(t["trade_id"], []):
+                    loser_mid = snap.get("yes_mid" if loser_is_yes else "no_mid")
+                    if loser_mid is None:
+                        continue
+                    loser_mid = float(loser_mid)
+                    if loser_mid <= threshold:
+                        # YES-loser: use actual best_bid from snapshot
+                        # NO-loser: estimate from mid using spread model
+                        if loser_is_yes and snap.get("best_bid"):
+                            early_bid = float(snap["best_bid"])
+                        else:
+                            early_bid = self._estimate_loser_bid(loser_mid)
+                        break
+
+                if early_bid is not None:
+                    entry_cost = entry_yes * yes_size + entry_no * no_size
+                    sim_gross = winner_price * winner_size + early_bid * loser_size - entry_cost
+                    sim_pnls.append(sim_gross - fees)
+                    early_prices.append(early_bid)
+                    n_early += 1
+                else:
+                    sim_pnls.append(actual_pnl)
+
+            n = len(sim_pnls)
+            if n == 0:
+                continue
+
+            sim_total = sum(sim_pnls)
+            actual_total = sum(actual_pnls)
+            sim_wins = sum(1 for p in sim_pnls if p > 0)
+            rows.append({
+                "Loser mid drempel": threshold,
+                "Trades vroeg exit": n_early,
+                "Gem. loser bid (vroeg)": round(sum(early_prices) / len(early_prices), 3) if early_prices else None,
+                "Gem. loser bid (huidig)": round(sum(actual_loser_prices) / len(actual_loser_prices), 3),
+                "Totaal P&L (sim)": round(sim_total, 4),
+                "Totaal P&L (echt)": round(actual_total, 4),
+                "Delta P&L": round(sim_total - actual_total, 4),
+                "Winrate % (sim)": round(sim_wins / n * 100, 1),
+                "Max drawdown (sim)": round(self._max_drawdown(sim_pnls), 4),
+            })
+
+        return rows
+
+    def _load_snapshots(self, trade_ids: list[str]) -> list[dict]:
+        """Load all monitoring snapshots for the given trades, ordered by id."""
+        if not self.db_path.exists() or not trade_ids:
+            return []
+        import json as _json
+        placeholders = ",".join("?" * len(trade_ids))
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""SELECT trade_id, best_bid, best_ask, snapshot
+                FROM orderbook_snapshots
+                WHERE trade_id IN ({placeholders})
+                ORDER BY trade_id, id""",
+            trade_ids,
+        ).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            snap_data: dict = {}
+            try:
+                snap_data = _json.loads(r["snapshot"] or "{}")
+            except Exception:
+                pass
+            result.append({
+                "trade_id": r["trade_id"],
+                "best_bid": r["best_bid"],
+                "best_ask": r["best_ask"],
+                **snap_data,
+            })
+        return result
+
+    def _estimate_loser_bid(self, loser_mid: float) -> float:
+        """Estimate bid price from mid using an empirical spread model.
+
+        Calibrated to observed Polymarket data: at mid=0.27 the bid is ~0.17
+        (half-spread ≈ 0.10). Spread narrows as mid approaches 0.50 where
+        market makers provide tighter quotes.
+
+        Formula: half_spread = 0.04 + max(0, 0.50 - mid) * 0.26
+        """
+        half_spread = 0.04 + max(0.0, 0.50 - loser_mid) * 0.26
+        return max(0.01, round(loser_mid - half_spread, 3))
