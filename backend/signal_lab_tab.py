@@ -198,6 +198,28 @@ def _color_pnl(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     return styler
 
 
+@st.cache_data(ttl=30)
+def _cached_all_trades_csv(
+    coin: str | None,
+    days: int | None,
+    only_today: bool,
+    triggered_only: bool,
+    outcome: str | None,
+    groups_tuple: tuple,
+) -> tuple[bytes, int]:
+    """Fetch ALL filtered trades and encode as CSV bytes. Cached 30s per filter set."""
+    trades, total = export_query_trades(
+        coin=coin, days=days, only_today=only_today,
+        triggered_only=triggered_only, outcome=outcome, limit=10_000,
+    )
+    if not trades:
+        return b"", 0
+    df = _build_df(trades, set(groups_tuple))
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode("utf-8"), total
+
+
 def _export_query(
     coin: str | None,
     date_start: str | None,
@@ -206,7 +228,6 @@ def _export_query(
     outcome: str | None,
     limit: int,
 ) -> tuple[list[dict], int]:
-    """Wrapper that maps date_start/end to db_sync export_query_trades."""
     return export_query_trades(
         coin=coin,
         date_start=date_start,
@@ -260,6 +281,12 @@ def signal_lab_panel() -> None:
         st.info("Selecteer minstens één kolomgroep.")
         return
 
+    # Pre-compute full filtered CSV (cached, used for download button below)
+    _csv_bytes, _csv_total = _cached_all_trades_csv(
+        coin_filter, days_filter, only_today, triggered_only, outcome_filter,
+        tuple(sorted(active_groups)),
+    )
+
     # ── Query ─────────────────────────────────────────────────────────────────
     page = st.session_state.get("slab_page", 0)
     offset = page * _PAGE_SIZE
@@ -274,6 +301,25 @@ def signal_lab_panel() -> None:
         offset=offset,
     )
     total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+
+    # ── Download (altijd zichtbaar, haalt ALLE gefilterde trades op) ─────────
+    _dc1, _dc2 = st.columns([5, 1])
+    _dc1.caption(
+        f"⬇ Download bevat **{_csv_total}** trades die aan de filter voldoen "
+        f"(alle pagina's · actieve kolomgroepen). "
+        "NULL-waarden zijn normaal voor: niet-getriggerde trades, trades vóór Phase-1, "
+        "en afgebroken entries."
+    )
+    with _dc2:
+        st.download_button(
+            "📥 CSV",
+            data=_csv_bytes or b"",
+            file_name=f"signal_lab_{coin_filter or 'all'}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            key="slab_download_all",
+            disabled=(_csv_total == 0),
+            use_container_width=True,
+        )
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     m1, m2, m3, m4, m5, m6 = st.columns(6)
@@ -341,50 +387,6 @@ def signal_lab_panel() -> None:
     if pc3.button("Volgende ▶", disabled=(page >= total_pages - 1), key="slab_next"):
         st.session_state["slab_page"] = page + 1
         st.rerun()
-
-    # ── Quick download — same filters as the table, all pages ─────────────────
-    # Use session_state to cache CSV so st.download_button renders consistently
-    # (conditional widgets inside @st.fragment break Streamlit's widget tree).
-    _dl_filter_key = (coin_filter, range_sel, outcome_label, triggered_only, tuple(sorted(active_groups)))
-    if st.session_state.get("slab_dl_filter_key") != _dl_filter_key:
-        st.session_state.pop("slab_dl_csv", None)
-
-    st.divider()
-    qd1, qd2 = st.columns([3, 1])
-    qd1.markdown(
-        f"<span style='color:#6b7280;font-size:13px'>⬇ Download alle <b>{total}</b> trades "
-        "die aan de bovenstaande filters voldoen (geen paginering)</span>",
-        unsafe_allow_html=True,
-    )
-    if qd2.button("📥 Genereer CSV", key="slab_quick_dl", type="secondary"):
-        with st.spinner(f"Alle {total} trades ophalen..."):
-            _dl_trades, _ = export_query_trades(
-                coin=coin_filter,
-                date_start=None,
-                date_end=None,
-                triggered_only=triggered_only,
-                outcome=outcome_filter,
-                limit=10_000,
-                days=days_filter,
-                only_today=only_today,
-            )
-        _dl_df = _build_df(_dl_trades, active_groups)
-        if not _dl_df.empty:
-            _buf = io.StringIO()
-            _dl_df.to_csv(_buf, index=False)
-            st.session_state["slab_dl_csv"] = _buf.getvalue().encode("utf-8")
-            st.session_state["slab_dl_name"] = f"signal_lab_{coin_filter or 'all'}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-            st.session_state["slab_dl_count"] = len(_dl_df)
-            st.session_state["slab_dl_filter_key"] = _dl_filter_key
-
-    if st.session_state.get("slab_dl_csv"):
-        st.download_button(
-            label=f"⬇ Download {st.session_state['slab_dl_count']} rijen als CSV",
-            data=st.session_state["slab_dl_csv"],
-            file_name=st.session_state["slab_dl_name"],
-            mime="text/csv",
-            key="slab_quick_dl_btn",
-        )
 
     # ── Export ────────────────────────────────────────────────────────────────
     with st.expander("📤 Geavanceerde export — eigen filters en kolomselectie", expanded=False):
