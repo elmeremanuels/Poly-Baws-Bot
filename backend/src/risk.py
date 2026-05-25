@@ -37,6 +37,19 @@ def get_kill_reason() -> str:
     return _kill_reason
 
 
+def _enforces_daily_loss_limit(mode: str) -> bool:
+    """Whether the global daily-loss kill applies to this mode.
+
+    Only real-money modes (live_hybrid/live_auto) are subject to it. Paper modes
+    and live_learning are exempt: paper trades are simulated, and live_learning is
+    paper during learn/validate while its deploy phase has its own max_live_loss
+    circuit breaker (orchestrator._tick_deploy). get_daily_pnl() sums ALL trades
+    incl. paper, so without this exemption paper losses trip a kill that immediately
+    re-fires after every reset — making the dashboard's Resume button appear dead.
+    """
+    return not mode.startswith("paper") and mode != "live_learning"
+
+
 async def check_daily_loss_limit() -> bool:
     """Returns True if within daily loss limit. Only meaningful for live trades."""
     daily_pnl = await get_daily_pnl()
@@ -73,8 +86,7 @@ async def pre_trade_checks(coin: str, active_positions: dict[str, int],
     if is_killed():
         return False, f"kill_switch_active: {_kill_reason}"
 
-    is_paper = mode.startswith("paper")
-    if not is_paper and not await check_daily_loss_limit():
+    if _enforces_daily_loss_limit(mode) and not await check_daily_loss_limit():
         return False, "daily_loss_limit_exceeded"
 
     if not await check_daily_trade_limit():
@@ -115,7 +127,7 @@ async def risk_monitor_loop(get_active_count_fn, interval: float = 5.0) -> None:
 
             if not _killed:
                 from .state import get_mode
-                if not get_mode().startswith("paper"):
+                if _enforces_daily_loss_limit(get_mode()):
                     await check_daily_loss_limit()
         except Exception as e:
             log.error("risk_monitor_error", error=str(e))
