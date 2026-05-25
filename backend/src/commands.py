@@ -182,6 +182,24 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state(f"coin_{coin}_enabled", str(CONFIG["coins"][coin]["enabled"]))
         await save_dashboard_state(f"coin_{coin}_max", str(CONFIG["coins"][coin]["max_parallel_positions"]))
 
+    elif command == "coin_guard_enable":
+        coin = payload["coin"]
+        from . import coin_guard as _cg
+        await _cg.enable_coin(coin)
+        CONFIG["coins"][coin]["enabled"] = True
+        await save_dashboard_state(f"coin_{coin}_enabled", "True")
+        log.info("coin_guard_enabled_by_command", coin=coin)
+
+    elif command == "coin_guard_paper_gate":
+        coin = payload["coin"]
+        n = int(payload.get("n", 5))
+        from . import coin_guard as _cg
+        await _cg.enable_coin(coin)
+        _cg.start_paper_gate(coin, n)
+        CONFIG["coins"][coin]["enabled"] = True
+        await save_dashboard_state(f"coin_{coin}_enabled", "True")
+        log.info("coin_guard_paper_gate_started", coin=coin, n=n)
+
     elif command == "set_trade_size":
         eur = float(payload["trade_size_eur"])
         CONFIG["trading"]["trade_size_eur"] = eur

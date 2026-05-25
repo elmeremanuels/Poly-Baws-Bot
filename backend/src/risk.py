@@ -91,6 +91,11 @@ async def pre_trade_checks(coin: str, active_positions: dict[str, int],
     if not CONFIG["coins"].get(coin, {}).get("enabled", False):
         return False, f"coin_disabled: {coin}"
 
+    from . import coin_guard as _cg
+    if not _cg.can_enter(coin):
+        state = _cg.get_coin_state(coin)
+        return False, f"coin_guard_{state}: {coin}"
+
     return True, ""
 
 

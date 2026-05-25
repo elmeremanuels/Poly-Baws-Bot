@@ -33,6 +33,7 @@ from src.commands import write_command, delete_hybrid_pending
 from src.risk import KILL_FLAG_PATH
 from analytics_tab import analytics_panel
 from signal_lab_tab import signal_lab_panel
+from coin_protection_tab import coin_protection_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -474,6 +475,14 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
         f'<p style="color:#6b7280;font-size:12px">{count} trades</p>',
         unsafe_allow_html=True,
     )
+    # Coin guard status badge
+    _guard_state = get_state(f"cg_{coin}_state") or "active"
+    _guard_streak = get_state(f"cg_{coin}_streak") or "0"
+    if _guard_state == "disabled":
+        _guard_reason = get_state(f"cg_{coin}_reason") or ""
+        st.error(f"🚫 Guard: {_guard_reason or 'uitgeschakeld'}", icon=None)
+    elif _guard_state == "watch":
+        st.warning(f"⚠️ Watch: {_guard_streak}× verlies op rij")
 
 
 @st.dialog("Trade Details", width="large")
@@ -873,8 +882,8 @@ def _portfolio_panel() -> None:
         st.rerun()
 
 
-tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio = st.tabs(
-    ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio"]
+tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
+    ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
 )
 with tab_live:
     dashboard()
@@ -886,6 +895,8 @@ with tab_learning:
     _learning_panel()
 with tab_portfolio:
     _portfolio_panel()
+with tab_guard:
+    coin_protection_panel()
 
 # Trade detail dialog — rendered outside all fragments/tabs so it is not
 # affected by the dashboard fragment's 5-second auto-refresh.

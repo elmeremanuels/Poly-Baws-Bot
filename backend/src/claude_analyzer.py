@@ -348,3 +348,181 @@ def _parse_response(text: str) -> dict:
         gp["hold_for_resolution_mid_threshold"] = max(0.60, min(0.85, float(gp["hold_for_resolution_mid_threshold"])))
 
     return params
+
+
+# ── Per-coin strategy revision (Herzie Strategie) ────────────────────────────
+
+_COIN_SYSTEM_PROMPT = """Je bent een trading strategie optimizer voor een Polymarket 5-minuten binary opties bot.
+
+De bot koopt BEIDE kanten (YES + NO) van een 5-minuten crypto up/down markt op ~50¢.
+Wanneer één kant stijgt naar de trigger-drempel wordt de verliezende kant verkocht en
+de winnende kant wordt getraild met het peg-cross exit systeem.
+
+Break-even berekening:
+  entry_cost = (entry_yes + entry_no) × size   (typisch ~1.04/share)
+  loser bid op triggertijd ≈ mid − 10-15¢ (brede spread bij extreme prijzen)
+  break_even = (entry_cost + fees − loser_proceeds) / winner_size
+
+Parameteruitleg:
+- trigger_threshold: drempel (0.65–0.85) waarop de trade vuurrt. Hoger = sterker signaal vereist.
+- initial_offset: hoe ambitieus het eerste limiet-doel is (trigger + offset). Groter = hogere doelprijs.
+- ratchet_buffer: hoe ver boven de mid het limiet-order blijft als de prijs stijgt. Groter = geduldiger.
+- cross_threshold: peg-cross score (0–1) om van limiet naar markt te converteren. Lager = actiever uitstappen.
+- early_loser_threshold: mid-prijs waarbij de verliezende kant vroeg verkocht wordt (b.v. 0.45).
+- trigger_threshold_delta: correctie op de basis trigger_threshold voor dit regime.
+
+Geef parameter-aanbevelingen per regime (TRENDING, CHOPPY, RANGING, BREAKOUT, NORMAL).
+Antwoord ALLEEN in het gevraagde JSON formaat, geen markdown code blocks."""
+
+
+def analyze_coin_strategy_sync(coin: str, trades: list[dict]) -> dict:
+    """Sync Claude analysis for a single coin — called from Streamlit's Herzie Strategie button."""
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
+        raise ValueError("ANTHROPIC_API_KEY niet ingesteld — kan analyse niet uitvoeren")
+
+    model = CONFIG.get("claude", {}).get("model", "claude-sonnet-4-6")
+    max_tokens = CONFIG.get("claude", {}).get("max_tokens", 4096)
+
+    triggered = [t for t in trades if t.get("trigger_hit")]
+    wins = [t for t in triggered if (t.get("net_pnl") or 0) > 0]
+
+    from collections import defaultdict
+    by_regime: dict = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0})
+    for t in triggered:
+        r = t.get("regime_at_entry") or "NORMAL"
+        by_regime[r]["n"] += 1
+        by_regime[r]["pnl"] += t.get("net_pnl") or 0
+        if (t.get("net_pnl") or 0) > 0:
+            by_regime[r]["wins"] += 1
+
+    by_exit: dict = defaultdict(lambda: {"n": 0, "pnl": 0.0})
+    for t in triggered:
+        e = t.get("winner_exit_reason") or "unknown"
+        by_exit[e]["n"] += 1
+        by_exit[e]["pnl"] += t.get("net_pnl") or 0
+
+    loser_ps = [t["loser_exit_price"] for t in triggered if t.get("loser_exit_price") is not None]
+    winner_ps = [t["winner_exit_price"] for t in triggered if t.get("winner_exit_price") is not None]
+    be_ps = [t["break_even_price"] for t in triggered if t.get("break_even_price") is not None]
+    conv_scores = [t["conviction_score_at_trigger"] for t in triggered
+                   if t.get("conviction_score_at_trigger") is not None]
+    early_sells = [t for t in triggered if t.get("early_loser_side")]
+
+    coin_cfg = CONFIG.get("coins", {}).get(coin, {})
+    exit_cfg = CONFIG.get("exit", {})
+    trading_cfg = CONFIG.get("trading", {})
+
+    regime_lines = "\n".join(
+        f"  {r}: {d['n']} trades, {d['wins']/max(d['n'],1)*100:.1f}% win, "
+        f"gem. P&L €{d['pnl']/max(d['n'],1):.4f}, totaal €{d['pnl']:.2f}"
+        for r, d in sorted(by_regime.items())
+    )
+    exit_lines = "\n".join(
+        f"  {e}: {d['n']}× (gem. €{d['pnl']/max(d['n'],1):.4f})"
+        for e, d in sorted(by_exit.items(), key=lambda x: -x[1]["n"])
+    )
+
+    stats_text = f"""
+COIN: {coin}
+Analyse periode: {len(trades)} trades totaal, {len(triggered)} getriggerd
+Win rate: {len(wins)/max(len(triggered),1)*100:.1f}% ({len(wins)}/{len(triggered)})
+Totaal P&L: €{sum(t.get("net_pnl") or 0 for t in triggered):.2f}
+Gem. P&L per getriggerde trade: €{sum(t.get("net_pnl") or 0 for t in triggered)/max(len(triggered),1):.4f}
+Gem. loser exit prijs: {f"{sum(loser_ps)/len(loser_ps):.3f}" if loser_ps else "n.v.t."} (incl. spread)
+Gem. winner exit prijs: {f"{sum(winner_ps)/len(winner_ps):.3f}" if winner_ps else "n.v.t."}
+Gem. break-even prijs: {f"{sum(be_ps)/len(be_ps):.3f}" if be_ps else "n.v.t."}
+Gem. conviction score bij trigger: {f"{sum(conv_scores)/len(conv_scores):.3f}" if conv_scores else "n.v.t."}
+Vroeg loser verkopen (early sell): {len(early_sells)} trades
+
+RESULTATEN PER REGIME:
+{regime_lines}
+
+EXIT REDENEN:
+{exit_lines}
+
+HUIDIGE PARAMETERS VOOR {coin}:
+  trigger_threshold: {coin_cfg.get("trigger_threshold", trading_cfg.get("trigger_threshold", 0.73))}
+  initial_offset: {coin_cfg.get("initial_offset", exit_cfg.get("initial_offset", 0.07))}
+  ratchet_buffer: {coin_cfg.get("ratchet_buffer", exit_cfg.get("ratchet_buffer", 0.03))}
+  cross_threshold: {coin_cfg.get("cross_threshold", exit_cfg.get("cross_threshold", 0.72))}
+  early_loser_threshold: {exit_cfg.get("early_loser_threshold", 0.45)} (globaal)
+
+HUIDIGE REGIME PROFIELEN:
+{json.dumps({k: v for k, v in CONFIG.get("regime_profiles", {}).items()}, indent=2)}
+"""
+
+    schema = """{
+  "coin": "TICKER",
+  "performance_summary": "2-3 zinnen samenvatting in het Nederlands",
+  "key_issues": ["probleem 1 in Nederlands", "probleem 2"],
+  "regime_specific": {
+    "TRENDING": {
+      "assessment": "Korte beoordeling in Nederlands",
+      "suggested_params": {
+        "trigger_threshold_delta": 0.0,
+        "initial_offset": 0.07,
+        "early_loser_threshold": 0.45,
+        "cross_threshold": 0.72
+      }
+    },
+    "CHOPPY": {"assessment": "...", "suggested_params": {}},
+    "RANGING": {"assessment": "...", "suggested_params": {}},
+    "BREAKOUT": {"assessment": "...", "suggested_params": {}},
+    "NORMAL": {"assessment": "...", "suggested_params": {}}
+  },
+  "global_coin_params": {
+    "trigger_threshold": 0.75,
+    "ratchet_buffer": 0.03
+  },
+  "confidence": 0.70,
+  "reasoning": "3-5 zinnen volledige redenering in het Nederlands"
+}"""
+
+    user_prompt = (
+        f"{stats_text.strip()}\n\n"
+        "Analyseer deze data en geef een herziene handelsstrategie voor dit coin. "
+        f"Return exact dit JSON schema:\n{schema}"
+    )
+
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(
+            _CLAUDE_URL,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "prompt-caching-2024-07-31",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "system": [
+                    {
+                        "type": "text",
+                        "text": _COIN_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["content"][0]["text"]
+
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", content)
+        result = json.loads(m.group()) if m else {
+            "performance_summary": content[:500],
+            "key_issues": [],
+            "regime_specific": {},
+            "global_coin_params": {},
+            "confidence": 0.0,
+            "reasoning": content,
+        }
+
+    log.info("coin_strategy_analysis_done", coin=coin,
+             confidence=result.get("confidence", 0), n_trades=len(triggered))
+    return result

@@ -1005,6 +1005,21 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
         except Exception:
             pass  # never block trade close on adaptive errors
 
+    # Coin guard: track result, handle watch/disable state changes
+    try:
+        from . import coin_guard as _cg
+        from .db_sync import get_daily_pnl as _sync_daily_pnl
+        from .logger import save_dashboard_state as _save_state
+        _paper = trade.get("mode", "").startswith("paper")
+        _daily = _sync_daily_pnl(coin)
+        _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
+        if _new_state == "disabled":
+            CONFIG["coins"][coin]["enabled"] = False
+            await _save_state(f"coin_{coin}_enabled", "False")
+            asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
+    except Exception:
+        pass  # never block trade close on guard errors
+
     await persist_trade(trade_id)
     await write_event(trade_id, "trade_closed", trade["coin"], {
         "reason": reason, "net_pnl": net_pnl, "fill_price": fill_price
@@ -1014,6 +1029,29 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     log.info("trade_closed", trade_id=trade_id, reason=reason, net_pnl=net_pnl)
     if broadcast_fn:
         await broadcast_fn({"event": "trade_closed", "trade_id": trade_id, "reason": reason, "net_pnl": net_pnl})
+
+
+async def _cancel_coin_pending_entries(coin: str, broadcast_fn=None) -> None:
+    """Cancel pending (not-yet-filled) entry orders for a coin when the guard disables it."""
+    from .state import get_active_trades, persist_trade as _persist, remove_active_trade
+    trades = get_active_trades()
+    for tid, t in list(trades.items()):
+        if t.get("coin") != coin or t.get("status") != "pending":
+            continue
+        for oid_field in ("yes_order_id", "no_order_id"):
+            oid = t.get(oid_field)
+            if oid:
+                try:
+                    await orders.cancel_order(oid)
+                except Exception:
+                    pass
+        update_trade_field(tid, "status", "aborted")
+        update_trade_field(tid, "notes", "cancelled: coin_disabled_by_guard")
+        await _persist(tid)
+        remove_active_trade(tid)
+        log.warning("pending_entry_cancelled_by_guard", trade_id=tid, coin=coin)
+        if broadcast_fn:
+            await broadcast_fn({"event": "coin_guard_disabled", "coin": coin, "trade_id": tid})
 
 
 async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
@@ -1035,6 +1073,24 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
     update_trade_field(trade_id, "gross_pnl", gross_pnl)
     update_trade_field(trade_id, "net_pnl", net_pnl)
     update_trade_field(trade_id, "status", "resolved")
+
+    # Coin guard: resolutions count as wins (full $1.00 payout)
+    try:
+        from . import coin_guard as _cg
+        from .db_sync import get_daily_pnl as _sync_daily_pnl
+        from .logger import save_dashboard_state as _save_state
+        _paper = trade.get("mode", "").startswith("paper")
+        coin = trade.get("coin", "")
+        if coin:
+            _daily = _sync_daily_pnl(coin)
+            _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
+            if _new_state == "disabled":
+                CONFIG["coins"][coin]["enabled"] = False
+                await _save_state(f"coin_{coin}_enabled", "False")
+                asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
+    except Exception:
+        pass
+
     await persist_trade(trade_id)
     remove_active_trade(trade_id)
     await write_event(trade_id, "resolution", trade["coin"], {"net_pnl": net_pnl})
