@@ -127,6 +127,11 @@ def create_trade_state(
         "liq_proxy_at_trigger": None,
         "conviction_at_trigger": None,
         "conviction_score_at_trigger": None,
+        # Early loser sell (monitoring phase)
+        "early_loser_side": None,       # "YES"/"NO" once early sell fills
+        "early_loser_price": None,      # fill price of the early sell
+        "early_loser_ts": None,
+        "early_loser_rebought": False,  # True if re-bought after wrong-side early sell
     }
     return state
 
@@ -178,6 +183,7 @@ async def persist_trade(trade_id: str) -> None:
         "conviction_at_entry", "conviction_score_at_entry",
         "ofi_at_trigger", "funding_rate_at_trigger", "liq_proxy_at_trigger",
         "conviction_at_trigger", "conviction_score_at_trigger",
+        "early_loser_side", "early_loser_price", "early_loser_ts", "early_loser_rebought",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)

@@ -2,13 +2,33 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from . import ws_client, paper_trader
+from . import orders, ws_client, paper_trader
 from .config_loader import CONFIG
 from .logger import log, write_event, write_snapshot
-from .state import get_active_trades, update_trade_field
+from .state import get_active_trades, update_trade_field, persist_trade
 
 _DEFAULT_TRIGGER_THRESHOLD = CONFIG["trading"]["trigger_threshold"]
 _monitoring_tasks: dict[str, asyncio.Task] = {}
+_early_sell_in_progress: set[str] = set()   # trade_ids with an early sell task running
+_rebuy_in_progress: set[str] = set()        # trade_ids with a rebuy task running
+
+
+def _get_early_thresholds(regime: str) -> tuple[float | None, float | None]:
+    """Return (early_loser_threshold, rebuy_threshold) for the given regime.
+
+    Regime-specific config overrides the global exit defaults.
+    Returns (None, None) if early loser sell is disabled for this regime.
+    """
+    profiles = CONFIG.get("regime_profiles", {})
+    regime_cfg = profiles.get(regime, {})
+    exit_cfg = CONFIG.get("exit", {})
+
+    raw_thr = regime_cfg.get("early_loser_threshold", exit_cfg.get("early_loser_threshold"))
+    raw_rebuy = regime_cfg.get("early_loser_rebuy_threshold", exit_cfg.get("early_loser_rebuy_threshold"))
+
+    if raw_thr is None:
+        return None, None
+    return float(raw_thr), float(raw_rebuy) if raw_rebuy is not None else None
 
 
 async def start_monitoring(trade_id: str, on_trigger_callback) -> None:
@@ -31,6 +51,79 @@ async def stop_monitoring(trade_id: str) -> None:
     log.info("monitor_stopped", trade_id=trade_id)
 
 
+async def _sell_early_loser_task(
+    trade_id: str,
+    loser_side: str,
+    loser_token: str,
+    loser_size: float,
+    paper: bool,
+    coin: str,
+) -> None:
+    """Market-sell the presumed loser early during monitoring phase."""
+    try:
+        if paper:
+            result = await paper_trader.simulate_market_sell(loser_token, loser_size)
+            fill_price = result.get("fill_price") or 0.30
+        else:
+            mid = ws_client.get_mid_price(loser_token) or 0.30
+            fallback = round(mid * 0.7, 2)
+            resp = await orders.place_market_order(loser_token, "SELL", loser_size)
+            fill_price = fallback
+            if resp and resp.get("order_id"):
+                for _ in range(3):
+                    await asyncio.sleep(1.0)
+                    order = await orders.get_order(resp["order_id"])
+                    if order and order.get("status") in ("MATCHED", "FILLED"):
+                        fill_price = float(order.get("average_price") or order.get("price") or fallback)
+                        break
+
+        update_trade_field(trade_id, "early_loser_side", loser_side)
+        update_trade_field(trade_id, "early_loser_price", fill_price)
+        update_trade_field(trade_id, "early_loser_ts", datetime.now(timezone.utc).isoformat())
+        await persist_trade(trade_id)
+
+        log.info("early_loser_sold", trade_id=trade_id, coin=coin,
+                 side=loser_side, fill_price=round(fill_price, 4), paper=paper)
+        await write_event(trade_id, "early_loser_sold", coin,
+                          {"side": loser_side, "fill_price": fill_price})
+    except Exception as exc:
+        log.error("early_loser_sell_error", trade_id=trade_id, error=str(exc))
+    finally:
+        _early_sell_in_progress.discard(trade_id)
+
+
+async def _rebuy_early_sold_task(
+    trade_id: str,
+    sold_side: str,
+    sold_token: str,
+    sold_size: float,
+    paper: bool,
+    coin: str,
+) -> None:
+    """Re-buy the early-sold side when it recovers — safeguard for wrong-side sells."""
+    try:
+        if paper:
+            ask = ws_client.get_best_ask(sold_token) or 0.55
+            result = await paper_trader.simulate_limit_buy(sold_token, ask, sold_size)
+            fill_price = result.get("fill_price") or ask
+        else:
+            ask = round(ws_client.get_best_ask(sold_token) or 0.55, 2)
+            resp = await orders.place_limit_order(sold_token, "BUY", ask, sold_size)
+            fill_price = ask  # limit buy at ask = immediate taker fill
+
+        update_trade_field(trade_id, "early_loser_rebought", True)
+        await persist_trade(trade_id)
+
+        log.info("early_loser_rebought", trade_id=trade_id, coin=coin,
+                 side=sold_side, fill_price=round(fill_price, 4))
+        await write_event(trade_id, "early_loser_rebought", coin,
+                          {"side": sold_side, "fill_price": fill_price})
+    except Exception as exc:
+        log.error("early_loser_rebuy_error", trade_id=trade_id, error=str(exc))
+    finally:
+        _rebuy_in_progress.discard(trade_id)
+
+
 async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
     trades = get_active_trades()
     trade = trades.get(trade_id)
@@ -51,6 +144,7 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
     snapshot_interval = 30  # seconds between snapshots
     last_snapshot = 0.0
     loop = asyncio.get_event_loop()
+    monitor_start = loop.time()  # track monitoring age for early loser cooldown
 
     while True:
         now = datetime.now(timezone.utc)
@@ -131,8 +225,73 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             await on_trigger_callback(trade_id, winner, price)
             break
 
-        # Periodic snapshot
+        # ── Early loser sell / re-buy ─────────────────────────────────────────
         now_ts = loop.time()
+        trade = get_active_trades().get(trade_id)  # refresh for latest state
+        if trade:
+            coin = trade.get("coin", "")
+            regime_label = trade.get("regime_at_entry") or "NORMAL"
+            early_thr, rebuy_thr = _get_early_thresholds(regime_label)
+            exit_cfg = CONFIG.get("exit", {})
+            cooldown = float(exit_cfg.get("early_loser_cooldown_secs", 90))
+            winner_min = float(exit_cfg.get("early_loser_winner_min", 0.57))
+
+            early_sold = trade.get("early_loser_side")
+            early_rebought = trade.get("early_loser_rebought")
+
+            if (early_thr is not None
+                    and early_sold is None
+                    and trade_id not in _early_sell_in_progress
+                    and (now_ts - monitor_start) >= cooldown):
+                # Check if one side has clearly diverged below threshold
+                yes_mid = ws_client.get_mid_price(yes_token)
+                no_mid = ws_client.get_mid_price(no_token)
+                if yes_mid and no_mid:
+                    presume_loser = None
+                    if yes_mid < early_thr and no_mid >= winner_min:
+                        presume_loser = "YES"
+                    elif no_mid < early_thr and yes_mid >= winner_min:
+                        presume_loser = "NO"
+                    if presume_loser:
+                        _early_sell_in_progress.add(trade_id)
+                        base_sz = float(trade.get("entry_size") or 2.0)
+                        loser_sz = (float(trade.get("yes_size") or base_sz)
+                                    if presume_loser == "YES"
+                                    else float(trade.get("no_size") or base_sz))
+                        loser_tok = yes_token if presume_loser == "YES" else no_token
+                        trade_mode = trade.get("mode", "paper_hybrid")
+                        is_paper = trade_mode.startswith("paper")
+                        asyncio.create_task(_sell_early_loser_task(
+                            trade_id, presume_loser, loser_tok, loser_sz, is_paper, coin
+                        ))
+                        log.info("early_loser_sell_triggered",
+                                 trade_id=trade_id, coin=coin, side=presume_loser,
+                                 yes_mid=round(yes_mid, 4), no_mid=round(no_mid, 4),
+                                 threshold=early_thr, regime=regime_label)
+
+            elif (rebuy_thr is not None
+                    and early_sold is not None
+                    and not early_rebought
+                    and trade_id not in _rebuy_in_progress):
+                # Check if the early-sold side has recovered (wrong-side safeguard)
+                sold_tok = yes_token if early_sold == "YES" else no_token
+                sold_mid = ws_client.get_mid_price(sold_tok)
+                if sold_mid and sold_mid >= rebuy_thr:
+                    _rebuy_in_progress.add(trade_id)
+                    base_sz = float(trade.get("entry_size") or 2.0)
+                    sold_sz = (float(trade.get("yes_size") or base_sz)
+                               if early_sold == "YES"
+                               else float(trade.get("no_size") or base_sz))
+                    trade_mode = trade.get("mode", "paper_hybrid")
+                    is_paper = trade_mode.startswith("paper")
+                    asyncio.create_task(_rebuy_early_sold_task(
+                        trade_id, early_sold, sold_tok, sold_sz, is_paper, coin
+                    ))
+                    log.info("early_loser_rebuy_triggered",
+                             trade_id=trade_id, coin=coin, side=early_sold,
+                             sold_mid=round(sold_mid, 4), rebuy_thr=rebuy_thr)
+
+        # Periodic snapshot
         if now_ts - last_snapshot >= snapshot_interval:
             yes_mid = ws_client.get_mid_price(yes_token) if yes_token else None
             no_mid = ws_client.get_mid_price(no_token) if no_token else None

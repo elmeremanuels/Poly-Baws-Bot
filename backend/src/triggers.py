@@ -443,13 +443,58 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     log.info("executing_trigger_action", trade_id=trade_id, winner=winner, loser=loser_side,
              seconds_to_end=round(seconds_to_end, 1))
 
-    # Step 1: sell loser — try passive limit sell first (live, window not closing), fallback market
-    loser_result = await _sell_loser_with_limit(
-        loser_token, loser_size, paper, coin, trade_id, seconds_left=seconds_to_end
-    )
+    # ── Early loser sell resolution ───────────────────────────────────────────
+    early_side = trade.get("early_loser_side")
+    early_price = float(trade.get("early_loser_price") or 0.0)
+    early_rebought = trade.get("early_loser_rebought")
 
-    loser_price = loser_result.get("fill_price") or 0.30
-    loser_fees = loser_result.get("fees") or 0.0
+    if early_side and not early_rebought:
+        if early_side == loser_side:
+            # Correct: early sell captured the actual loser at a much better price
+            loser_price = early_price
+            loser_fees = 0.0
+            log.info("early_loser_confirmed_correct",
+                     trade_id=trade_id, side=early_side, fill_price=loser_price)
+        else:
+            # Wrong side: we sold the eventual winner early
+            # Sell the actual loser (still in wallet), use early fill as winner exit
+            log.warning("early_loser_was_winner",
+                        trade_id=trade_id, sold=early_side, actual_winner=winner,
+                        early_price=early_price)
+            loser_result = await _sell_loser_with_limit(
+                loser_token, loser_size, paper, coin, trade_id, seconds_left=seconds_to_end
+            )
+            loser_price = loser_result.get("fill_price") or 0.17
+            loser_fees = loser_result.get("fees") or 0.0
+            update_trade_field(trade_id, "loser_exit_price", loser_price)
+            update_trade_field(trade_id, "loser_exit_ts", datetime.now(timezone.utc).isoformat())
+            # Winner was sold early — record that price and close without trailing
+            entry_yes = trade.get("entry_yes_price") or ENTRY_PRICE
+            entry_no = trade.get("entry_no_price") or ENTRY_PRICE
+            fees_total = (trade.get("fees_paid") or 0.0) + loser_fees
+            cost = entry_yes * yes_size + entry_no * no_size + fees_total
+            proceeds = early_price * winner_size + loser_price * loser_size
+            update_trade_field(trade_id, "winner_exit_price", early_price)
+            update_trade_field(trade_id, "winner_exit_reason", "early_loser_was_winner")
+            update_trade_field(trade_id, "actual_winner", winner)
+            update_trade_field(trade_id, "fees_paid", fees_total)
+            update_trade_field(trade_id, "gross_pnl", round(proceeds - cost + fees_total, 4))
+            update_trade_field(trade_id, "net_pnl", round(proceeds - cost, 4))
+            update_trade_field(trade_id, "status", "closed")
+            await persist_trade(trade_id)
+            remove_active_trade(trade_id)
+            if broadcast_fn:
+                await broadcast_fn({"event": "trade_closed", "trade_id": trade_id,
+                                    "reason": "early_loser_was_winner"})
+            return
+    else:
+        # No early sell, or early sell was rebought (trade back to normal) — standard exit
+        loser_result = await _sell_loser_with_limit(
+            loser_token, loser_size, paper, coin, trade_id, seconds_left=seconds_to_end
+        )
+        loser_price = loser_result.get("fill_price") or 0.30
+        loser_fees = loser_result.get("fees") or 0.0
+
     update_trade_field(trade_id, "loser_exit_price", loser_price)
     update_trade_field(trade_id, "loser_exit_ts", datetime.now(timezone.utc).isoformat())
 

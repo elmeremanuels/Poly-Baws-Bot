@@ -27,6 +27,13 @@ exit:
   pre_exit_limit_bid_buffer: 0.04   # limit price = effective_bid + this (e.g. 0.17 bid → 0.21 limit)
   pre_exit_limit_timeout: 20        # seconds to wait before cancelling and doing market sell
   pre_exit_limit_min_seconds_left: 90  # skip passive limit if window expires within this many seconds
+  # Early loser sell: market-sell the declining side during monitoring (before trigger fires).
+  # Data shows bid ~0.316 at 0.45 mid vs ~0.165 at trigger — nearly double the exit price.
+  # Override per regime in regime_profiles (use null to disable for a specific regime).
+  early_loser_threshold: 0.45       # sell loser when its mid drops below this
+  early_loser_winner_min: 0.57      # other side must be above this (confirms direction)
+  early_loser_rebuy_threshold: 0.55 # rebuy if sold side recovers above this (null = disabled)
+  early_loser_cooldown_secs: 90     # wait at least this long after entry fill before selling early
 
 entry:
   max_combined_cost: 1.02      # YES ask + NO ask must be ≤ this (stricter = lower break-even)
@@ -129,23 +136,32 @@ regime_profiles:
     initial_offset: 0.08      # more ambitious target
     ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00
+    early_loser_threshold: 0.45     # sell loser early — trend will continue
+    early_loser_rebuy_threshold: null  # no rebuy in trending (direction won't reverse)
   CHOPPY:
     cross_threshold: 0.55     # aggressive exit — reversals are frequent
     initial_offset: 0.04
     ratchet_buffer: 0.02
     trigger_threshold_delta: 0.04   # raise bar — reduce false triggers
+    early_loser_threshold: 0.44     # more conservative — wait for more confirmation
+    early_loser_rebuy_threshold: 0.54  # rebuy if wrong side recovers (choppy = reversals)
   RANGING:
     cross_threshold: 0.65
     initial_offset: 0.05
     ratchet_buffer: 0.025
     trigger_threshold_delta: 0.02
+    early_loser_threshold: null     # disabled — mean reversion likely (both return to 0.50)
   BREAKOUT:
     cross_threshold: 0.72
     initial_offset: 0.04      # lower target — capture the fast initial spike
     ratchet_buffer: 0.02
     trigger_threshold_delta: -0.02  # lower bar — fire earlier on explosive moves
+    early_loser_threshold: 0.46     # sell early — breakout won't reverse
+    early_loser_rebuy_threshold: null
   NORMAL:
     cross_threshold: 0.72
     initial_offset: 0.07
     ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00
+    early_loser_threshold: 0.45
+    early_loser_rebuy_threshold: 0.55
