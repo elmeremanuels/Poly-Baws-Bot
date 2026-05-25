@@ -867,6 +867,31 @@ def get_conviction_threshold_sweep(
     return results
 
 
+def get_directional_stats(
+    coin: str | None = None, days: int | None = None, only_today: bool = False
+) -> list[dict]:
+    """Win rate + P&L grouped by entry_type (directional vs straddle)."""
+    if not _db_path.exists():
+        return []
+    where, params = _signal_where(coin, days, only_today)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                COALESCE(entry_type, 'straddle') AS entry_type,
+                COUNT(*) AS n,
+                ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                ROUND(AVG(net_pnl), 4) AS avg_net_pnl,
+                ROUND(SUM(net_pnl), 4) AS total_pnl,
+                ROUND(AVG(CASE WHEN winner_exit_reason='directional_wrong_side' THEN 1.0 ELSE 0.0 END)*100, 1)
+                  AS wrong_side_pct
+              FROM trades WHERE {where}
+              GROUP BY entry_type
+              ORDER BY total_pnl DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
     """Recent trades from a cycle for Claude's detailed log."""
     if not _db_path.exists():

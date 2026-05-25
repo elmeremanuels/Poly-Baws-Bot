@@ -132,43 +132,34 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
                  seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
         return False
 
-    log.info("entry_starting", trade_id=trade_id, coin=coin, paper=paper)
-    await write_event(trade_id, "entry_start", coin, {"paper": paper, "size": size})
+    # ── Phase 3: Tripartite entry routing ────────────────────────────────────
+    _de_cfg = CONFIG.get("directional_entry", {})
+    _dir_enabled = _de_cfg.get("enabled", False)
+    _dir_threshold = float(_de_cfg.get("conviction_threshold", 0.70))
+    _straddle_min = float(_de_cfg.get("straddle_min_conviction", 0.0))
 
-    update_trade_field(trade_id, "entry_placed_ts", datetime.now(timezone.utc).isoformat())
-    update_trade_field(trade_id, "status", "entry_placed")
+    # Skip: conviction present but too weak for straddle
+    if _straddle_min > 0 and 0 < _conv_score < _straddle_min:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "conviction_too_low_skip")
+        update_trade_field(trade_id, "entry_type", "skipped")
+        update_trade_field(trade_id, "winner_exit_reason", "conviction_skip")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("entry_skip_low_conviction", trade_id=trade_id,
+                 score=round(_conv_score, 3), min_required=_straddle_min)
+        return False
 
-    if paper:
-        yes_ask = ws_client.get_best_ask(yes_token) or ENTRY_PRICE
-        no_ask = ws_client.get_best_ask(no_token) or ENTRY_PRICE
-        yes_result, no_result = await asyncio.gather(
-            paper_trader.simulate_limit_buy(yes_token, yes_ask, yes_size),
-            paper_trader.simulate_limit_buy(no_token, no_ask, no_size),
+    # Directional: high conviction + known direction
+    if _dir_enabled and _conv_dir and _conv_score >= _dir_threshold:
+        update_trade_field(trade_id, "entry_type", "directional")
+        return await _execute_directional_entry(
+            trade_id, _conv_dir, paper, cutoff_time, broadcast_fn
         )
-        if not yes_result["filled"] or not no_result["filled"]:
-            log.warning("entry_limit_fill_failed", trade_id=trade_id,
-                        yes_filled=yes_result["filled"], no_filled=no_result["filled"],
-                        yes_ask=yes_ask, no_ask=no_ask)
-    else:
-        yes_ask = round(ws_client.get_best_ask(yes_token) or ENTRY_PRICE, 2)
-        no_ask = round(ws_client.get_best_ask(no_token) or ENTRY_PRICE, 2)
-        yes_resp, no_resp = await asyncio.gather(
-            orders.place_limit_order(yes_token, "BUY", yes_ask, yes_size),
-            orders.place_limit_order(no_token, "BUY", no_ask, no_size),
-        )
-        if yes_resp:
-            update_trade_field(trade_id, "yes_order_id", yes_resp["order_id"])
-        if no_resp:
-            update_trade_field(trade_id, "no_order_id", no_resp["order_id"])
 
-        yes_result = await _poll_live_fill(yes_resp["order_id"] if yes_resp else None, cutoff_time)
-        no_result = await _poll_live_fill(no_resp["order_id"] if no_resp else None, cutoff_time)
-
-    yes_filled = yes_result.get("filled", False)
-    no_filled = no_result.get("filled", False)
-
-    await _handle_fill_results(trade_id, yes_filled, no_filled, yes_result, no_result, paper, broadcast_fn)
-    return yes_filled and no_filled
+    # Straddle (default)
+    update_trade_field(trade_id, "entry_type", "straddle")
+    return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
 
 
 async def _poll_live_fill(order_id: str | None, cutoff: datetime, poll_interval: float = 2.0) -> dict:
@@ -356,6 +347,176 @@ async def _handle_fill_results(
         log.info("entry_aborted_no_fills", trade_id=trade_id)
 
 
+async def _execute_straddle_orders(
+    trade_id: str, paper: bool, cutoff_time: datetime, broadcast_fn
+) -> bool:
+    """Place YES+NO limit buy orders and wait for fills (straddle path)."""
+    trade = get_active_trades().get(trade_id)
+    if not trade:
+        return False
+    coin = trade["coin"]
+    yes_token = trade["condition_id_yes"]
+    no_token = trade["condition_id_no"]
+    yes_size = float(trade.get("yes_size") or trade.get("entry_size") or 2)
+    no_size = float(trade.get("no_size") or trade.get("entry_size") or 2)
+
+    log.info("entry_starting", trade_id=trade_id, coin=coin, paper=paper)
+    await write_event(trade_id, "entry_start", coin, {"paper": paper, "size": float(trade.get("entry_size", 2))})
+    update_trade_field(trade_id, "entry_placed_ts", datetime.now(timezone.utc).isoformat())
+    update_trade_field(trade_id, "status", "entry_placed")
+
+    if paper:
+        yes_ask = ws_client.get_best_ask(yes_token) or ENTRY_PRICE
+        no_ask = ws_client.get_best_ask(no_token) or ENTRY_PRICE
+        yes_result, no_result = await asyncio.gather(
+            paper_trader.simulate_limit_buy(yes_token, yes_ask, yes_size),
+            paper_trader.simulate_limit_buy(no_token, no_ask, no_size),
+        )
+        if not yes_result["filled"] or not no_result["filled"]:
+            log.warning("entry_limit_fill_failed", trade_id=trade_id,
+                        yes_filled=yes_result["filled"], no_filled=no_result["filled"],
+                        yes_ask=yes_ask, no_ask=no_ask)
+    else:
+        yes_ask = round(ws_client.get_best_ask(yes_token) or ENTRY_PRICE, 2)
+        no_ask = round(ws_client.get_best_ask(no_token) or ENTRY_PRICE, 2)
+        yes_resp, no_resp = await asyncio.gather(
+            orders.place_limit_order(yes_token, "BUY", yes_ask, yes_size),
+            orders.place_limit_order(no_token, "BUY", no_ask, no_size),
+        )
+        if yes_resp:
+            update_trade_field(trade_id, "yes_order_id", yes_resp["order_id"])
+        if no_resp:
+            update_trade_field(trade_id, "no_order_id", no_resp["order_id"])
+        yes_result = await _poll_live_fill(yes_resp["order_id"] if yes_resp else None, cutoff_time)
+        no_result = await _poll_live_fill(no_resp["order_id"] if no_resp else None, cutoff_time)
+
+    yes_filled = yes_result.get("filled", False)
+    no_filled = no_result.get("filled", False)
+    await _handle_fill_results(trade_id, yes_filled, no_filled, yes_result, no_result, paper, broadcast_fn)
+    return yes_filled and no_filled
+
+
+async def _execute_directional_entry(
+    trade_id: str,
+    direction: str,
+    paper: bool,
+    cutoff_time: datetime,
+    broadcast_fn,
+) -> bool:
+    """Buy only the biased side when conviction >= directional_threshold.
+
+    Lifecycle:
+      - Enter at ~50¢ (one side only — half the straddle cost)
+      - If correct direction triggers → trail winner with peg-cross to $1.00
+      - If wrong direction triggers → sell our position at market
+      - Break-even ≈ entry price; expected win P&L ≈ €0.50/share vs straddle's ~€0.30
+    Falls back to straddle on depth or pricing-model failure.
+    """
+    trade = get_active_trades().get(trade_id)
+    if not trade:
+        return False
+
+    coin = trade["coin"]
+    yes_token = trade["condition_id_yes"]
+    no_token = trade["condition_id_no"]
+    size = float(trade.get("entry_size") or 2)
+    side_name = "YES" if direction == "UP" else "NO"
+    token = yes_token if side_name == "YES" else no_token
+
+    de_cfg = CONFIG.get("directional_entry", {})
+
+    # ── Pricing model edge check (live only) ─────────────────────────────────
+    pm_cfg = de_cfg.get("pricing_model", {})
+    if pm_cfg.get("enabled", False) and not paper:
+        from . import signals as _sig
+        window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
+        t_remaining = max(10.0, (window_start - datetime.now(timezone.utc)).total_seconds() + 300.0)
+        polymarket_mid = ws_client.get_mid_price(token) or 0.50
+        edge = _sig.get_edge(coin, side_name, polymarket_mid, t_remaining)
+        min_edge = float(pm_cfg.get("min_edge", 0.04))
+        # Stamp pricing model results regardless
+        theo_yes = _sig.theoretical_price("YES", coin, t_remaining)
+        theo_no = _sig.theoretical_price("NO", coin, t_remaining)
+        update_trade_field(trade_id, "theoretical_price_yes", theo_yes)
+        update_trade_field(trade_id, "theoretical_price_no", theo_no)
+        update_trade_field(trade_id, "edge_at_entry", edge)
+        if edge is not None and edge < min_edge:
+            log.info("directional_edge_insufficient", trade_id=trade_id, coin=coin,
+                     direction=direction, edge=edge, min_edge=min_edge)
+            update_trade_field(trade_id, "entry_type", "straddle_no_edge_fallback")
+            return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
+
+    # ── Liquidity depth check (live only) ────────────────────────────────────
+    min_depth = float(de_cfg.get("min_depth_shares", 20))
+    if not paper:
+        book = ws_client.get_orderbook(token)
+        asks = sorted([(float(p), float(s)) for p, s in book.get("asks", {}).items()])
+        top3_depth = sum(s for _, s in asks[:3])
+        if top3_depth < min_depth:
+            log.info("directional_depth_insufficient", trade_id=trade_id, coin=coin,
+                     direction=direction, depth=round(top3_depth, 1), min_depth=min_depth)
+            update_trade_field(trade_id, "entry_type", "straddle_depth_fallback")
+            return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
+
+    # ── Place single-side limit buy ───────────────────────────────────────────
+    ask = round(ws_client.get_best_ask(token) or ENTRY_PRICE, 2)
+    log.info("directional_entry_starting", trade_id=trade_id, coin=coin,
+             direction=direction, side=side_name, ask=ask, size=size)
+    await write_event(trade_id, "directional_entry_start", coin,
+                      {"direction": direction, "side": side_name, "ask": ask})
+    update_trade_field(trade_id, "entry_placed_ts", datetime.now(timezone.utc).isoformat())
+    update_trade_field(trade_id, "status", "entry_placed")
+    update_trade_field(trade_id, "directional_side", side_name)
+
+    if paper:
+        result = await paper_trader.simulate_limit_buy(token, ask, size)
+    else:
+        resp = await orders.place_limit_order(token, "BUY", ask, size)
+        order_id = resp["order_id"] if resp else None
+        update_trade_field(trade_id, "yes_order_id" if side_name == "YES" else "no_order_id", order_id)
+        result = await _poll_live_fill(order_id, cutoff_time)
+
+    if not result.get("filled"):
+        if not paper:
+            oid = trade.get("yes_order_id" if side_name == "YES" else "no_order_id")
+            if oid:
+                await orders.cancel_order(oid)
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "directional_no_fill")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("directional_entry_no_fill", trade_id=trade_id)
+        return False
+
+    fill_price = result.get("fill_price", ask)
+    fees = result.get("fees", 0.0)
+
+    # The side we didn't buy has price=0 and size=0 — _close_trade P&L math works correctly
+    if side_name == "YES":
+        update_trade_field(trade_id, "entry_yes_price", fill_price)
+        update_trade_field(trade_id, "entry_no_price", 0.0)
+        update_trade_field(trade_id, "yes_size", size)
+        update_trade_field(trade_id, "no_size", 0.0)
+    else:
+        update_trade_field(trade_id, "entry_yes_price", 0.0)
+        update_trade_field(trade_id, "entry_no_price", fill_price)
+        update_trade_field(trade_id, "yes_size", 0.0)
+        update_trade_field(trade_id, "no_size", size)
+
+    update_trade_field(trade_id, "fees_paid", fees)
+    update_trade_field(trade_id, "entry_filled_ts", datetime.now(timezone.utc).isoformat())
+    update_trade_field(trade_id, "status", "monitoring")
+    await write_event(trade_id, "entry_filled_directional", coin,
+                      {"direction": direction, "side": side_name, "fill_price": fill_price, "size": size})
+    await persist_trade(trade_id)
+    log.info("directional_entry_filled", trade_id=trade_id, coin=coin,
+             side=side_name, fill_price=fill_price, size=size)
+    if broadcast_fn:
+        await broadcast_fn({"event": "entry_filled", "trade_id": trade_id})
+    await start_monitoring(trade_id, lambda tid, w, p: on_trigger(tid, w, p, broadcast_fn))
+    return True
+
+
 async def _abort_partial(trade_id: str, filled_side: str, fill_result: dict, paper: bool) -> None:
     trade = get_active_trades().get(trade_id)
     if not trade:
@@ -390,12 +551,17 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     """Called when trigger condition fires or window resolves."""
     await stop_monitoring(trade_id)
 
-    if winner == "RESOLUTION":
-        await _handle_resolution(trade_id, broadcast_fn)
-        return
-
     trade = get_active_trades().get(trade_id)
     if not trade:
+        return
+
+    # Route directional trades to their own handler (handles both trigger and resolution)
+    if trade.get("entry_type") == "directional":
+        await _on_trigger_directional(trade_id, winner, broadcast_fn)
+        return
+
+    if winner == "RESOLUTION":
+        await _handle_resolution(trade_id, broadcast_fn)
         return
 
     # Conviction gate is now enforced at entry time (execute_entry), not here.
@@ -1029,6 +1195,139 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     log.info("trade_closed", trade_id=trade_id, reason=reason, net_pnl=net_pnl)
     if broadcast_fn:
         await broadcast_fn({"event": "trade_closed", "trade_id": trade_id, "reason": reason, "net_pnl": net_pnl})
+
+
+async def _on_trigger_directional(
+    trade_id: str, winner: str, broadcast_fn
+) -> None:
+    """Handle trigger for a directional trade (only one side held).
+
+    Correct direction → trail winner with peg-cross engine.
+    Wrong direction   → market-sell our position immediately.
+    Resolution        → P&L based on which side expired in-the-money.
+    """
+    trade = get_active_trades().get(trade_id)
+    if not trade:
+        return
+
+    directional_side = trade.get("directional_side", "YES")
+    coin = trade["coin"]
+    yes_token = trade["condition_id_yes"]
+    no_token = trade["condition_id_no"]
+    our_token = yes_token if directional_side == "YES" else no_token
+    our_size = float(trade.get(
+        "yes_size" if directional_side == "YES" else "no_size"
+    ) or trade.get("entry_size") or 2)
+    entry_price = float(trade.get(
+        "entry_yes_price" if directional_side == "YES" else "entry_no_price"
+    ) or ENTRY_PRICE)
+    fees = float(trade.get("fees_paid") or 0.0)
+
+    trade_mode = trade.get("mode") or get_mode()
+    if trade_mode == "live_learning":
+        from . import learning as _learning
+        paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
+    else:
+        paper = trade_mode.startswith("paper")
+
+    window_end = trade.get("window_end_ts")
+    window_end_dt = datetime.fromisoformat(window_end).astimezone(timezone.utc) if window_end else None
+    seconds_to_end = (window_end_dt - datetime.now(timezone.utc)).total_seconds() if window_end_dt else 999.0
+
+    if winner == "RESOLUTION":
+        # Window expired — infer outcome from current mid
+        our_mid = ws_client.get_mid_price(our_token) or 0.50
+        if our_mid >= 0.50:
+            # Our side is in the money — hold for $1.00 resolution
+            net_pnl = round((1.0 - entry_price) * our_size - fees, 4)
+            update_trade_field(trade_id, "winner_exit_reason", "held_for_resolution")
+            update_trade_field(trade_id, "winner_exit_price", 1.0)
+            update_trade_field(trade_id, "actual_winner", directional_side)
+            update_trade_field(trade_id, "status", "resolved")
+        else:
+            # Our side expired worthless
+            net_pnl = round(-entry_price * our_size - fees, 4)
+            update_trade_field(trade_id, "winner_exit_reason", "directional_resolution_loss")
+            update_trade_field(trade_id, "winner_exit_price", 0.0)
+            update_trade_field(trade_id, "actual_winner",
+                               "NO" if directional_side == "YES" else "YES")
+            update_trade_field(trade_id, "status", "closed")
+        update_trade_field(trade_id, "loser_exit_price", 0.0)
+        update_trade_field(trade_id, "break_even_price",
+                           round(entry_price + fees / max(our_size, 0.01), 4))
+        update_trade_field(trade_id, "gross_pnl", round(net_pnl + fees, 4))
+        update_trade_field(trade_id, "net_pnl", net_pnl)
+        _directional_coin_guard(trade_id, coin, net_pnl, trade, broadcast_fn)
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        await write_event(trade_id, "directional_resolution", coin,
+                          {"net_pnl": net_pnl, "our_mid": our_mid})
+        log.info("directional_resolved", trade_id=trade_id, coin=coin, net_pnl=net_pnl)
+        if broadcast_fn:
+            await broadcast_fn({"event": "trade_resolved", "trade_id": trade_id})
+        return
+
+    if winner == directional_side:
+        # Correct — trail winner with peg-cross engine
+        be_price = round(entry_price + fees / max(our_size, 0.01), 4)
+        update_trade_field(trade_id, "break_even_price", be_price)
+        update_trade_field(trade_id, "loser_exit_price", 0.0)
+        update_trade_field(trade_id, "actual_winner", winner)
+        log.info("directional_correct_trigger", trade_id=trade_id, coin=coin,
+                 side=directional_side, be_price=be_price)
+        await write_event(trade_id, "directional_correct_trigger", coin,
+                          {"side": directional_side, "be_price": be_price})
+        asyncio.create_task(
+            _winner_exit_oco(trade_id, our_token, our_size, paper, broadcast_fn)
+        )
+        update_trade_field(trade_id, "status", "exiting")
+        await persist_trade(trade_id)
+        if broadcast_fn:
+            await broadcast_fn({"event": "trigger_hit", "trade_id": trade_id, "winner": winner})
+    else:
+        # Wrong direction — sell what we own at market
+        log.warning("directional_wrong_trigger", trade_id=trade_id, coin=coin,
+                    predicted=directional_side, actual_winner=winner)
+        loser_result = await _sell_loser_with_limit(
+            our_token, our_size, paper, coin, trade_id, seconds_left=seconds_to_end
+        )
+        loser_price = loser_result.get("fill_price") or 0.17
+        loser_fees = loser_result.get("fees") or 0.0
+        update_trade_field(trade_id, "actual_winner", winner)
+        update_trade_field(trade_id, "loser_exit_price", loser_price)
+        update_trade_field(trade_id, "fees_paid", fees + loser_fees)
+        await write_event(trade_id, "directional_wrong_trigger", coin,
+                          {"predicted": directional_side, "actual_winner": winner,
+                           "sell_price": loser_price})
+        # winner_exit_price = 0.0 — we don't own the winner side
+        # _close_trade handles P&L: proceeds = loser_price * our_size + 0 * 0
+        await _close_trade(trade_id, 0.0, "directional_wrong_side", broadcast_fn)
+
+
+def _directional_coin_guard(trade_id, coin, net_pnl, trade, broadcast_fn) -> None:
+    """Fire-and-forget coin guard update for directional resolution (sync wrapper)."""
+    try:
+        from . import coin_guard as _cg
+        from .db_sync import get_daily_pnl as _sync_daily_pnl
+        from .logger import save_dashboard_state as _save_state
+        _paper = trade.get("mode", "").startswith("paper")
+        _daily = _sync_daily_pnl(coin)
+        asyncio.create_task(_run_directional_guard(coin, net_pnl, _daily, _paper, broadcast_fn))
+    except Exception:
+        pass
+
+
+async def _run_directional_guard(coin, net_pnl, daily_pnl, paper, broadcast_fn) -> None:
+    try:
+        from . import coin_guard as _cg
+        from .logger import save_dashboard_state as _save_state
+        _new_state = await _cg.record_result(coin, net_pnl, daily_pnl, paper=paper)
+        if _new_state == "disabled":
+            CONFIG["coins"][coin]["enabled"] = False
+            await _save_state(f"coin_{coin}_enabled", "False")
+            asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
+    except Exception:
+        pass
 
 
 async def _cancel_coin_pending_entries(coin: str, broadcast_fn=None) -> None:

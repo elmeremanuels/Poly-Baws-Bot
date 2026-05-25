@@ -215,6 +215,12 @@ async def init_db() -> None:
             ("early_loser_price", "REAL"),
             ("early_loser_ts", "TEXT"),
             ("early_loser_rebought", "INTEGER DEFAULT 0"),
+            # Phase 3: directional entry
+            ("entry_type", "TEXT DEFAULT 'straddle'"),
+            ("directional_side", "TEXT"),
+            ("theoretical_price_yes", "REAL"),
+            ("theoretical_price_no", "REAL"),
+            ("edge_at_entry", "REAL"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

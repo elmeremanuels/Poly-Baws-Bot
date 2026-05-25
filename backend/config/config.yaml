@@ -127,6 +127,15 @@ logging:
 ab_test:
   conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
 
+directional_entry:
+  enabled: true
+  conviction_threshold: 0.70     # conviction >= this → buy only biased side (no straddle handicap)
+  straddle_min_conviction: 0.45  # conviction 0 < score < this → skip trade entirely
+  min_depth_shares: 20           # top-3 ask levels must hold >= 20 shares before going directional
+  pricing_model:
+    enabled: true
+    min_edge: 0.04               # skip directional (fall back to straddle) if |theoretical - market| < this
+
 # Learned parameter profiles per detected market regime.
 # Applied on top of global exit: config and per-coin overrides.
 # trigger_threshold_delta: added to the coin's base trigger_threshold (clamped 0.65–0.85).

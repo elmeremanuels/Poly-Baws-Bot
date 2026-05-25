@@ -345,3 +345,107 @@ async def funding_rate_loop() -> None:
                     log.debug("funding_rate_updated", coin=coin, rate=rate)
                 except Exception as e:
                     log.warning("funding_rate_poll_failed", coin=coin, error=str(e))
+
+
+# ── Pricing Model v1: Black-Scholes binary option ─────────────────────────────
+import math as _math
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF."""
+    return 0.5 * _math.erfc(-x / _math.sqrt(2))
+
+
+def get_realized_vol_1m(coin: str) -> float | None:
+    """Realized per-minute volatility from the Binance spot price buffer.
+
+    Computes std dev of consecutive log returns, scaled from the buffer's
+    native sample interval (~5s) to per-minute using sqrt(60/interval).
+    Returns None when fewer than 5 samples are available.
+    """
+    try:
+        from . import regime as _regime
+        buf = _regime._asset_prices.get(coin)
+        if not buf or len(buf) < 5:
+            return None
+        items = list(buf)
+        returns = [
+            _math.log(items[i][1] / items[i - 1][1])
+            for i in range(1, len(items))
+            if items[i - 1][1] > 0 and items[i][1] > 0
+        ]
+        if len(returns) < 4:
+            return None
+        mean_r = sum(returns) / len(returns)
+        var_r = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+        vol_per_sample = _math.sqrt(var_r)
+        # Scale from per-sample to per-minute
+        total_time = items[-1][0] - items[0][0]
+        avg_interval = total_time / max(len(items) - 1, 1)
+        return vol_per_sample * _math.sqrt(60.0 / max(1.0, avg_interval))
+    except Exception:
+        return None
+
+
+def get_recent_drift_1m(coin: str, lookback_secs: float = 300.0) -> float | None:
+    """Recent directional drift as average log-return per minute.
+
+    Uses the last lookback_secs of spot prices. Positive = uptrend.
+    """
+    try:
+        import time
+        from . import regime as _regime
+        buf = _regime._asset_prices.get(coin)
+        if not buf:
+            return None
+        now = time.time()
+        cutoff = now - lookback_secs
+        recent = [(ts, p) for ts, p in buf if ts >= cutoff]
+        if len(recent) < 3:
+            return None
+        start_p, end_p = recent[0][1], recent[-1][1]
+        elapsed_mins = (recent[-1][0] - recent[0][0]) / 60.0
+        if start_p <= 0 or end_p <= 0 or elapsed_mins < 0.1:
+            return None
+        return _math.log(end_p / start_p) / elapsed_mins
+    except Exception:
+        return None
+
+
+def theoretical_price(side: str, coin: str, t_remaining_secs: float) -> float | None:
+    """Binary option theoretical value via log-normal model.
+
+    Returns P(asset UP at window end) given current realized volatility and recent drift.
+    side="YES" → P(UP); side="NO" → P(DOWN) = 1 - P(UP).
+    Returns None when insufficient data.
+    """
+    if t_remaining_secs <= 0:
+        return None
+    vol = get_realized_vol_1m(coin)
+    if vol is None or vol < 1e-6:
+        return None
+    drift = get_recent_drift_1m(coin) or 0.0
+    t_mins = t_remaining_secs / 60.0
+    sigma_t = vol * _math.sqrt(t_mins)
+    if sigma_t < 1e-8:
+        return None
+    d = (drift * t_mins) / sigma_t
+    p_up = max(0.01, min(0.99, _norm_cdf(d)))
+    return round(p_up if side == "YES" else 1.0 - p_up, 4)
+
+
+def get_edge(
+    coin: str,
+    side: str,
+    polymarket_price: float,
+    t_remaining_secs: float,
+) -> float | None:
+    """Edge = theoretical_price - polymarket_price.
+
+    Positive means Polymarket is underpricing this outcome → confirmed buy signal.
+    Returns None when pricing model can't compute (insufficient data).
+    """
+    theo = theoretical_price(side, coin, t_remaining_secs)
+    if theo is None:
+        return None
+    return round(theo - polymarket_price, 4)
