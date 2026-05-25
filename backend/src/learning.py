@@ -119,6 +119,13 @@ class LearningOrchestrator:
         if self._started:
             return
         self._started = True
+        # Start pattern matching background task (every 30 min)
+        try:
+            from . import pattern_matcher as _pm
+            asyncio.create_task(_pm.pattern_match_loop(interval_secs=1800))
+            log.info("pattern_match_loop_started")
+        except Exception as exc:
+            log.warning("pattern_match_loop_start_failed", error=str(exc))
         # Resume existing open cycle if any
         async with _db() as db:
             db.row_factory = __import__("aiosqlite").Row

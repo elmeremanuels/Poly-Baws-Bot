@@ -182,6 +182,11 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state(f"coin_{coin}_enabled", str(CONFIG["coins"][coin]["enabled"]))
         await save_dashboard_state(f"coin_{coin}_max", str(CONFIG["coins"][coin]["max_parallel_positions"]))
 
+    elif command == "run_pattern_match":
+        from . import pattern_matcher as _pm
+        await _pm.run_pattern_backtest()
+        log.info("pattern_match_forced")
+
     elif command == "coin_guard_enable":
         coin = payload["coin"]
         from . import coin_guard as _cg

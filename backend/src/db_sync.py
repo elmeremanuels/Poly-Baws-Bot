@@ -381,11 +381,103 @@ def get_cycle_stats(cycle_id: int) -> dict:
             (cycle_id,),
         ).fetchone()
     per_coin = {dict(r)["coin"]: {k: v for k, v in dict(r).items() if k != "coin"} for r in rows}
+
+    # Enrich each coin with regime + conviction distribution within this cycle
+    for coin in per_coin:
+        try:
+            reg_rows = conn.execute(
+                """SELECT COALESCE(regime_at_entry,'UNKNOWN') AS regime,
+                          COUNT(*) n,
+                          ROUND(AVG(CASE WHEN net_pnl > 0 THEN 1.0 ELSE 0.0 END)*100,1) win_pct,
+                          ROUND(AVG(net_pnl),4) avg_pnl
+                   FROM trades WHERE cycle_id=? AND coin=? AND trigger_hit=1
+                   GROUP BY regime ORDER BY n DESC""",
+                (cycle_id, coin),
+            ).fetchall()
+            per_coin[coin]["regime_distribution"] = {
+                r["regime"]: {"n": r["n"], "win_pct": r["win_pct"], "avg_pnl": r["avg_pnl"]}
+                for r in reg_rows
+            }
+            conv_rows = conn.execute(
+                """SELECT
+                     CASE
+                       WHEN conviction_score_at_trigger IS NULL OR conviction_score_at_trigger=0 THEN 'none'
+                       WHEN conviction_score_at_trigger < 0.3 THEN 'low'
+                       WHEN conviction_score_at_trigger < 0.6 THEN 'medium'
+                       ELSE 'high'
+                     END AS bucket,
+                     COUNT(*) n,
+                     ROUND(AVG(CASE WHEN net_pnl > 0 THEN 1.0 ELSE 0.0 END)*100,1) win_pct,
+                     ROUND(AVG(net_pnl),4) avg_pnl
+                   FROM trades WHERE cycle_id=? AND coin=? AND trigger_hit=1
+                   GROUP BY bucket""",
+                (cycle_id, coin),
+            ).fetchall()
+            per_coin[coin]["conviction_distribution"] = {
+                r["bucket"]: {"n": r["n"], "win_pct": r["win_pct"], "avg_pnl": r["avg_pnl"]}
+                for r in conv_rows
+            }
+            early_row = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE cycle_id=? AND coin=? AND early_loser_side IS NOT NULL",
+                (cycle_id, coin),
+            ).fetchone()
+            per_coin[coin]["early_loser_count"] = early_row[0] if early_row else 0
+        except Exception:
+            pass  # never break existing cycle stats on enrichment errors
+
     return {
         "per_coin": per_coin,
         "total_trades": total[0] if total else 0,
         "overall_avg_pnl": total[1] if total else None,
     }
+
+
+def get_pattern_stats(
+    coin: str | None = None,
+    days: int | None = 90,
+) -> list[dict]:
+    """Historical trade outcomes grouped by (regime, conviction_bucket, ofi_bucket).
+
+    Used by pattern_matcher to find how trades fared under similar conditions.
+    """
+    if not _db_path.exists():
+        return []
+    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
+    params: list = []
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                  COALESCE(regime_at_entry, 'NORMAL') AS regime,
+                  CASE
+                    WHEN conviction_score_at_trigger IS NULL OR conviction_score_at_trigger = 0 THEN 'none'
+                    WHEN conviction_score_at_trigger < 0.3 THEN 'low'
+                    WHEN conviction_score_at_trigger < 0.6 THEN 'medium'
+                    ELSE 'high'
+                  END AS conviction_bucket,
+                  CASE
+                    WHEN ofi_at_trigger IS NULL THEN 'unknown'
+                    WHEN ofi_at_trigger <= 0.40 THEN 'bear'
+                    WHEN ofi_at_trigger >= 0.60 THEN 'bull'
+                    ELSE 'neutral'
+                  END AS ofi_bucket,
+                  COUNT(*) AS n,
+                  ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                  ROUND(AVG(net_pnl), 4) AS avg_pnl,
+                  ROUND(SUM(net_pnl), 4) AS total_pnl,
+                  ROUND(AVG(loser_exit_price), 3) AS avg_loser_price
+                FROM trades WHERE {where}
+                GROUP BY regime, conviction_bucket, ofi_bucket
+                ORDER BY n DESC""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_latest_snapshot_for_trade(trade_id: str) -> dict | None:

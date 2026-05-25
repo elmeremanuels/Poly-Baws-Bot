@@ -81,10 +81,16 @@ Suggest adjusted thresholds per coin based on its detected regime.
 Respond with ONLY a JSON object. No markdown fences, no explanation outside the JSON."""
 
 
-def _build_prompt(trades: list, stats: dict, current_params: dict,
-                  adaptive_stats: dict | None = None,
-                  pnl_accuracy: dict | None = None,
-                  regime_stats: dict | None = None) -> str:
+def _build_prompt(
+    trades: list,
+    stats: dict,
+    current_params: dict,
+    adaptive_stats: dict | None = None,
+    pnl_accuracy: dict | None = None,
+    regime_stats: dict | None = None,
+    conviction_bucket_stats: dict | None = None,
+    pattern_context: str | None = None,
+) -> str:
     payload: dict = {
         "cycle_stats": stats,
         "current_params": current_params,
@@ -93,7 +99,9 @@ def _build_prompt(trades: list, stats: dict, current_params: dict,
             "Analyze and return optimized parameters. "
             "Confidence < 0.6 means stay in paper mode for another cycle. "
             "If pnl_accuracy_ratio is far from 1.0, reduce confidence score accordingly — "
-            "the computed data may not reflect reality."
+            "the computed data may not reflect reality. "
+            "cycle_stats now includes per-coin regime_distribution and conviction_distribution — "
+            "use these to calibrate regime-specific params in the response."
         ),
     }
     if adaptive_stats:
@@ -102,6 +110,10 @@ def _build_prompt(trades: list, stats: dict, current_params: dict,
         payload["pnl_accuracy"] = pnl_accuracy
     if regime_stats:
         payload["regime_stats"] = regime_stats
+    if conviction_bucket_stats:
+        payload["conviction_bucket_stats_alltime"] = conviction_bucket_stats
+    if pattern_context:
+        payload["current_market_pattern_vs_history"] = pattern_context
     return json.dumps(payload, indent=2)
 
 
@@ -175,6 +187,31 @@ async def analyze_cycle(cycle_id: int) -> dict:
     except Exception:
         regime_stats = None
 
+    # Conviction bucket stats (all-time per coin — broader than cycle-only data)
+    conviction_bucket_stats: dict | None = None
+    try:
+        from .db_sync import get_conviction_bucket_stats as _cbs
+        conviction_bucket_stats = {
+            coin: _cbs(coin=coin, days=30)
+            for coin in CONFIG.get("coins", {})
+        }
+    except Exception:
+        pass
+
+    # Pattern matching context (current conditions vs historical outcomes)
+    pattern_context: str | None = None
+    try:
+        from . import pattern_matcher as _pm
+        pm_results = _pm.get_last_results()
+        if pm_results:
+            pattern_context = _pm.build_pattern_context_for_prompt(pm_results)
+        else:
+            # Compute on-the-fly if no cached results
+            pm_results = _pm.run_pattern_backtest_sync()
+            pattern_context = _pm.build_pattern_context_for_prompt(pm_results)
+    except Exception:
+        pass
+
     schema = """{
   "confidence_score": 0.0-1.0,
   "reasoning": "...",
@@ -197,7 +234,12 @@ async def analyze_cycle(cycle_id: int) -> dict:
 }"""
 
     user_prompt = (
-        _build_prompt(trades, stats, current_params, adaptive_stats, pnl_accuracy, regime_stats)
+        _build_prompt(
+            trades, stats, current_params,
+            adaptive_stats, pnl_accuracy, regime_stats,
+            conviction_bucket_stats=conviction_bucket_stats,
+            pattern_context=pattern_context,
+        )
         + f"\n\nReturn this exact JSON structure:\n{schema}"
     )
 
@@ -275,8 +317,21 @@ def analyze_trades_sync(trades: list[dict], current_params: dict) -> dict:
   "global_params": {"max_entry_cost": float, "max_token_spread": float}
 }"""
 
+    # Pattern context for manual analysis too
+    pattern_context_sync: str | None = None
+    try:
+        from . import pattern_matcher as _pm
+        pm_results = _pm.get_last_results() or _pm.run_pattern_backtest_sync()
+        pattern_context_sync = _pm.build_pattern_context_for_prompt(pm_results)
+    except Exception:
+        pass
+
     sample = trades[-50:] if len(trades) > 50 else trades
-    user_prompt = _build_prompt(sample, stats, current_params, adaptive_stats) + f"\n\nReturn this exact JSON structure:\n{schema}"
+    user_prompt = (
+        _build_prompt(sample, stats, current_params, adaptive_stats,
+                      pattern_context=pattern_context_sync)
+        + f"\n\nReturn this exact JSON structure:\n{schema}"
+    )
 
     with httpx.Client(timeout=120) as client:
         resp = client.post(

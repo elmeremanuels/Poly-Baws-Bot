@@ -753,6 +753,71 @@ def _learning_panel() -> None:
         except Exception:
             pass
 
+    # ── Pattern Matching ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🎯 Patroonherkenning")
+    st.caption(
+        "Elke 30 minuten vergelijkt de bot de huidige marktomstandigheden "
+        "(regime, conviction, OFI) met historische trades onder dezelfde condities. "
+        "Dit geeft een verwacht win%-resultaat voor de lopende markten."
+    )
+
+    try:
+        from src.pattern_matcher import get_last_results, get_last_ts, build_pattern_context_for_prompt
+        pm_results = get_last_results()
+        pm_ts = get_last_ts()
+    except Exception:
+        pm_results, pm_ts = {}, ""
+
+    if pm_ts:
+        try:
+            _pm_age = (datetime.now(timezone.utc) - datetime.fromisoformat(pm_ts)).total_seconds() / 60
+            st.caption(f"Laatste run: {_to_local(pm_ts).strftime('%d-%m %H:%M')} ({_pm_age:.0f} min geleden)")
+        except Exception:
+            st.caption(f"Laatste run: {pm_ts[:16]}")
+    else:
+        st.caption("Nog niet uitgevoerd (start bij eerste deploy).")
+
+    col_pm_run, _ = st.columns([1, 3])
+    with col_pm_run:
+        if st.button("▶ Voer nu uit", key="run_pm_now"):
+            write_command("run_pattern_match")
+            st.toast("Patroonherkenning aangevraagd...", icon="🎯")
+
+    if pm_results:
+        pm_rows = []
+        for coin, data in pm_results.items():
+            fp = data.get("fingerprint", {})
+            m  = data.get("match", {})
+            win_pct = m.get("win_pct")
+            avg_pnl = m.get("avg_pnl")
+            pm_rows.append({
+                "Coin":   f"{COIN_EMOJI.get(coin,'')} {coin}",
+                "Regime": fp.get("regime", "?"),
+                "Conviction": fp.get("conviction_bucket", "?"),
+                "OFI":    fp.get("ofi_bucket", "?"),
+                "Hist. win%": f"{win_pct:.1f}%" if win_pct is not None else "—",
+                "Hist. P&L": f"€{avg_pnl:+.4f}" if avg_pnl is not None else "—",
+                "Steekproef": m.get("n", "—"),
+                "Match":  m.get("match_quality", "—"),
+            })
+        st.dataframe(pd.DataFrame(pm_rows), hide_index=True, use_container_width=True)
+
+        # Visual alert for poor historical patterns
+        bad_coins = [
+            f"{COIN_EMOJI.get(c,'')} {c} ({r.get('match',{}).get('win_pct',0):.1f}%)"
+            for c, r in pm_results.items()
+            if r.get("match", {}).get("win_pct", 100) < 52
+            and r.get("match", {}).get("n", 0) >= 10
+        ]
+        if bad_coins:
+            st.warning(
+                f"⚠️ Historisch zwakke condities: {', '.join(bad_coins)}. "
+                "Overweeg trigger_threshold tijdelijk te verhogen of coin te pauzeren."
+            )
+    else:
+        st.caption("Geen patroondata beschikbaar.")
+
     # Control buttons
     st.markdown("---")
     st.markdown("**Handmatige bediening**")
