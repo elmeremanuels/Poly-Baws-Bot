@@ -53,6 +53,20 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "conviction_at_entry", _conv_dir)
     update_trade_field(trade_id, "conviction_score_at_entry", _conv_score)
 
+    # ── Conviction gate — check BEFORE placing any orders ────────────────────
+    # Checking at trigger time (old design) was wrong: entry costs are already
+    # paid by then. Check here so no orders are placed when signal is too weak.
+    _ab_threshold = float(CONFIG.get("ab_test", {}).get("conviction_threshold", 0.0))
+    if _ab_threshold > 0 and _conv_score < _ab_threshold:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "conviction_below_threshold")
+        update_trade_field(trade_id, "winner_exit_reason", "conviction_skip")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("entry_conviction_skip", trade_id=trade_id,
+                 score=round(_conv_score, 3), threshold=_ab_threshold)
+        return False
+
     # ── Stamp regime at entry ─────────────────────────────────────────────────
     from .logger import get_recent_trades as _get_recent_trades
     _recent_trades = await _get_recent_trades(50)
@@ -317,25 +331,9 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     if not trade:
         return
 
-    # A/B gate — skip actual exit if conviction is below threshold (configurable).
-    # Set ab_test.conviction_threshold > 0 in config.yaml to activate.
-    _ab_threshold = float(CONFIG.get("ab_test", {}).get("conviction_threshold", 0.0))
-    if _ab_threshold > 0:
-        _score = float(trade.get("conviction_score_at_trigger") or 0.0)
-        _direction = trade.get("conviction_at_trigger")
-        if _score < _ab_threshold or _direction is None:
-            update_trade_field(trade_id, "ab_group", "B_skip")
-            update_trade_field(trade_id, "winner_exit_reason", "conviction_skip")
-            update_trade_field(trade_id, "status", "closed")
-            update_trade_field(trade_id, "net_pnl", 0.0)
-            await persist_trade(trade_id)
-            remove_active_trade(trade_id)
-            log.info("ab_conviction_skip", trade_id=trade_id,
-                     score=_score, threshold=_ab_threshold, direction=_direction)
-            return
-        update_trade_field(trade_id, "ab_group", "B_trade")
-    else:
-        update_trade_field(trade_id, "ab_group", "A")
+    # Conviction gate is now enforced at entry time (execute_entry), not here.
+    # Trades that reach on_trigger always proceed to exit.
+    update_trade_field(trade_id, "ab_group", "A")
 
     # Use the mode stored at trade creation time so a mode change mid-trade
     # doesn't switch between paper/live execution.
