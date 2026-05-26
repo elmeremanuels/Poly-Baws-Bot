@@ -23,6 +23,8 @@ def _conn() -> sqlite3.Connection:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_analytics ON trades(status, trigger_hit, coin, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(event_type, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hybrid_window ON hybrid_pending(window_start)")
         _indexes_created = True
     return conn
 

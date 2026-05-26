@@ -348,11 +348,12 @@ with st.sidebar:
 def dashboard() -> None:
     _scanner_alerts()
     _hybrid_panel()
-    _coin_grid()
+    open_trades = get_open_trades()
+    _coin_grid(open_trades)
     st.divider()
     col_left, col_right = st.columns(2)
     with col_left:
-        _active_positions()
+        _active_positions(open_trades)
     with col_right:
         _recent_trades()
 
@@ -421,9 +422,10 @@ def _hybrid_panel() -> None:
                 st.toast(f"Entry triggered: {coin} {w_start}", icon="🚀")
 
 
-def _coin_grid() -> None:
+def _coin_grid(open_trades: list | None = None) -> None:
     st.markdown("### Coins")
-    open_trades = get_open_trades()
+    if open_trades is None:
+        open_trades = get_open_trades()
     online = bot_is_online()
     cols = st.columns(5)
     for i, coin in enumerate(COINS):
@@ -574,9 +576,9 @@ def _trade_detail_dialog(trade: dict) -> None:
         st.caption(f"NO token: `{no_token[:24]}…`")
 
 
-def _active_positions() -> None:
+def _active_positions(open_trades: list | None = None) -> None:
     st.markdown("#### Active Positions")
-    trades = get_open_trades()
+    trades = open_trades if open_trades is not None else get_open_trades()
     if not trades:
         st.caption("No active positions.")
         return
@@ -877,7 +879,10 @@ def _learning_panel() -> None:
     with col_pm_run:
         if st.button("▶ Voer nu uit", key="run_pm_now"):
             write_command("run_pattern_match")
-            st.toast("Patroonherkenning aangevraagd...", icon="🎯")
+            with st.spinner("Patroonanalyse wordt uitgevoerd..."):
+                import time as _time
+                _time.sleep(3)
+            st.rerun()
 
     if pm_results:
         pm_rows = []
