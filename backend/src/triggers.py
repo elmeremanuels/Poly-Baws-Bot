@@ -16,7 +16,9 @@ ENTRY_PRICE = TRADING_CFG["entry_price_target"]
 MAX_DEV = TRADING_CFG["entry_price_max_deviation"]
 CUTOFF_MIN = TRADING_CFG["entry_cutoff_minutes_before_window"]
 
-_scalein_done_trades: set[str] = set()  # trade_ids where winner dip scale-in has already fired
+_SCALEIN_TRANCHES = 5            # split the scale-in budget into this many buys
+_SCALEIN_MIN_EUR = 5.0           # minimum total scale-in budget when enabled
+_scalein_state: dict[str, dict] = {}  # trade_id -> {count, ref_high, cycle_low}
 
 
 def _get_trigger_threshold(coin: str) -> float:
@@ -963,23 +965,39 @@ async def _winner_exit_paper(
                 await _close_trade(trade_id, result.get("fill_price"), "winner_velocity_stop", broadcast_fn)
                 return
 
-            # Scale-in on winner dip: buy more shares when price dips from peak but stays profitable
+            # Scale-in on confirmed dip recovery: average into the winner across up to
+            # _SCALEIN_TRANCHES buys. Each tranche fires only after a ≥6¢ dip from a
+            # local high that then bounces ≥2¢ off its low — never a falling knife.
+            # TRENDING/NORMAL only; RANGING untouched, CHOPPY/BREAKOUT too erratic.
             _scalein_budget = float(CONFIG["trading"].get("max_scalein_eur", 0.0))
-            _scalein_size = round(_scalein_budget / mid, 2) if mid > 0 else 0
+            if _scalein_budget > 0.0:
+                _scalein_budget = max(_SCALEIN_MIN_EUR, _scalein_budget)  # enforce €5 minimum
+            _tranche_size = round((_scalein_budget / _SCALEIN_TRANCHES) / mid, 2) if mid > 0 else 0
+            _sc = _scalein_state.setdefault(trade_id, {"count": 0, "ref_high": mid, "cycle_low": mid})
+            if mid > _sc["ref_high"]:            # new local high → start a fresh dip cycle
+                _sc["ref_high"] = mid
+                _sc["cycle_low"] = mid
+            if mid < _sc["cycle_low"]:
+                _sc["cycle_low"] = mid
+            _dip = _sc["ref_high"] - _sc["cycle_low"]   # depth of the current dip
+            _bounce = mid - _sc["cycle_low"]            # recovery off the local low
             if (_scalein_budget > 0.0
-                    and trade_regime in ("TRENDING", "NORMAL")  # RANGING onaangeroerd; CHOPPY/BREAKOUT te grillig
-                    and trade_id not in _scalein_done_trades
+                    and trade_regime in ("TRENDING", "NORMAL")
+                    and _sc["count"] < _SCALEIN_TRANCHES
                     and break_even_price is not None
-                    and peak_mid - mid >= 0.06       # genuine dip from peak
+                    and _dip >= 0.06                   # genuine dip from local high
+                    and _bounce >= 0.02                # recovery confirmed off the low
                     and mid > break_even_price + 0.02  # still profitable to add
                     and phase == "patient"
                     and seconds_left > 120
-                    and _scalein_size >= 0.10):
-                _scalein_done_trades.add(trade_id)
-                si_result = await paper_trader.simulate_market_buy(winner_token, _scalein_size)
+                    and _tranche_size >= 0.10):
+                _sc["count"] += 1
+                _sc["ref_high"] = mid                  # next tranche needs a fresh dip-recovery cycle
+                _sc["cycle_low"] = mid
+                si_result = await paper_trader.simulate_market_buy(winner_token, _tranche_size)
                 if si_result.get("filled") and si_result.get("fill_price"):
                     si_price = si_result["fill_price"]
-                    si_filled = si_result.get("filled_size", _scalein_size)
+                    si_filled = si_result.get("filled_size", _tranche_size)
                     si_cost = si_price * si_filled + si_result.get("fees", 0.0)
                     new_size = round(size + si_filled, 4)
                     break_even_price = round((break_even_price * size + si_cost) / new_size, 4)
@@ -988,7 +1006,8 @@ async def _winner_exit_paper(
                     await write_event(trade_id, "scalein_executed", coin, {
                         "mid": round(mid, 4), "si_price": si_price,
                         "si_size": si_filled, "si_cost": round(si_cost, 4),
-                        "new_size": size, "new_break_even": break_even_price,
+                        "tranche": _sc["count"], "new_size": size,
+                        "new_break_even": break_even_price,
                     })
 
             score, reason = compute_cross_score(
@@ -1039,6 +1058,7 @@ async def _winner_exit_live(
     """Live mode: peg-cross exit engine — real limit order + dynamic market conversion."""
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
+    trade_regime = (trade.get("regime") if trade else None) or "UNKNOWN"
     es = _vol.get_coin_params(coin)
     if bias_cross_adj:
         es["cross_threshold"] = max(0.10, min(0.95, es["cross_threshold"] + bias_cross_adj))
@@ -1169,27 +1189,42 @@ async def _winner_exit_live(
                 await _close_trade(trade_id, fill_price, "winner_velocity_stop", broadcast_fn)
                 return
 
-            # Scale-in on winner dip: buy more shares when price dips from peak but stays profitable
+            # Scale-in on confirmed dip recovery (see _winner_exit_paper for rationale):
+            # up to _SCALEIN_TRANCHES buys, each after a ≥6¢ dip that bounces ≥2¢.
             _scalein_budget = float(CONFIG["trading"].get("max_scalein_eur", 0.0))
-            _scalein_size = round(_scalein_budget / mid, 2) if mid > 0 else 0
+            if _scalein_budget > 0.0:
+                _scalein_budget = max(_SCALEIN_MIN_EUR, _scalein_budget)  # enforce €5 minimum
+            _tranche_size = round((_scalein_budget / _SCALEIN_TRANCHES) / mid, 2) if mid > 0 else 0
+            _sc = _scalein_state.setdefault(trade_id, {"count": 0, "ref_high": mid, "cycle_low": mid})
+            if mid > _sc["ref_high"]:
+                _sc["ref_high"] = mid
+                _sc["cycle_low"] = mid
+            if mid < _sc["cycle_low"]:
+                _sc["cycle_low"] = mid
+            _dip = _sc["ref_high"] - _sc["cycle_low"]
+            _bounce = mid - _sc["cycle_low"]
             if (_scalein_budget > 0.0
-                    and trade_id not in _scalein_done_trades
+                    and trade_regime in ("TRENDING", "NORMAL")
+                    and _sc["count"] < _SCALEIN_TRANCHES
                     and break_even_price is not None
-                    and peak_mid - mid >= 0.06
+                    and _dip >= 0.06
+                    and _bounce >= 0.02
                     and mid > break_even_price + 0.02
                     and phase == "patient"
                     and seconds_left > 120
-                    and _scalein_size >= 0.10):
-                _scalein_done_trades.add(trade_id)
-                mkt_buy = await orders.place_market_order(winner_token, "BUY", _scalein_size)
+                    and _tranche_size >= 0.10):
+                _sc["count"] += 1
+                _sc["ref_high"] = mid
+                _sc["cycle_low"] = mid
+                mkt_buy = await orders.place_market_order(winner_token, "BUY", _tranche_size)
                 si_price = mid
                 si_fees = 0.0
                 if mkt_buy and mkt_buy.get("order_id"):
-                    f = await _fetch_market_fill(mkt_buy["order_id"], fallback=mid, size=_scalein_size)
+                    f = await _fetch_market_fill(mkt_buy["order_id"], fallback=mid, size=_tranche_size)
                     si_price = f["fill_price"]
                     si_fees = f["fees"]
-                si_cost = si_price * _scalein_size + si_fees
-                new_size = round(size + _scalein_size, 4)
+                si_cost = si_price * _tranche_size + si_fees
+                new_size = round(size + _tranche_size, 4)
                 break_even_price = round((break_even_price * size + si_cost) / new_size, 4)
                 size = new_size
                 _winner_stop_bid = round(break_even_price - _max_loss_eur / max(0.01, size), 4)
@@ -1200,8 +1235,9 @@ async def _winner_exit_live(
                     current_order_id = new_resp["order_id"]
                 await write_event(trade_id, "scalein_executed", coin, {
                     "mid": round(mid, 4), "si_price": si_price,
-                    "si_size": _scalein_size, "si_cost": round(si_cost, 4),
-                    "new_size": size, "new_break_even": break_even_price,
+                    "si_size": _tranche_size, "si_cost": round(si_cost, 4),
+                    "tranche": _sc["count"], "new_size": size,
+                    "new_break_even": break_even_price,
                 })
 
             score, reason = compute_cross_score(

@@ -296,7 +296,7 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("**Max bijkoop per positie (EUR)**")
-    st.caption("Extra budget om dieper in te kopen om verlies te beperken. 0 = uit.")
+    st.caption("Totaal bijkoop-budget, gespreid over 5 tranches op bevestigd herstel (TRENDING/NORMAL). 0 = uit, anders minimaal €5.")
     saved_scalein = get_state("max_scalein_eur")
     db_scalein = float(saved_scalein) if saved_scalein else CONFIG["trading"].get("max_scalein_eur", 0.0)
     _sc_key = "_pending_max_scalein_eur"
