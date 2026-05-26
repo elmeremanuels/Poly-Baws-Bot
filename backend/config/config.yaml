@@ -101,9 +101,9 @@ polymarket:
   chain_id: 137
 
 learning:
-  min_trades_per_coin: 15      # minimum paper trades per coin before analysis (75 total vs 250 old)
-  max_learn_hours: 2
-  max_live_trades: 15          # re-analyze after 15 live trades for faster iteration
+  min_trades_per_coin: 10      # minimum paper trades per coin before analysis (50 total)
+  max_learn_hours: 1
+  max_live_trades: 20          # re-analyze after 20 live trades
   max_live_hours: 1            # re-analyze every hour
   max_live_loss: 20.00         # EUR emergency stop for live phase
   min_validate_trades: 15
