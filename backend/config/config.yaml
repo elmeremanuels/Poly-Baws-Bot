@@ -161,6 +161,7 @@ regime_profiles:
     trigger_threshold_delta: 0.00
     early_loser_threshold: null     # disabled — dumped side won anyway 60×, costing €60 (was 0.45)
     early_loser_rebuy_threshold: null
+    winner_velocity_stop: null      # disabled — 14/14 velocity-stop exits were direction-correct, cut winners for ~€4.6
   CHOPPY:
     cross_threshold: 0.55     # aggressive exit — reversals are frequent
     initial_offset: 0.04
@@ -180,8 +181,9 @@ regime_profiles:
     initial_offset: 0.04      # lower target — capture the fast initial spike
     ratchet_buffer: 0.02
     trigger_threshold_delta: -0.02  # lower bar — fire earlier on explosive moves
-    early_loser_threshold: 0.46     # sell early — breakout won't reverse
+    early_loser_threshold: null     # disabled — 4/7 BREAKOUT trades dumped the actual winner early, cost €8.1
     early_loser_rebuy_threshold: null
+    winner_velocity_stop: null      # disabled — same direction-correct cut as other regimes
   NORMAL:
     cross_threshold: 0.85     # patient — peg_cross lost €62 here; ride to force_exit/resolution
     urgent_cross_threshold: 0.72  # urgent-phase (30-90s) bar raised from default 0.50
@@ -190,3 +192,4 @@ regime_profiles:
     trigger_threshold_delta: 0.00
     early_loser_threshold: 0.45
     early_loser_rebuy_threshold: 0.55
+    winner_velocity_stop: null      # disabled — 7/7 velocity-stop exits were direction-correct, cut winners for ~€1.7
