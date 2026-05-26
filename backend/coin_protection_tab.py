@@ -164,7 +164,7 @@ def coin_protection_panel() -> None:
             col_a, col_b = st.columns(2)
             with col_a:
                 if g["state"] in ("watch", "disabled"):
-                    if st.button(f"✅ Heractiveer {coin} direct", key=f"en_{coin}"):
+                    if st.button(f"✅ Heractiveer {coin} direct", key=f"cpt_en_{coin}"):
                         write_command("coin_guard_enable", {"coin": coin})
                         st.toast(f"{coin} wordt heractiveerd...", icon="✅")
                         st.rerun()
