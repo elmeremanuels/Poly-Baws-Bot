@@ -344,6 +344,18 @@ def get_phase_stats(cycle_id: int, phase: str) -> dict:
     return dict(row) if row else {}
 
 
+def get_learn_coin_counts(cycle_id: int) -> dict[str, int]:
+    """Per-coin trade count in the learn phase of a cycle (drives coverage progress)."""
+    if not _db_path.exists():
+        return {}
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT coin, COUNT(*) AS n FROM trades WHERE cycle_id=? AND phase='learn' GROUP BY coin",
+            (cycle_id,),
+        ).fetchall()
+    return {r["coin"]: r["n"] for r in rows}
+
+
 def get_cycle_stats(cycle_id: int) -> dict:
     """Full per-coin stats for a learning cycle, used for Claude analysis prompt."""
     if not _db_path.exists():

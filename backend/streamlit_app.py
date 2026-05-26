@@ -19,6 +19,7 @@ from src.db_sync import (
     get_latest_completed_cycle,
     get_latest_manual_analysis,
     get_latest_snapshot_for_trade,
+    get_learn_coin_counts,
     get_open_trades,
     get_phase_stats,
     get_portfolio_snapshot,
@@ -641,6 +642,74 @@ def _learning_panel() -> None:
     phase_color = {"learn": "🟡", "analyze": "🔵", "deploy": "🟢", "validate": "🟠"}
 
     st.markdown(f"### {phase_color.get(phase, '⚪')} Learning Cycle #{cycle.get('cycle_number', '?')}")
+
+    # ── LIVE vs LEARNING banner + projected progress ────────────────────────────
+    # A phase ends at whichever limit hits first (time cap OR trade count), so we
+    # surface both: a time-remaining bar (from max_*_hours) and a trade-count bar.
+    lcfg = CONFIG["learning"]
+    _phase_kind = {
+        "learn":    ("📚 LEARNING (paper)",      "Data verzamelen — geen echt geld",      "max_learn_hours"),
+        "analyze":  ("🧠 ANALYSE (Claude)",      "Claude analyseert de resultaten (~1-2 min)", None),
+        "deploy":   ("🟢 LIVE TRADING",          "Echt geld — bot plaatst echte orders",  "max_live_hours"),
+        "validate": ("🔍 LEARNING (validatie)",  "Paper — geleerde parameters toetsen",   "max_validate_hours"),
+    }
+    _label, _desc, _hours_key = _phase_kind.get(phase, (f"⚪ {phase.upper()}", "", None))
+    _banner = f"**{_label}** — {_desc}"
+    if phase == "deploy":
+        st.success(_banner)
+    elif phase == "analyze":
+        st.info(_banner)
+    else:
+        st.warning(_banner)
+
+    # Time-remaining bar (only for time-capped phases with a known phase start)
+    _ps_raw = cycle.get("phase_started_at") or ""
+    _elapsed_h = None
+    if _ps_raw:
+        try:
+            _ps_dt = datetime.fromisoformat(_ps_raw).astimezone(timezone.utc)
+            _elapsed_h = (datetime.now(timezone.utc) - _ps_dt).total_seconds() / 3600
+        except Exception:
+            _elapsed_h = None
+    if _hours_key and _elapsed_h is not None:
+        _max_h = float(lcfg.get(_hours_key, 0) or 0)
+        if _max_h > 0:
+            _rem_h = max(0.0, _max_h - _elapsed_h)
+            _rh, _rm = int(_rem_h), int(round((_rem_h - int(_rem_h)) * 60))
+            st.progress(min(1.0, _elapsed_h / _max_h),
+                        text=f"⏱ Tijd-limiet: nog ~{_rh}u {_rm}m van {_max_h:.0f}u")
+
+    # Trade-count bar (the other exit condition for this phase)
+    _cid = cycle.get("id")
+    if _cid:
+        if phase == "learn":
+            _counts = get_learn_coin_counts(_cid)
+            _enabled = [c for c, v in CONFIG["coins"].items() if v.get("enabled", True)]
+            _need = lcfg["min_trades_per_coin"]
+            _covered = sum(1 for c in _enabled if _counts.get(c, 0) >= _need)
+            st.progress(_covered / max(1, len(_enabled)),
+                        text=f"📊 Coins gedekt: {_covered}/{len(_enabled)} (elk ≥{_need} paper-trades)")
+            _missing = [f"{COIN_EMOJI.get(c, '')}{c} {_counts.get(c, 0)}/{_need}"
+                        for c in _enabled if _counts.get(c, 0) < _need]
+            if _missing:
+                st.caption("Nog nodig: " + " · ".join(_missing))
+        elif phase == "deploy":
+            _ds = get_phase_stats(_cid, "deploy") or {}
+            _done = _ds.get("triggered", 0) or 0
+            _mx = lcfg["max_live_trades"]
+            st.progress(min(1.0, _done / _mx) if _mx else 0.0,
+                        text=f"📊 Live trades: {_done}/{_mx}")
+            _pnl = _ds.get("total_pnl")
+            if _pnl is not None:
+                st.caption(f"P&L deze fase: €{_pnl:+.2f} (noodstop bij −€{lcfg['max_live_loss']:.0f})")
+        elif phase == "validate":
+            _vs = get_phase_stats(_cid, "validate") or {}
+            _done = _vs.get("triggered", 0) or 0
+            _mx = lcfg["min_validate_trades"]
+            st.progress(min(1.0, _done / _mx) if _mx else 0.0,
+                        text=f"📊 Validatie trades: {_done}/{_mx}")
+    if phase in ("learn", "deploy", "validate"):
+        st.caption("De fase eindigt zodra de eerste limiet wordt geraakt (tijd óf trades).")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Phase", f"{phase_emoji.get(phase, '⚪')} {phase.upper()}")
