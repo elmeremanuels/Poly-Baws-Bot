@@ -51,7 +51,8 @@ def get_coin_params(coin: str) -> dict:
 
     # Layer 2: per-coin Claude-applied overrides
     coin_cfg = CONFIG["coins"].get(coin, {})
-    for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
+    for k in ("cross_threshold", "initial_offset", "ratchet_buffer",
+              "hold_for_resolution_mid_threshold"):
         if k in coin_cfg:
             base[k] = coin_cfg[k]
 

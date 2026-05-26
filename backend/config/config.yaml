@@ -60,7 +60,11 @@ coins:
     enabled: true
     max_parallel_positions: 5
     market_filter: "sol-updown-5m"
-    trigger_threshold: 0.75    # volatile like BTC; higher bar reduces false triggers
+    # SOL — herziene parameters (Herzie Strategie): peg_cross verlies -€29.12;
+    # geduldiger exit + winnaars vaker naar $1.00-resolutie houden.
+    trigger_threshold: 0.76
+    ratchet_buffer: 0.035
+    hold_for_resolution_mid_threshold: 0.58
   XRP:
     enabled: true
     max_parallel_positions: 5
