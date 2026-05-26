@@ -22,6 +22,7 @@ def _conn() -> sqlite3.Connection:
     if not _indexes_created and _db_path.exists():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_analytics ON trades(status, trigger_hit, coin, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)")
         _indexes_created = True
     return conn
 
@@ -126,7 +127,7 @@ def get_recent_events(limit: int = 100) -> list[dict]:
         return []
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,)
+            "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
 

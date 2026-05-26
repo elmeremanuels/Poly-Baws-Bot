@@ -355,6 +355,9 @@ def dashboard() -> None:
         _active_positions()
     with col_right:
         _recent_trades()
+
+
+def dashboard_event_log() -> None:
     st.divider()
     _event_log()
 
@@ -1044,6 +1047,7 @@ tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard 
 )
 with tab_live:
     dashboard()
+    dashboard_event_log()
 with tab_analytics:
     analytics_panel()
 with tab_signal_lab:
