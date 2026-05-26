@@ -123,13 +123,10 @@ async def _run() -> None:
     if saved_trade_size:
         try:
             saved_val = float(saved_trade_size)
-            cfg_val = CONFIG["trading"].get("trade_size_eur", 1.0)
-            # Cap saved value to 3× the config value to catch stale/accidental overrides.
-            if saved_val > cfg_val * 3:
-                log.warning("startup_trade_size_clamped",
-                            saved=saved_val, config=cfg_val, using=cfg_val)
-            else:
+            if 0.10 <= saved_val <= 100.0:
                 CONFIG["trading"]["trade_size_eur"] = saved_val
+            else:
+                log.warning("startup_trade_size_out_of_range", saved=saved_val)
         except ValueError:
             pass
 
