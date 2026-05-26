@@ -858,6 +858,7 @@ async def _winner_exit_paper(
     """Paper mode: peg-cross exit engine — resting limit + dynamic market conversion."""
     trade = get_active_trades().get(trade_id)
     coin = trade["coin"] if trade else "UNKNOWN"
+    trade_regime = (trade.get("regime") if trade else None) or "UNKNOWN"
     es = _vol.get_coin_params(coin)
     if bias_cross_adj:
         es["cross_threshold"] = max(0.10, min(0.95, es["cross_threshold"] + bias_cross_adj))
@@ -966,6 +967,7 @@ async def _winner_exit_paper(
             _scalein_budget = float(CONFIG["trading"].get("max_scalein_eur", 0.0))
             _scalein_size = round(_scalein_budget / mid, 2) if mid > 0 else 0
             if (_scalein_budget > 0.0
+                    and trade_regime in ("TRENDING", "NORMAL")  # RANGING onaangeroerd; CHOPPY/BREAKOUT te grillig
                     and trade_id not in _scalein_done_trades
                     and break_even_price is not None
                     and peak_mid - mid >= 0.06       # genuine dip from peak
