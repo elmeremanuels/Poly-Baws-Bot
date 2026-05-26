@@ -211,6 +211,12 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("trade_size_eur", str(eur))
         log.info("trade_size_updated", eur=eur)
 
+    elif command == "set_max_scalein":
+        eur = max(0.0, float(payload["max_scalein_eur"]))
+        CONFIG["trading"]["max_scalein_eur"] = eur
+        await save_dashboard_state("max_scalein_eur", str(eur))
+        log.info("max_scalein_updated", eur=eur)
+
     elif command == "pause_learning":
         from . import learning as _learning
         _learning.get_orchestrator()

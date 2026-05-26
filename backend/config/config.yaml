@@ -1,5 +1,6 @@
 trading:
   trade_size_eur: 1.00
+  max_scalein_eur: 0.00        # max extra EUR the bot may spend scaling into ONE position (0 = disabled)
   entry_size_shares: 2
   entry_price_target: 0.50
   entry_price_max_deviation: 0.02
@@ -12,7 +13,8 @@ trading:
 
 exit:
   # Peg-Cross exit engine (Höschler/Bulthuis V2)
-  cross_threshold: 0.72        # peg-cross score threshold (0-1) to convert limit→market
+  cross_threshold: 0.72        # peg-cross score threshold (0-1) to convert limit→market (patient phase, >90s left)
+  urgent_cross_threshold: 0.50 # peg-cross threshold in urgent phase (30-90s left); per-regime override raises this
   initial_offset: 0.07         # limit starts trigger_price + offset above trigger
   ratchet_buffer: 0.03         # limit stays this far above mid when ratcheting
   min_winner_profit_margin: 0.01  # resting limit sits at least break_even + this
@@ -152,12 +154,13 @@ directional_entry:
 # Updated automatically by the learning cycle when a regime is dominant during analysis.
 regime_profiles:
   TRENDING:
-    cross_threshold: 0.72     # patient — momentum continues, hold the winner longer
+    cross_threshold: 0.88     # very patient — peg_cross lost €47 here; ride to force_exit/resolution
+    urgent_cross_threshold: 0.78  # urgent-phase (30-90s) bar raised from default 0.50 — only convert on genuine collapse
     initial_offset: 0.08      # more ambitious target
     ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00
-    early_loser_threshold: 0.45     # sell loser early — trend will continue
-    early_loser_rebuy_threshold: null  # no rebuy in trending (direction won't reverse)
+    early_loser_threshold: null     # disabled — dumped side won anyway 60×, costing €60 (was 0.45)
+    early_loser_rebuy_threshold: null
   CHOPPY:
     cross_threshold: 0.55     # aggressive exit — reversals are frequent
     initial_offset: 0.04
@@ -171,6 +174,7 @@ regime_profiles:
     ratchet_buffer: 0.025
     trigger_threshold_delta: 0.02
     early_loser_threshold: null     # disabled — mean reversion likely (both return to 0.50)
+    winner_velocity_stop: null      # disabled — velocity stop bailed winners at 0.726 vs 0.871 limit fill, cost €29
   BREAKOUT:
     cross_threshold: 0.72
     initial_offset: 0.04      # lower target — capture the fast initial spike
@@ -179,7 +183,8 @@ regime_profiles:
     early_loser_threshold: 0.46     # sell early — breakout won't reverse
     early_loser_rebuy_threshold: null
   NORMAL:
-    cross_threshold: 0.72
+    cross_threshold: 0.85     # patient — peg_cross lost €62 here; ride to force_exit/resolution
+    urgent_cross_threshold: 0.72  # urgent-phase (30-90s) bar raised from default 0.50
     initial_offset: 0.07
     ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00

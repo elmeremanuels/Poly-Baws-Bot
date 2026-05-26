@@ -295,6 +295,29 @@ with st.sidebar:
         st.session_state[_ts_key] = new_eur
         st.rerun()
 
+    st.markdown("**Max bijkoop per positie (EUR)**")
+    st.caption("Extra budget om dieper in te kopen om verlies te beperken. 0 = uit.")
+    saved_scalein = get_state("max_scalein_eur")
+    db_scalein = float(saved_scalein) if saved_scalein else CONFIG["trading"].get("max_scalein_eur", 0.0)
+    _sc_key = "_pending_max_scalein_eur"
+    pending_sc = st.session_state.get(_sc_key)
+    if pending_sc is not None and abs(pending_sc - db_scalein) < 0.001:
+        del st.session_state[_sc_key]
+    display_scalein = st.session_state.get(_sc_key, db_scalein)
+    new_scalein = st.number_input(
+        "max_scalein_input",
+        min_value=0.0,
+        max_value=100.0,
+        value=display_scalein,
+        step=0.10,
+        format="%.2f",
+        label_visibility="collapsed",
+    )
+    if abs(new_scalein - display_scalein) > 0.001:
+        write_command("set_max_scalein", {"max_scalein_eur": new_scalein})
+        st.session_state[_sc_key] = new_scalein
+        st.rerun()
+
     st.divider()
 
     daily_pnl = get_daily_pnl()

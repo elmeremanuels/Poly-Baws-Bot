@@ -133,6 +133,13 @@ async def _run() -> None:
         except ValueError:
             pass
 
+    saved_max_scalein = await load_dashboard_state("max_scalein_eur")
+    if saved_max_scalein:
+        try:
+            CONFIG["trading"]["max_scalein_eur"] = max(0.0, float(saved_max_scalein))
+        except ValueError:
+            pass
+
     for coin in list(CONFIG["coins"].keys()):
         saved_max = await load_dashboard_state(f"coin_{coin}_max")
         if saved_max:

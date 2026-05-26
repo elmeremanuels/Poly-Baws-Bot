@@ -16,6 +16,8 @@ ENTRY_PRICE = TRADING_CFG["entry_price_target"]
 MAX_DEV = TRADING_CFG["entry_price_max_deviation"]
 CUTOFF_MIN = TRADING_CFG["entry_cutoff_minutes_before_window"]
 
+_scalein_done_trades: set[str] = set()  # trade_ids where winner dip scale-in has already fired
+
 
 def _get_trigger_threshold(coin: str) -> float:
     from . import regime as _regime
@@ -840,7 +842,8 @@ def get_phase_params(phase: str, cfg: dict) -> dict:
     if phase == "patient":
         return {"cross_threshold": base_threshold, "check_interval": base_interval, "ratchet_buffer": base_buffer}
     elif phase == "urgent":
-        return {"cross_threshold": 0.50, "check_interval": max(0.5, base_interval / 2), "ratchet_buffer": base_buffer}
+        urgent_threshold = cfg.get("urgent_cross_threshold", 0.50)
+        return {"cross_threshold": urgent_threshold, "check_interval": max(0.5, base_interval / 2), "ratchet_buffer": base_buffer}
     return {"cross_threshold": 0.0, "check_interval": 0.2, "ratchet_buffer": 0.0}
 
 
@@ -870,7 +873,8 @@ async def _winner_exit_paper(
     trail_start = asyncio.get_event_loop().time()
     # Pre-compute loss-control constants (stable per trade)
     _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
-    _vel_stop = float(es.get("winner_velocity_stop", -0.004))
+    _vel_raw = es.get("winner_velocity_stop", -0.004)
+    _vel_stop = float(_vel_raw) if _vel_raw is not None else None  # None = disabled (e.g. RANGING)
     _winner_stop_bid = (
         round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
     )
@@ -946,7 +950,7 @@ async def _winner_exit_paper(
 
             # Fix 3: Velocity stop — exit early on fast reversal while still above the hard stop.
             # Only fires when mid has already dropped meaningfully below our limit target.
-            if vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
+            if _vel_stop is not None and vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
                 result = await paper_trader.simulate_market_sell(winner_token, size)
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
@@ -957,6 +961,33 @@ async def _winner_exit_paper(
                 })
                 await _close_trade(trade_id, result.get("fill_price"), "winner_velocity_stop", broadcast_fn)
                 return
+
+            # Scale-in on winner dip: buy more shares when price dips from peak but stays profitable
+            _scalein_budget = float(CONFIG["trading"].get("max_scalein_eur", 0.0))
+            _scalein_size = round(_scalein_budget / mid, 2) if mid > 0 else 0
+            if (_scalein_budget > 0.0
+                    and trade_id not in _scalein_done_trades
+                    and break_even_price is not None
+                    and peak_mid - mid >= 0.06       # genuine dip from peak
+                    and mid > break_even_price + 0.02  # still profitable to add
+                    and phase == "patient"
+                    and seconds_left > 120
+                    and _scalein_size >= 0.10):
+                _scalein_done_trades.add(trade_id)
+                si_result = await paper_trader.simulate_market_buy(winner_token, _scalein_size)
+                if si_result.get("filled") and si_result.get("fill_price"):
+                    si_price = si_result["fill_price"]
+                    si_filled = si_result.get("filled_size", _scalein_size)
+                    si_cost = si_price * si_filled + si_result.get("fees", 0.0)
+                    new_size = round(size + si_filled, 4)
+                    break_even_price = round((break_even_price * size + si_cost) / new_size, 4)
+                    size = new_size
+                    _winner_stop_bid = round(break_even_price - _max_loss_eur / max(0.01, size), 4)
+                    await write_event(trade_id, "scalein_executed", coin, {
+                        "mid": round(mid, 4), "si_price": si_price,
+                        "si_size": si_filled, "si_cost": round(si_cost, 4),
+                        "new_size": size, "new_break_even": break_even_price,
+                    })
 
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
@@ -1021,7 +1052,8 @@ async def _winner_exit_live(
     last_status_check = trail_start
     # Pre-compute loss-control constants (stable per trade)
     _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
-    _vel_stop = float(es.get("winner_velocity_stop", -0.004))
+    _vel_raw = es.get("winner_velocity_stop", -0.004)
+    _vel_stop = float(_vel_raw) if _vel_raw is not None else None  # None = disabled (e.g. RANGING)
     _winner_stop_bid = (
         round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
     )
@@ -1116,7 +1148,7 @@ async def _winner_exit_live(
                 return
 
             # Fix 3: Velocity stop — early exit on fast reversal while still above the hard stop.
-            if vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
+            if _vel_stop is not None and vel < _vel_stop and mid < current_limit - 0.05 and phase != "force":
                 await orders.cancel_order(current_order_id)
                 mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
@@ -1134,6 +1166,41 @@ async def _winner_exit_live(
                 })
                 await _close_trade(trade_id, fill_price, "winner_velocity_stop", broadcast_fn)
                 return
+
+            # Scale-in on winner dip: buy more shares when price dips from peak but stays profitable
+            _scalein_budget = float(CONFIG["trading"].get("max_scalein_eur", 0.0))
+            _scalein_size = round(_scalein_budget / mid, 2) if mid > 0 else 0
+            if (_scalein_budget > 0.0
+                    and trade_id not in _scalein_done_trades
+                    and break_even_price is not None
+                    and peak_mid - mid >= 0.06
+                    and mid > break_even_price + 0.02
+                    and phase == "patient"
+                    and seconds_left > 120
+                    and _scalein_size >= 0.10):
+                _scalein_done_trades.add(trade_id)
+                mkt_buy = await orders.place_market_order(winner_token, "BUY", _scalein_size)
+                si_price = mid
+                si_fees = 0.0
+                if mkt_buy and mkt_buy.get("order_id"):
+                    f = await _fetch_market_fill(mkt_buy["order_id"], fallback=mid, size=_scalein_size)
+                    si_price = f["fill_price"]
+                    si_fees = f["fees"]
+                si_cost = si_price * _scalein_size + si_fees
+                new_size = round(size + _scalein_size, 4)
+                break_even_price = round((break_even_price * size + si_cost) / new_size, 4)
+                size = new_size
+                _winner_stop_bid = round(break_even_price - _max_loss_eur / max(0.01, size), 4)
+                # Reissue limit order for updated total size
+                await orders.cancel_order(current_order_id)
+                new_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
+                if new_resp and new_resp.get("order_id"):
+                    current_order_id = new_resp["order_id"]
+                await write_event(trade_id, "scalein_executed", coin, {
+                    "mid": round(mid, 4), "si_price": si_price,
+                    "si_size": _scalein_size, "si_cost": round(si_cost, 4),
+                    "new_size": size, "new_break_even": break_even_price,
+                })
 
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,

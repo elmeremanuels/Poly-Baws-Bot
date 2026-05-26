@@ -59,7 +59,8 @@ def get_coin_params(coin: str) -> dict:
     # Layer 1: per-regime learned overrides (most specific)
     current_regime = _regime.get_current_regime(coin)
     regime_params = _regime.get_regime_params(current_regime)
-    for k in ("cross_threshold", "initial_offset", "ratchet_buffer"):
+    for k in ("cross_threshold", "initial_offset", "ratchet_buffer",
+              "urgent_cross_threshold", "winner_velocity_stop"):
         if k in regime_params:
             base[k] = regime_params[k]
 
