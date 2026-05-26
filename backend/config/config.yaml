@@ -126,9 +126,9 @@ bias:
   min_certainty: 0.20       # ignore bias below this score to avoid marginal signals
 
 conviction_weighting:
-  enabled: false            # set true to activate conviction-driven asymmetric sizing
+  enabled: true             # conviction-driven asymmetric sizing active
   min_score: 0.45           # below this score = symmetric entry (1€/1€)
-  max_ratio: 2.0            # at score=1.0 → biased side gets max_ratio× the base size
+  max_ratio: 1.5            # at score=1.0 → biased side gets 1.5× the base size
   # Example: score=0.65, min=0.45, max=2.0 → weight = 1 + (0.65-0.45)/(1-0.45)*1 = 1.36×
   # Use the Scenario Replay → Gewogen inkoop tab to backtest before enabling.
 
