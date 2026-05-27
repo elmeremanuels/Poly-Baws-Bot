@@ -311,6 +311,9 @@ def get_signal_active_trades() -> list[dict]:
             " ORDER BY created_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def delete_signal_trades(status: str | None = None) -> int:
     """Verwijder signal_trader trades uit de DB.
     status=None → alle signal_trader trades; anders alleen die status.
     Geeft het aantal verwijderde rijen terug.
