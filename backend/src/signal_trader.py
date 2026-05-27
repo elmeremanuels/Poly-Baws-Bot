@@ -21,7 +21,7 @@ Voordelen vs straddle:
 """
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from . import scanner, ws_client, paper_trader, risk, signals as _signals
 from .config_loader import CONFIG
@@ -57,8 +57,66 @@ def _in_skip_hours(window_start) -> bool:
     return utc_hour in skip_hours
 
 
+async def _recover_stuck_trades(coin: str) -> None:
+    """Herstart resolution-watchers voor signal_holding trades die de bot-herstart overleefden.
+
+    Bij een herstart gaan asyncio-tasks verloren. Trades die gevuld waren maar
+    nog niet resolved zijn blijven op status='signal_holding'. Deze functie
+    detecteert zulke trades en start de watcher opnieuw.
+    """
+    now = datetime.now(timezone.utc)
+    recovered = 0
+    for trade_id, trade in list(get_active_trades().items()):
+        if trade.get("coin") != coin:
+            continue
+        if trade.get("mode") != "signal_trader":
+            continue
+        if trade.get("status") != "signal_holding":
+            continue
+
+        window_end_ts = trade.get("window_end_ts")
+        if not window_end_ts:
+            continue
+        try:
+            window_end = datetime.fromisoformat(str(window_end_ts))
+            if window_end.tzinfo is None:
+                window_end = window_end.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        # Alleen als het window al voorbij is (trades die nog lopen, laten we met rust)
+        if window_end > now:
+            continue
+
+        side       = trade.get("winner_side", "YES")
+        buy_token  = (trade.get("condition_id_yes") if side == "YES"
+                      else trade.get("condition_id_no"))
+        fill_price = (trade.get("entry_yes_price") if side == "YES"
+                      else trade.get("entry_no_price")) or 0.50
+        size       = float(trade.get("entry_size") or 0.0)
+        fees       = float(trade.get("fees_paid") or 0.0)
+
+        # Bouw een mini market-dict met alleen window_end (genoeg voor _wait_resolution)
+        mini_market = {"window_end": window_end}
+
+        asyncio.create_task(
+            _wait_resolution(trade_id, buy_token, side, mini_market,
+                             fill_price, size, fees)
+        )
+        recovered += 1
+        log.info("signal_trade_recovered", trade_id=trade_id, coin=coin,
+                 window_end=window_end.isoformat())
+
+    if recovered:
+        log.info("signal_recovery_done", coin=coin, recovered=recovered)
+
+
 async def signal_trader_loop(coin: str) -> None:
     """Per-coin loop. Self-gates op signal_trader mode."""
+    # Wacht kort zodat recover_state() klaar is, herstel daarna stuck trades
+    await asyncio.sleep(20)
+    await _recover_stuck_trades(coin)
+
     while True:
         if get_mode() != "signal_trader":
             await asyncio.sleep(5)
@@ -254,6 +312,32 @@ async def _wait_resolution(
     fees: float,
 ) -> None:
     """Wacht tot het 5-min window afloopt en verwerk de uitkomst."""
+    try:
+        await _do_wait_resolution(trade_id, buy_token, side, market,
+                                  fill_price, size, fees)
+    except Exception as exc:
+        # Zorg dat de trade altijd netjes gesloten wordt — ook bij onverwachte fouten
+        log.error("signal_resolution_error", trade_id=trade_id,
+                  error=str(exc), exc_info=True)
+        try:
+            update_trade_field(trade_id, "status", "aborted")
+            update_trade_field(trade_id, "notes",  f"resolution_error: {exc}")
+            await persist_trade(trade_id)
+        except Exception:
+            pass
+        remove_active_trade(trade_id)
+
+
+async def _do_wait_resolution(
+    trade_id: str,
+    buy_token: str,
+    side: str,
+    market: dict,
+    fill_price: float,
+    size: float,
+    fees: float,
+) -> None:
+    """Interne implementatie van resolution-watcher (gecalled vanuit _wait_resolution)."""
     trade = get_active_trades().get(trade_id)
     if not trade:
         return
@@ -271,37 +355,47 @@ async def _wait_resolution(
         await asyncio.sleep(wait_secs)
 
     # Uitkomst bepalen via mid-price (na settlement: 1.0 of 0.0)
-    # Retry tot maximaal 5 pogingen want settlement kan iets vertraagd zijn
+    # Retry tot maximaal 8 pogingen want settlement kan iets vertraagd zijn
     mid = None
-    for attempt in range(5):
+    for attempt in range(8):
         mid = ws_client.get_mid_price(buy_token)
         if mid is not None and (mid >= 0.9 or mid <= 0.1):
             break  # Duidelijk resultaat
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
 
-    won = mid is not None and mid >= 0.5
+    # Als mid niet beschikbaar is (market verlopen uit WS-cache), markeer als onbekend
+    if mid is None:
+        log.warning("signal_mid_unavailable", trade_id=trade_id, coin=coin,
+                    side=side, buy_token=buy_token)
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes",  "resolution_mid_unavailable")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        return
+
+    won = mid >= 0.5
 
     if won:
-        gross_pnl    = (1.0 - fill_price) * size
+        gross_pnl     = (1.0 - fill_price) * size
         actual_winner = side
-        exit_reason  = "resolution_won"
-        exit_price   = 1.0
+        exit_reason   = "resolution_won"
+        exit_price    = 1.0
     else:
-        gross_pnl    = -fill_price * size
+        gross_pnl     = -fill_price * size
         actual_winner = "NO" if side == "YES" else "YES"
-        exit_reason  = "resolution_lost"
-        exit_price   = 0.0
+        exit_reason   = "resolution_lost"
+        exit_price    = 0.0
 
     net_pnl = gross_pnl - fees
 
-    update_trade_field(trade_id, "actual_winner",       actual_winner)
-    update_trade_field(trade_id, "winner_exit_price",   exit_price)
-    update_trade_field(trade_id, "winner_exit_reason",  exit_reason)
-    update_trade_field(trade_id, "winner_exit_ts",      datetime.now(timezone.utc).isoformat())
-    update_trade_field(trade_id, "gross_pnl",           round(gross_pnl, 4))
-    update_trade_field(trade_id, "net_pnl",             round(net_pnl, 4))
-    update_trade_field(trade_id, "status",              "resolved")
-    update_trade_field(trade_id, "mid_at_trigger",      mid)  # mid op moment van resolution
+    update_trade_field(trade_id, "actual_winner",      actual_winner)
+    update_trade_field(trade_id, "winner_exit_price",  exit_price)
+    update_trade_field(trade_id, "winner_exit_reason", exit_reason)
+    update_trade_field(trade_id, "winner_exit_ts",     datetime.now(timezone.utc).isoformat())
+    update_trade_field(trade_id, "gross_pnl",          round(gross_pnl, 4))
+    update_trade_field(trade_id, "net_pnl",            round(net_pnl, 4))
+    update_trade_field(trade_id, "status",             "resolved")
+    update_trade_field(trade_id, "mid_at_trigger",     mid)
 
     await persist_trade(trade_id)
     remove_active_trade(trade_id)
