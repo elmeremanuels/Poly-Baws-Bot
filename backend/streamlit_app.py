@@ -1262,10 +1262,12 @@ def _signal_trader_panel() -> None:
             st.rerun()
     with col_paper:
         if st.button("📄 Paper", disabled=is_paper, key="st_paper"):
+            _save_signal_trader_to_yaml({"paper_mode": True}, {})
             write_command("set_signal_trader_paper", {"paper_mode": True})
             st.rerun()
     with col_live:
         if st.button("💸 Live", disabled=not is_paper, type="secondary", key="st_live"):
+            _save_signal_trader_to_yaml({"paper_mode": False}, {})
             write_command("set_signal_trader_paper", {"paper_mode": False})
             st.rerun()
 
