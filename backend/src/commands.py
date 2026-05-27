@@ -217,6 +217,18 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("max_scalein_eur", str(eur))
         log.info("max_scalein_updated", eur=eur)
 
+    elif command == "apply_coin_params":
+        # Update bot's live CONFIG so new trades use the revised params immediately.
+        # The Streamlit "Pas toe" button already wrote them to config.yaml on disk.
+        coin = payload.get("coin")
+        params = payload.get("params", {})
+        if coin and params:
+            if coin in CONFIG.get("coins", {}):
+                CONFIG["coins"][coin].update(params)
+            elif "coins" in CONFIG:
+                CONFIG["coins"][coin] = dict(params)
+            log.info("apply_coin_params_applied", coin=coin, keys=list(params.keys()))
+
     elif command == "pause_learning":
         from . import learning as _learning
         _learning.get_orchestrator()

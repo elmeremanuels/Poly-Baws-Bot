@@ -5,6 +5,7 @@ aiohttp==3.9.5
 py-clob-client-v2==1.0.1
 python-dotenv==1.0.1
 PyYAML==6.0.1
+ruamel.yaml>=0.18.0
 structlog==24.2.0
 aiosqlite==0.20.0
 pandas==2.2.2
