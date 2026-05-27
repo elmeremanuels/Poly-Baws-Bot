@@ -1103,9 +1103,10 @@ if not st.session_state.get("_page_loaded"):
 
     # ── Stap 4: learning cyclus (Learning tab) ────────────────────────────────
     _pb.progress(50, text="🧠 Learning cyclus laden… 50%")
-    get_current_cycle()
+    _lc_cycle = get_current_cycle()
     get_latest_completed_cycle()
-    get_learn_coin_counts()
+    if _lc_cycle and _lc_cycle.get("id"):
+        get_learn_coin_counts(_lc_cycle["id"])
 
     # ── Stap 5: open posities + scanner (Live tab) ────────────────────────────
     _pb.progress(65, text="📂 Open posities ophalen… 65%")
