@@ -1328,46 +1328,59 @@ def _signal_trader_panel() -> None:
     total = len(trades)
     st.markdown(f"#### 📋 Trades ({total})" if total else "#### 📋 Trades")
     if not df.empty:
-        show_cols = ["coin", "triggered_by", "winner_side", "winner_exit_reason",
-                     "net_pnl", "conviction_score_at_entry",
-                     "question", "market_id", "created_at"]
+        show_cols = ["coin", "triggered_by", "winner_side", "status",
+                     "winner_exit_reason", "net_pnl",
+                     "conviction_score_at_entry", "question", "created_at"]
         avail = [c for c in show_cols if c in df.columns]
         rec = df[avail].head(50).copy()
 
-        # Format columns
+        # Type: paper of live
         if "triggered_by" in rec.columns:
             rec["Type"] = rec["triggered_by"].map({
                 "signal_paper": "📄 Paper",
                 "signal_live":  "💸 Live",
-                "signal":       "📄 Paper",   # legacy label vóór de fix
+                "signal":       "📄 Paper",
             }).fillna("—")
             rec = rec.drop(columns=["triggered_by"])
+
+        # Resultaat: gebruik winner_exit_reason + status als fallback
+        def _fmt_result(row) -> str:
+            reason = row.get("winner_exit_reason") if isinstance(row, dict) else None
+            status = row.get("status") if isinstance(row, dict) else None
+            if reason == "resolution_won":   return "✅ Won"
+            if reason == "resolution_lost":  return "❌ Lost"
+            if reason and "abort" in str(reason).lower(): return "⚠️ Afgebroken"
+            if status == "signal_holding":   return "⏳ Open"
+            if status == "aborted":          return "⚠️ Afgebroken"
+            return "⏳ Open"
+
+        if "winner_exit_reason" in rec.columns or "status" in rec.columns:
+            rec["Resultaat"] = rec.apply(
+                lambda r: _fmt_result(r.to_dict()), axis=1
+            )
         if "winner_exit_reason" in rec.columns:
-            rec["Resultaat"] = rec["winner_exit_reason"].map({
-                "resolution_won":  "✅ Won",
-                "resolution_lost": "❌ Lost",
-                "aborted":         "⚠️ Afgebroken",
-            }).fillna(rec["winner_exit_reason"].map(
-                lambda x: "⚠️ Afgebroken" if x and "abort" in str(x).lower() else "⏳ Open"
-            ))
             rec = rec.drop(columns=["winner_exit_reason"])
+        if "status" in rec.columns:
+            rec = rec.drop(columns=["status"])
+
+        # P&L: toon waarde als beschikbaar, anders context-label
         if "net_pnl" in rec.columns:
-            rec["P&L"] = rec["net_pnl"].apply(lambda x: f"€{x:+.2f}" if pd.notna(x) else "—")
+            rec["P&L"] = rec["net_pnl"].apply(
+                lambda x: f"€{x:+.2f}" if pd.notna(x) else "—"
+            )
             rec = rec.drop(columns=["net_pnl"])
+
         if "conviction_score_at_entry" in rec.columns:
             rec["Conv."] = rec["conviction_score_at_entry"].apply(
                 lambda x: f"{x:.2f}" if pd.notna(x) else "—")
             rec = rec.drop(columns=["conviction_score_at_entry"])
+
         if "question" in rec.columns:
             rec["Markt"] = rec["question"].apply(
-                lambda q: (q[:65] + "…") if q and len(q) > 65 else (q or "—")
+                lambda q: (q[:70] + "…") if q and len(q) > 70 else (q or "—")
             )
             rec = rec.drop(columns=["question"])
-        if "market_id" in rec.columns:
-            rec["Polymarket 🔗"] = rec["market_id"].apply(
-                lambda mid: f"https://polymarket.com/event/{mid}" if mid else "—"
-            )
-            rec = rec.drop(columns=["market_id"])
+
         if "coin" in rec.columns:
             rec = rec.rename(columns={"coin": "Coin"})
         if "winner_side" in rec.columns:
@@ -1383,9 +1396,10 @@ def _signal_trader_panel() -> None:
 
     # ── Instellingen (standaard ingeklapt) ──────────────────────────────────────
     with st.expander("⚙️ Instellingen", expanded=False):
-        # Accuracy per coin uit Signal Lab (straddle historiek) — geen dubbele tracking
-        sl_accuracy  = get_signal_accuracy_per_coin()
+        # Accuracy per coin uit Signal Lab — zelfde periode-filter als de hoofdview
+        sl_accuracy  = get_signal_accuracy_per_coin(hours=_hours)
         sl_acc_map: dict[str, dict] = {r["coin"]: r for r in sl_accuracy}
+        _period_label = period  # bv "1u", "7 dagen", "Alle tijd"
 
         with st.form("st_config_form"):
             col_l, col_r = st.columns(2)
@@ -1421,7 +1435,7 @@ def _signal_trader_panel() -> None:
                 )
 
             st.markdown("---")
-            st.markdown("**🪙 Coins** — accuracy uit 🔬 Signal Lab (straddle historiek)")
+            st.markdown(f"**🪙 Coins** — Signal Lab accuracy ({_period_label})")
             st.caption("Break-even bij ~52%. Groen ≥ 55%, oranje 52–55%, rood < 52%.")
 
             coin_enabled_new: dict[str, bool] = {}

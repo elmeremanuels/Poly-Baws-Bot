@@ -364,15 +364,27 @@ async def _do_wait_resolution(
             break  # Duidelijk resultaat
         await asyncio.sleep(5)
 
-    # Als mid niet beschikbaar is (market verlopen uit WS-cache), markeer als onbekend
+    # Als WS-prijs niet beschikbaar is, gebruik Signal Lab (straddle) als backup
     if mid is None:
-        log.warning("signal_mid_unavailable", trade_id=trade_id, coin=coin,
-                    side=side, buy_token=buy_token)
-        update_trade_field(trade_id, "status", "aborted")
-        update_trade_field(trade_id, "notes",  "resolution_mid_unavailable")
-        await persist_trade(trade_id)
-        remove_active_trade(trade_id)
-        return
+        from .db_sync import get_market_resolution as _get_mkt_res
+        trade_now  = get_active_trades().get(trade_id, {})
+        market_id  = trade_now.get("market_id")
+        sl_winner  = _get_mkt_res(market_id) if market_id else None
+
+        if sl_winner is not None:
+            # Straddle-data heeft de uitkomst — gebruik die
+            mid = 1.0 if sl_winner == side else 0.0
+            log.info("signal_resolution_from_straddle", trade_id=trade_id,
+                     coin=coin, sl_winner=sl_winner, side=side)
+        else:
+            # Geen enkel databron — markeer als aborted
+            log.warning("signal_mid_unavailable", trade_id=trade_id, coin=coin,
+                        side=side, buy_token=buy_token)
+            update_trade_field(trade_id, "status", "aborted")
+            update_trade_field(trade_id, "notes",  "resolution_mid_unavailable")
+            await persist_trade(trade_id)
+            remove_active_trade(trade_id)
+            return
 
     won = mid >= 0.5
 

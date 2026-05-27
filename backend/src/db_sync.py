@@ -88,12 +88,14 @@ def get_today_trade_count(coin: str | None = None) -> int:
 
 # ── Signal accuracy per coin (uit Signal Lab / straddle data) ─────────────────
 
-def get_signal_accuracy_per_coin(days: int | None = None) -> list[dict]:
+def get_signal_accuracy_per_coin(days: int | None = None,
+                                  hours: int | None = None) -> list[dict]:
     """Conviction-richting accuracy per coin vanuit straddle-history (Signal Lab data).
 
     Vergelijkt conviction_at_trigger ('UP'/'DOWN') met actual_winner ('YES'/'NO').
     Geen dubbele tracking nodig — hergebruikt de bestaande straddle datapunten.
     Geeft per coin: n (trades met signaal), accuracy (%), net_pnl (straddle P&L).
+    hours heeft prioriteit over days. Beide None → alle tijd.
     """
     if not _db_path.exists():
         return []
@@ -105,7 +107,10 @@ def get_signal_accuracy_per_coin(days: int | None = None) -> list[dict]:
         "(mode IS NULL OR mode != 'signal_trader')",
     ]
     params: list = []
-    if days:
+    if hours is not None:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{hours} hours")
+    elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
     where = " AND ".join(conditions)
@@ -129,6 +134,27 @@ def get_signal_accuracy_per_coin(days: int | None = None) -> list[dict]:
             params,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_market_resolution(market_id: str) -> str | None:
+    """Zoek de daadwerkelijke winnaar op voor een market via straddle-trades.
+
+    Geeft 'YES' of 'NO' terug als er een afgesloten straddle-trade bestaat voor
+    deze market_id. Wordt gebruikt als backup in signal_trader resolution wanneer
+    de WS-prijs niet beschikbaar is na settlement.
+    """
+    if not _db_path.exists() or not market_id:
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT actual_winner FROM trades
+               WHERE market_id = ?
+                 AND actual_winner IS NOT NULL
+                 AND (mode IS NULL OR mode != 'signal_trader')
+               LIMIT 1""",
+            (market_id,),
+        ).fetchone()
+    return row["actual_winner"] if row else None
 
 
 # ── Signal Trader ─────────────────────────────────────────────────────────────
