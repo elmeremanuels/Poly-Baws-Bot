@@ -363,11 +363,93 @@ with st.sidebar:
     st.caption("Auto-refreshes every 5s")
 
 
+# ── Signal strategy status bar ────────────────────────────────────────────────
+
+def _signal_strategy_bar() -> None:
+    """Compact status + manual toggles for directional_entry and conviction_weighting."""
+    de_enabled_str = get_state("directional_entry_enabled")
+    cw_enabled_str = get_state("conviction_weighting_enabled")
+    wg_cfg = CONFIG.get("weighting_guard", {})
+    de_cfg = CONFIG.get("directional_entry", {})
+    cw_cfg = CONFIG.get("conviction_weighting", {})
+
+    # Live state: prefer DB value (bot may have toggled it) else fall back to config.yaml
+    de_on = (de_enabled_str.lower() == "true") if de_enabled_str else de_cfg.get("enabled", False)
+    cw_on = (cw_enabled_str.lower() == "true") if cw_enabled_str else cw_cfg.get("enabled", False)
+
+    de_rate_str = get_state("wg_de_last_rate")
+    cw_rate_str = get_state("wg_cw_last_rate")
+    de_auto = get_state("wg_de_auto_disabled") == "true"
+    cw_auto = get_state("wg_cw_auto_disabled") == "true"
+
+    guard_on = wg_cfg.get("enabled", True)
+    disable_thr = wg_cfg.get("disable_threshold", 0.47)
+    enable_thr = wg_cfg.get("enable_threshold", 0.53)
+
+    def _accuracy_chip(rate_str: str | None, on: bool) -> str:
+        if rate_str is None:
+            return "geen data"
+        rate = float(rate_str)
+        pct = f"{rate * 100:.0f}%"
+        if rate < disable_thr:
+            return f"🔴 {pct}"
+        if rate >= enable_thr:
+            return f"🟢 {pct}"
+        return f"🟡 {pct}"
+
+    with st.expander(
+        f"⚡ Signaalstrategieën — "
+        f"Directional: {'🟢 AAN' if de_on else '🔴 UIT'}  |  "
+        f"Gewogen inkoop: {'🟢 AAN' if cw_on else '🔴 UIT'}",
+        expanded=False,
+    ):
+        st.caption(
+            f"Auto-beheer: {'✅ actief' if guard_on else '❌ uit'}  ·  "
+            f"Drempels: uitschakel <{int(disable_thr*100)}%, inschakelen ≥{int(enable_thr*100)}%"
+        )
+        col_de, col_cw = st.columns(2)
+
+        with col_de:
+            st.markdown("**Directional Inkoop** *(enkel YES of NO)*")
+            st.caption(
+                f"Status: {'🟢 AAN' if de_on else '🔴 UIT'}"
+                + (" *(auto-uit)*" if de_auto else "")
+                + f"  |  Nauwkeurigheid: {_accuracy_chip(de_rate_str, de_on)}"
+            )
+            col_de_on, col_de_off = st.columns(2)
+            with col_de_on:
+                if st.button("▶ AAN", key="sg_de_on", disabled=de_on):
+                    write_command("set_directional_entry", {"enabled": True})
+                    st.rerun()
+            with col_de_off:
+                if st.button("⏹ UIT", key="sg_de_off", disabled=not de_on):
+                    write_command("set_directional_entry", {"enabled": False})
+                    st.rerun()
+
+        with col_cw:
+            st.markdown("**Gewogen Inkoop** *(asymmetrische maten)*")
+            st.caption(
+                f"Status: {'🟢 AAN' if cw_on else '🔴 UIT'}"
+                + (" *(auto-uit)*" if cw_auto else "")
+                + f"  |  Nauwkeurigheid: {_accuracy_chip(cw_rate_str, cw_on)}"
+            )
+            col_cw_on, col_cw_off = st.columns(2)
+            with col_cw_on:
+                if st.button("▶ AAN", key="sg_cw_on", disabled=cw_on):
+                    write_command("set_conviction_weighting", {"enabled": True})
+                    st.rerun()
+            with col_cw_off:
+                if st.button("⏹ UIT", key="sg_cw_off", disabled=not cw_on):
+                    write_command("set_conviction_weighting", {"enabled": False})
+                    st.rerun()
+
+
 # ── Main dashboard (auto-refresh every 5s) ────────────────────────────────────
 
 @st.fragment(run_every=5)
 def dashboard() -> None:
     _scanner_alerts()
+    _signal_strategy_bar()
     _hybrid_panel()
     open_trades = get_open_trades()
     _coin_grid(open_trades)

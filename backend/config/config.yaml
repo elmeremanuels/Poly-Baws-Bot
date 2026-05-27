@@ -123,14 +123,21 @@ dashboard:
 
 bias:
   max_weight_ratio: 2.0     # biased side gets up to 2× size when certainty = 1.0
-  min_certainty: 0.20       # ignore bias below this score to avoid marginal signals
+  min_certainty: 0.99       # effectively disabled — set to 0.20 to re-activate
 
 conviction_weighting:
-  enabled: true             # conviction-driven asymmetric sizing active
+  enabled: false            # UITGESCHAKELD — weighting_guard heractiveerd als accuracy >53%
   min_score: 0.45           # below this score = symmetric entry (1€/1€)
   max_ratio: 1.5            # at score=1.0 → biased side gets 1.5× the base size
-  # Example: score=0.65, min=0.45, max=2.0 → weight = 1 + (0.65-0.45)/(1-0.45)*1 = 1.36×
   # Use the Scenario Replay → Gewogen inkoop tab to backtest before enabling.
+
+weighting_guard:
+  enabled: true             # auto-disables conviction_weighting / directional_entry on poor performance
+  eval_interval_secs: 1800  # re-evaluate every 30 minutes
+  min_trades: 15            # minimum trades before making a decision
+  disable_threshold: 0.47   # disable if direction accuracy < this (worse than coin-flip)
+  enable_threshold: 0.53    # re-enable if accuracy >= this (genuine edge)
+  auto_reenable: true       # allow auto re-enable when accuracy recovers
 
 logging:
   level: "INFO"
@@ -140,7 +147,7 @@ ab_test:
   conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
 
 directional_entry:
-  enabled: true
+  enabled: false            # UITGESCHAKELD — weighting_guard heractiveerd als accuracy >53%
   conviction_threshold: 0.70     # conviction >= this → buy only biased side (no straddle handicap)
   straddle_min_conviction: 0.45  # conviction 0 < score < this → skip trade entirely
   min_depth_shares: 20           # top-3 ask levels must hold >= 20 shares before going directional

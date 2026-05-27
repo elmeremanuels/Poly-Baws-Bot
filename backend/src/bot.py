@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timezone
 
-from . import scanner, ws_client, risk, asset_price_feed, signals as _signals
+from . import scanner, ws_client, risk, asset_price_feed, signals as _signals, weighting_guard as _wg
 from .config_loader import CONFIG
 from .logger import log, write_event, save_dashboard_state
 from .state import (
@@ -351,5 +351,6 @@ async def run_bot() -> None:
     # Always spawn the learning loop; it self-gates on live_learning mode so a
     # runtime mode switch (not just a restart-into-live_learning) activates it.
     tasks.append(asyncio.create_task(_learning_tick_loop()))
+    tasks.append(asyncio.create_task(_wg.weighting_guard_loop()))
 
     await asyncio.gather(*tasks)

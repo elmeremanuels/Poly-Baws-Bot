@@ -307,5 +307,20 @@ async def _run_command(command: str, payload: dict) -> None:
             await save_dashboard_state("portfolio_start_usdc", current)
             log.info("portfolio_start_reset", value=current)
 
+    elif command == "set_conviction_weighting":
+        enabled = bool(payload.get("enabled", False))
+        CONFIG.setdefault("conviction_weighting", {})["enabled"] = enabled
+        # Clear the guard's auto-disabled flag so manual intent is respected
+        await save_dashboard_state("wg_cw_auto_disabled", "false")
+        await save_dashboard_state("conviction_weighting_enabled", str(enabled))
+        log.info("conviction_weighting_set", enabled=enabled)
+
+    elif command == "set_directional_entry":
+        enabled = bool(payload.get("enabled", False))
+        CONFIG.setdefault("directional_entry", {})["enabled"] = enabled
+        await save_dashboard_state("wg_de_auto_disabled", "false")
+        await save_dashboard_state("directional_entry_enabled", str(enabled))
+        log.info("directional_entry_set", enabled=enabled)
+
     else:
         log.warning("unknown_command", command=command)
