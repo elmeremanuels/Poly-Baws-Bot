@@ -508,7 +508,14 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     _guard_state = get_state(f"cg_{coin}_state") or "active"
     _guard_streak = get_state(f"cg_{coin}_streak") or "0"
     if _guard_state == "disabled":
-        st.error("🚫 Guard actief — zie Beveiliging", icon=None)
+        if not st.session_state.get(f"_gd_card_{coin}"):
+            _ga, _gb = st.columns([5, 1])
+            with _ga:
+                st.error("🚫 Guard — zie Beveiliging", icon=None)
+            with _gb:
+                if st.button("✕", key=f"gd_card_x_{coin}", help="Verberg"):
+                    st.session_state[f"_gd_card_{coin}"] = True
+                    st.rerun()
     elif _guard_state == "watch":
         st.warning(f"⚠️ Watch: {_guard_streak}× verlies op rij")
 

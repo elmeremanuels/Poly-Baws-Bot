@@ -161,14 +161,18 @@ def coin_protection_panel() -> None:
                 col_diag, _ = st.columns([2, 3])
                 with col_diag:
                     if st.button("🔍 Wat ging er fout?", key=f"diag_{coin}",
-                                 help="Claude geeft een korte diagnose van de verliezen vandaag"):
+                                 help="Claude diagnoseert de verliezen van de afgelopen 24 uur"):
                         from src.claude_analyzer import analyze_guard_trigger_sync
                         from src.db_sync import get_exit_reason_stats
                         with st.spinner("Claude analyseert (~15s)..."):
                             try:
-                                trades_t = get_analytics_trades(coin=coin, only_today=True)
-                                exit_s   = get_exit_reason_stats(coin=coin, only_today=True)
-                                dpnl     = get_daily_pnl(coin=coin)
+                                # Laatste 24 uur — niet alleen vandaag
+                                trades_t = get_analytics_trades(coin=coin, days=1)
+                                exit_s   = get_exit_reason_stats(coin=coin, days=1)
+                                dpnl     = sum(
+                                    t.get("net_pnl") or 0 for t in trades_t
+                                    if t.get("net_pnl") is not None
+                                )
                                 analysis = analyze_guard_trigger_sync(
                                     coin, g["reason"], dpnl, trades_t, exit_s
                                 )
@@ -233,7 +237,12 @@ def coin_protection_panel() -> None:
                         with st.spinner(f"Claude analyseert {coin}... (kan ~30s duren)"):
                             try:
                                 from src.claude_analyzer import analyze_coin_strategy_sync
-                                result = analyze_coin_strategy_sync(coin, trades)
+                                # Altijd laatste 24u meegeven als zwaarste context
+                                trades_24h = get_analytics_trades(coin=coin, days=1)
+                                result = analyze_coin_strategy_sync(
+                                    coin, trades,
+                                    recent_trades_24h=trades_24h if trades_24h else None,
+                                )
                                 st.session_state[f"herzie_{coin}"] = result
                                 st.rerun()
                             except Exception as exc:

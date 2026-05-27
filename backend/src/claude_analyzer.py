@@ -482,8 +482,17 @@ Geef parameter-aanbevelingen per regime (TRENDING, CHOPPY, RANGING, BREAKOUT, NO
 Antwoord ALLEEN in het gevraagde JSON formaat, geen markdown code blocks."""
 
 
-def analyze_coin_strategy_sync(coin: str, trades: list[dict]) -> dict:  # noqa: C901
+def analyze_coin_strategy_sync(  # noqa: C901
+    coin: str,
+    trades: list[dict],
+    recent_trades_24h: list[dict] | None = None,
+) -> dict:
     """Sync Claude analysis for a single coin — called from Streamlit's Herzie Strategie button.
+
+    Args:
+        coin: coin ticker (BTC/ETH/…)
+        trades: trades for the selected analysis period (7d/30d/all)
+        recent_trades_24h: last-24h trades for "what went wrong" context (heavy weighting)
 
     Gathers ALL available data sources:
       - Trade aggregates + microstructure (spread, depth, velocity, timing)
@@ -777,11 +786,48 @@ Regime profielen (actief):
   "reasoning": "3-5 zinnen volledige redenering in het Nederlands"
 }"""
 
+    # ── Last-24h context (heavy weight — direct cause of guard trigger) ──────
+    recent_24h_block = ""
+    if recent_trades_24h:
+        trig_24h  = [t for t in recent_trades_24h if t.get("trigger_hit")]
+        wins_24h  = [t for t in trig_24h if (t.get("net_pnl") or 0) > 0]
+        pnl_24h   = sum(t.get("net_pnl") or 0 for t in trig_24h)
+        exits_24h: dict = {}
+        regimes_24h: dict = {}
+        for t in trig_24h:
+            ex = t.get("winner_exit_reason") or t.get("status") or "?"
+            exits_24h[ex] = exits_24h.get(ex, 0) + 1
+            rg = t.get("regime_at_entry") or "?"
+            if rg not in regimes_24h:
+                regimes_24h[rg] = {"n": 0, "pnl": 0.0}
+            regimes_24h[rg]["n"] += 1
+            regimes_24h[rg]["pnl"] += t.get("net_pnl") or 0
+        exit_str   = ", ".join(f"{k}: {v}×" for k, v in sorted(exits_24h.items(), key=lambda x: -x[1]))
+        regime_str = ", ".join(
+            f"{r}: {d['n']}× €{d['pnl']:+.2f}" for r, d in sorted(regimes_24h.items())
+        )
+        recent_24h_block = (
+            "\n══ LAATSTE 24 UUR — ZWAARSTE WEGING (directe aanleiding guard-trigger) ══\n"
+            f"Trades:          {len(trig_24h)} getriggerd van {len(recent_trades_24h)} totaal\n"
+            f"Win rate:        {len(wins_24h)/max(len(trig_24h),1)*100:.1f}%"
+            f"  ({len(wins_24h)}/{len(trig_24h)})\n"
+            f"P&L:             €{pnl_24h:+.2f}\n"
+            f"Exit-verdeling:  {exit_str or '—'}\n"
+            f"Regimes:         {regime_str or '—'}\n"
+            "═════════════════════════════════════════════════════════════════════\n\n"
+        )
+
     user_prompt = (
-        f"{stats_text.strip()}\n\n"
-        "Analyseer ALLE bovenstaande data zorgvuldig en geef een herziene handelsstrategie "
-        f"voor {coin}. Gebruik de microstructuur, conviction buckets, threshold sweep en "
-        "tijdstip-patronen als bewijs voor je aanbevelingen. "
+        f"{recent_24h_block}{stats_text.strip()}\n\n"
+        f"Voer een gestructureerde analyse uit voor {coin} in 4 stappen:\n\n"
+        "STAP 1 — PROBLEEM: Wat is er mis gegaan in de laatste 24 uur? "
+        "(gebruik de '══ LAATSTE 24 UUR ══' sectie als primaire bron — dit weegt het zwaarst)\n\n"
+        "STAP 2 — HUIDIGE STRATEGIE: Wat zijn de huidige instellingen en wat werkt wél "
+        "volgens de bredere periode-data?\n\n"
+        f"STAP 3 — DOEL: Wat is een winstgevende strategie voor {coin} gegeven de "
+        "gedetecteerde regimes en marktomstandigheden?\n\n"
+        "STAP 4 — ACTIEPLAN: Concrete parameter-wijzigingen die de gap dichten "
+        "(trigger_threshold, cross_threshold, early_loser, ratchet_buffer per regime).\n\n"
         f"Return exact dit JSON schema:\n{schema}"
     )
 
