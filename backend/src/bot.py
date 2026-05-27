@@ -21,6 +21,23 @@ def _effective_is_auto(mode: str) -> bool:
     return is_auto_mode()
 
 
+def _in_skip_hours(window_start) -> bool:
+    """Return True if window_start falls in a configured skip-hour (UTC).
+
+    CONFIG.trading_hours.skip_utc_hours: list of UTC hours to block (e.g. [5, 7]).
+    Data from 27-05-2026 shows hour 05 (41% WR, -€8.21) and hour 07 (43% WR, -€6.73)
+    are consistent losers; hours 02 (83%) and 04 (87%) are the best.
+    """
+    th_cfg = CONFIG.get("trading_hours", {})
+    if not th_cfg.get("enabled", False):
+        return False
+    skip_hours = th_cfg.get("skip_utc_hours", [])
+    if not skip_hours or window_start is None:
+        return False
+    utc_hour = window_start.hour if hasattr(window_start, "hour") else None
+    return utc_hour in skip_hours
+
+
 def _effective_is_paper(mode: str) -> bool:
     """In live learning mode, paper/live depends on current phase."""
     if mode == "live_learning":
@@ -92,6 +109,11 @@ async def _process_coin_window(coin: str, market: dict) -> None:
 
     window_ts = market["window_start"].isoformat() if market["window_start"] else ""
     if has_traded_window(coin, window_ts):
+        return
+
+    if _in_skip_hours(market.get("window_start")):
+        log.info("trade_skipped_hour_filter", coin=coin,
+                 hour=market["window_start"].hour if market.get("window_start") else None)
         return
 
     # In auto mode: verify entry conditions BEFORE consuming the window slot.

@@ -37,8 +37,10 @@ exit:
   early_loser_rebuy_threshold: 0.55 # rebuy if sold side recovers above this (null = disabled)
   early_loser_cooldown_secs: 90     # wait at least this long after entry fill before selling early
   # Loss-control knobs — cap the magnitude of peg_cross / force-exit losses.
-  winner_max_loss_per_trade_eur: 0.70  # hard stop: exit winner when (break_even - eff_bid)*size >= this
-  winner_velocity_stop: -0.004         # ¢/sec decline rate that triggers early exit (must be < current_limit - 0.05)
+  # DATA 27-05: winner_stop_loss veroorzaakte -€40.95 over 35 trades (25 correcte richtingen afgekapt).
+  # Uitgeschakeld: peg_cross en force_exit handelen de exit — stop snijdt te vroeg in winnende trades.
+  winner_max_loss_per_trade_eur: null  # null = uitgeschakeld; was 0.70
+  winner_velocity_stop: null           # null = uitgeschakeld; was -0.004 ¢/sec
   hold_for_resolution_ev_floor: true   # only hold to resolution if mid >= break_even (EV-positive)
 
 entry:
@@ -131,12 +133,18 @@ conviction_weighting:
   max_ratio: 1.5            # at score=1.0 → biased side gets 1.5× the base size
   # Use the Scenario Replay → Gewogen inkoop tab to backtest before enabling.
 
+trading_hours:
+  # DATA 27-05: uur 02:00 UTC (+€8.92, 83% WR), 04:00 UTC (+€10.91, 87% WR)
+  #             uur 05:00 UTC (-€8.21, 41% WR), 07:00 UTC (-€6.73, 43% WR)
+  enabled: true
+  skip_utc_hours: [5, 7]       # sla deze UTC-uren over (window_start valt in dit uur)
+
 weighting_guard:
   enabled: true             # auto-disables conviction_weighting / directional_entry on poor performance
   eval_interval_secs: 1800  # re-evaluate every 30 minutes
-  min_trades: 15            # minimum trades before making a decision
-  disable_threshold: 0.47   # disable if direction accuracy < this (worse than coin-flip)
-  enable_threshold: 0.53    # re-enable if accuracy >= this (genuine edge)
+  min_trades: 20            # minimum trades before making a decision (verhoogd voor betrouwbaarheid)
+  disable_threshold: 0.45   # disable if direction accuracy < this (ruim onder coin-flip)
+  enable_threshold: 0.55    # re-enable if accuracy >= this
   auto_reenable: true       # allow auto re-enable when accuracy recovers
 
 logging:
@@ -147,9 +155,12 @@ ab_test:
   conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
 
 directional_entry:
-  enabled: false            # UITGESCHAKELD — weighting_guard heractiveerd als accuracy >53%
-  conviction_threshold: 0.70     # conviction >= this → buy only biased side (no straddle handicap)
-  straddle_min_conviction: 0.45  # conviction 0 < score < this → skip trade entirely
+  # DATA 27-05: directional (conviction ≥ 0.70) → 78.7% WR, +€29.16 over 75 trades
+  # Dual-side straddels (lage conviction) → 37.1% WR, -€33.04 over 105 trades
+  # Drempel verlaagd naar 0.65; straddle_min ook op 0.65 → alles onder 0.65 overgeslagen
+  enabled: true
+  conviction_threshold: 0.65     # conviction >= this → koop alleen de biased zijde
+  straddle_min_conviction: 0.65  # conviction 0 < score < this → skip trade volledig (geen straddle)
   min_depth_shares: 20           # top-3 ask levels must hold >= 20 shares before going directional
   pricing_model:
     enabled: true

@@ -875,11 +875,14 @@ async def _winner_exit_paper(
     ratchet_count = 0
     trail_start = asyncio.get_event_loop().time()
     # Pre-compute loss-control constants (stable per trade)
-    _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
+    _max_loss_raw = es.get("winner_max_loss_per_trade_eur", 0.70)
+    _max_loss_eur = float(_max_loss_raw) if _max_loss_raw is not None else None  # None = disabled
     _vel_raw = es.get("winner_velocity_stop", -0.004)
     _vel_stop = float(_vel_raw) if _vel_raw is not None else None  # None = disabled (e.g. RANGING)
     _winner_stop_bid = (
-        round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
+        round(break_even_price - _max_loss_eur / max(0.01, size), 4)
+        if (break_even_price and _max_loss_eur is not None)
+        else None  # None = stop disabled
     )
 
     await write_event(trade_id, "trailing_started", coin, {
@@ -938,8 +941,9 @@ async def _winner_exit_paper(
 
             # Fix 1: Hard stop-loss — cap loss magnitude to winner_max_loss_per_trade_eur.
             # Fires when depth-aware fill price would produce > max loss, regardless of score.
+            # _winner_stop_bid is None when the feature is disabled (null in config).
             _check_bid = eff_bid if eff_bid is not None else mid
-            if _check_bid <= _winner_stop_bid:
+            if _winner_stop_bid is not None and _check_bid <= _winner_stop_bid:
                 result = await paper_trader.simulate_market_sell(winner_token, size)
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
                 await fill_tracker.record_fill_attempt(trade_id, winner_token, "sell", current_limit, False)
@@ -1073,11 +1077,14 @@ async def _winner_exit_live(
     trail_start = asyncio.get_event_loop().time()
     last_status_check = trail_start
     # Pre-compute loss-control constants (stable per trade)
-    _max_loss_eur = float(es.get("winner_max_loss_per_trade_eur", 0.70))
+    _max_loss_raw = es.get("winner_max_loss_per_trade_eur", 0.70)
+    _max_loss_eur = float(_max_loss_raw) if _max_loss_raw is not None else None  # None = disabled
     _vel_raw = es.get("winner_velocity_stop", -0.004)
     _vel_stop = float(_vel_raw) if _vel_raw is not None else None  # None = disabled (e.g. RANGING)
     _winner_stop_bid = (
-        round(break_even_price - _max_loss_eur / max(0.01, size), 4) if break_even_price else 0.35
+        round(break_even_price - _max_loss_eur / max(0.01, size), 4)
+        if (break_even_price and _max_loss_eur is not None)
+        else None  # None = stop disabled
     )
 
     limit_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
@@ -1149,8 +1156,9 @@ async def _winner_exit_live(
             eff_bid = _estimate_sell_fill(winner_token, size)
 
             # Fix 1: Hard stop-loss — cap loss magnitude regardless of cross_score or hold-guards.
+            # _winner_stop_bid is None when the feature is disabled (null in config).
             _check_bid = eff_bid if eff_bid is not None else mid
-            if _check_bid <= _winner_stop_bid:
+            if _winner_stop_bid is not None and _check_bid <= _winner_stop_bid:
                 await orders.cancel_order(current_order_id)
                 mkt_resp = await orders.place_market_order(winner_token, "SELL", size)
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
