@@ -46,7 +46,10 @@ def _is_paper() -> bool:
 
 
 def _in_skip_hours(window_start) -> bool:
-    """Zelfde uur-filter als de straddle strategie."""
+    """Uur-filter. Signal_trader negeert dit standaard (respect_trading_hours=false)
+    omdat de conviction-gate al slechte uren uitfiltert."""
+    if not _cfg().get("respect_trading_hours", False):
+        return False  # Signal_trader handelt ongeacht het uur
     th_cfg = CONFIG.get("trading_hours", {})
     if not th_cfg.get("enabled", False):
         return False

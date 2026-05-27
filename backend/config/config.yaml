@@ -162,13 +162,14 @@ signal_trader:
   # Geen stop loss, geen trailing exit, geen peg-cross. Houdt tot resolution.
   # Break-even bij ~52ct inkoop: 52.0% accuracy vereist.
   # DATA handoff 27-05: 73.8% signaal accuracy → +€356 netto op 80 trades.
-  conviction_threshold: 0.65    # minimum signaal conviction om te traden
+  conviction_threshold: 0.35    # minimum signaal conviction om te traden (0.65 te hoog — te zeldzaam)
   trade_size_eur: 10.00         # inleg per trade in EUR
-  entry_price_max: 0.55         # nooit meer dan 55ct per share betalen
+  entry_price_max: 0.58         # nooit meer dan 58ct per share betalen (was 0.55, te restrictief)
   paper_mode: true              # true = gesimuleerde orders (start altijd paper!)
   max_concurrent_positions: 10  # max gelijktijdige open posities (alle coins samen)
   max_daily_loss_eur: 50.00     # dagelijks verlies limiet
   max_trades_per_day: 200       # max trades per dag
+  respect_trading_hours: false  # false = negeert skip_utc_hours (conviction-gate is genoeg)
   coins:
     BTC:
       enabled: true
