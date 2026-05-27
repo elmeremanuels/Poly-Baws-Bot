@@ -21,8 +21,12 @@ from src.backtest_engine import BacktestEngine, BacktestResult
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-_RANGE_DAYS = {"All time": None, "30 days": 30, "7 days": 7, "Today": 1}
 
+# Standaard: laatste 24 uur. Overige periodes via zoekfilter.
+_RANGE_DAYS = {"24 uur": 1, "7 dagen": 7, "30 dagen": 30, "Alle tijd": None}
+
+
+# ── Gecachede DB-queries ───────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
 def _q_trades(coin, days, only_today):
@@ -71,7 +75,7 @@ def _q_pnl_by_exit_reason(coin, days, only_today):
 
 @st.cache_data(ttl=120)
 def _run_backtest_engine(coin, days):
-    """Cache BacktestEngine results for 2 minutes to avoid re-running on every widget interaction."""
+    """Cache BacktestEngine resultaten 2 minuten — niet aanroepen zonder explicit verzoek."""
     engine = BacktestEngine(coin=coin if coin != "All" else None, days=days)
     if not engine.trades:
         return None
@@ -81,6 +85,7 @@ def _run_backtest_engine(coin, days):
         "exit_reason": engine.sweep_exit_reason(),
         "grid": engine.grid_search(),
         "early_loser": engine.simulate_early_loser_sell(),
+        "weighting_engine_trades": [t for t in engine.trades],  # store for weighting tab
         "n_trades": len(engine.trades),
     }
 
@@ -89,34 +94,74 @@ def _results_to_df(results: list[BacktestResult]) -> pd.DataFrame:
     return pd.DataFrame([r.as_dict() for r in results])
 
 
+# ── Hoofd-fragment ─────────────────────────────────────────────────────────────
+
 @st.fragment
 def analytics_panel() -> None:
-    # ── Global Filters ────────────────────────────────────────────────────────
-    col_coin, col_range, col_export = st.columns([2, 3, 1])
+    # ── Zoekfilter ────────────────────────────────────────────────────────────
+    st.markdown("### 🔍 Zoekfilter")
+    col_coin, col_range = st.columns([2, 3])
     with col_coin:
-        selected_coin = st.selectbox("Coin", ["All"] + COINS, key="an_coin")
+        selected_coin = st.selectbox("Coin", ["Alle"] + COINS, key="an_coin")
     with col_range:
         selected_range = st.radio(
-            "Period", list(_RANGE_DAYS.keys()), horizontal=True, key="an_range"
+            "Periode", list(_RANGE_DAYS.keys()), horizontal=True, key="an_range", index=0
         )
 
-    coin_filter = selected_coin if selected_coin != "All" else None
-    only_today = (selected_range == "Today")
-    days = None if only_today else _RANGE_DAYS[selected_range]
+    col_btn, col_clear = st.columns([2, 1])
+    with col_btn:
+        apply_filter = st.button("🔍 Zoekfilter toepassen", key="an_apply_filter", type="primary")
+    with col_clear:
+        if st.session_state.get("an_results"):
+            if st.button("✕ Wis filter", key="an_clear_filter"):
+                st.session_state.pop("an_results", None)
+                st.session_state.pop("bt_cache", None)
+                st.session_state.pop("wt_cache", None)
+                st.rerun()
 
-    trades = _q_trades(coin_filter, days, only_today)
+    if apply_filter:
+        coin_filter_new = selected_coin if selected_coin != "Alle" else None
+        days_new = _RANGE_DAYS[selected_range]
+        trades_new = _q_trades(coin_filter_new, days_new, False)
+        st.session_state["an_results"] = {
+            "coin": coin_filter_new,
+            "days": days_new,
+            "range_label": selected_range,
+            "trades": trades_new,
+        }
+        # Backtest cache ongeldig bij nieuwe filterparameters
+        st.session_state.pop("bt_cache", None)
+        st.session_state.pop("wt_cache", None)
+
+    st.divider()
+
+    # ── Data bepalen ──────────────────────────────────────────────────────────
+    results = st.session_state.get("an_results")
+    if results:
+        coin_filter = results["coin"]
+        days = results["days"]
+        range_label = results["range_label"]
+        trades = results["trades"]
+        only_today = False
+        is_filtered = True
+    else:
+        # Standaard: afgelopen 24 uur, alle coins — lichtgewicht
+        coin_filter = None
+        days = 1
+        range_label = "24 uur"
+        only_today = False
+        trades = _q_trades(None, 1, False)
+        is_filtered = False
+
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
-    # Count label — confirms the filter is actually working
-    if only_today:
-        st.caption(f"{len(trades)} trades vandaag (UTC)")
-    elif days:
-        st.caption(f"{len(trades)} trades — afgelopen {days} dagen")
-    else:
-        st.caption(f"{len(trades)} trades — alle tijd")
-
+    # ── Label + export ────────────────────────────────────────────────────────
+    col_lbl, col_export = st.columns([4, 1])
+    with col_lbl:
+        prefix = "🔍 Gefilterd" if is_filtered else "📊 Standaard (24 uur)"
+        coin_suffix = f" — {coin_filter}" if coin_filter else " — alle coins"
+        st.caption(f"{prefix}: **{len(trades)} trades** — {range_label}{coin_suffix}")
     with col_export:
-        st.markdown("<br>", unsafe_allow_html=True)
         if not df.empty:
             export_cols = [
                 "trade_id", "coin", "mode", "triggered_by",
@@ -132,43 +177,46 @@ def analytics_panel() -> None:
                 "trades_export.csv", "text/csv", key="an_csv",
             )
 
-    # ── Claude Analysis (always visible, even without trades) ─────────────────
-    _claude_analysis_section(df, coin_filter, days)
-
+    # ── Lege staat ────────────────────────────────────────────────────────────
     if df.empty:
-        st.info("No completed triggered trades in this period.")
+        st.info("Geen voltooide triggered trades in deze periode.")
+        if not is_filtered:
+            st.caption("Gebruik het zoekfilter hierboven om een andere periode te bekijken.")
         return
 
-    # ── Key Metrics ───────────────────────────────────────────────────────────
+    # ── Key Metrics — altijd prominent ────────────────────────────────────────
     _key_metrics(df)
 
-    # ── Exit Reason Breakdown ─────────────────────────────────────────────────
+    # ── Exit Reason Breakdown — altijd prominent ───────────────────────────────
     _exit_breakdown(coin_filter, days, only_today)
 
-    # ── Per-Coin Comparison ───────────────────────────────────────────────────
+    # ── Per-Coin Vergelijking ─────────────────────────────────────────────────
     if coin_filter is None:
         _coin_comparison(days, only_today)
 
-    # ── Cumulative P&L Chart ──────────────────────────────────────────────────
+    # ── Cumulatief P&L ────────────────────────────────────────────────────────
     _cumulative_pnl(df)
 
-    # ── Trailing Metrics ──────────────────────────────────────────────────────
-    _trailing_metrics(df)
+    # ── Ingeklapte secties (opt-in) ───────────────────────────────────────────
+    with st.expander("📈 Trailing & Uurlijkse Analyse", expanded=False):
+        _trailing_metrics(df)
+        st.divider()
+        _hourly_analysis(coin_filter, days, only_today)
 
-    # ── Exit Loss Analysis ────────────────────────────────────────────────────
-    _exit_loss_analysis(coin_filter, days, only_today)
+    with st.expander("🚪 Exit Analyse (P&L per exit-reden)", expanded=False):
+        _exit_loss_analysis(coin_filter, days, only_today)
 
-    # ── Hourly Analysis ───────────────────────────────────────────────────────
-    _hourly_analysis(coin_filter, days, only_today)
+    with st.expander("🧠 Signal Analytics", expanded=False):
+        _signal_analytics(coin_filter, days, only_today)
 
-    # ── Signal Analytics ──────────────────────────────────────────────────────
-    _signal_analytics(coin_filter, days, only_today)
+    with st.expander("🤖 Claude Analyse", expanded=False):
+        _claude_analysis_section(df, coin_filter, days)
 
-    # ── Full Trade History ────────────────────────────────────────────────────
-    _trade_history(df)
+    with st.expander(f"📋 Trade Geschiedenis ({len(df)} trades)", expanded=False):
+        _trade_history_inner(df)
 
 
-# ── Sections ──────────────────────────────────────────────────────────────────
+# ── Secties ────────────────────────────────────────────────────────────────────
 
 def _key_metrics(df: pd.DataFrame) -> None:
     st.markdown("### Key Metrics")
@@ -186,19 +234,19 @@ def _key_metrics(df: pd.DataFrame) -> None:
     max_dd = float((cum - cum.cummax()).min())
 
     c = st.columns(6)
-    c[0].metric("Total Trades", total)
-    c[1].metric("Triggered", len(triggered))
-    c[2].metric("Aborted", len(aborted))
+    c[0].metric("Totaal trades", total)
+    c[1].metric("Getriggerd", len(triggered))
+    c[2].metric("Afgebroken", len(aborted))
     c[3].metric("Win Rate", f"{win_rate:.1f}%")
     c[4].metric("Net P&L", f"€{net_pnl:+.2f}")
-    c[5].metric("Avg P&L/Trade", f"€{avg_pnl:+.4f}")
+    c[5].metric("Gem. P&L/trade", f"€{avg_pnl:+.4f}")
 
 
 def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False) -> None:
     st.markdown("### Exit Reason Breakdown")
     stats = _q_exit_stats(coin, days, only_today)
     if not stats:
-        st.caption("No data.")
+        st.caption("Geen data.")
         return
 
     sdf = pd.DataFrame(stats)
@@ -208,12 +256,12 @@ def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False
     col_tbl, col_chart = st.columns([3, 2])
     with col_tbl:
         display = sdf.rename(columns={
-            "winner_exit_reason": "Exit Reason",
-            "count": "Count", "pct": "%",
-            "avg_pnl": "Avg P&L", "total_pnl": "Total P&L",
-            "avg_peak_bid": "Avg Peak Bid",
-            "avg_ratchets": "Avg Ratchets",
-            "avg_trail_time": "Avg Trail (s)",
+            "winner_exit_reason": "Exit Reden",
+            "count": "Aantal", "pct": "%",
+            "avg_pnl": "Gem. P&L", "total_pnl": "Totaal P&L",
+            "avg_peak_bid": "Gem. Peak Bid",
+            "avg_ratchets": "Gem. Ratchets",
+            "avg_trail_time": "Gem. Trail (s)",
         })
         st.dataframe(display, use_container_width=True, hide_index=True)
     with col_chart:
@@ -221,25 +269,25 @@ def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False
 
 
 def _coin_comparison(days: int | None, only_today: bool = False) -> None:
-    st.markdown("### Per-Coin Comparison")
+    st.markdown("### Per-Coin Vergelijking")
     rows = _q_coin_comparison(days, only_today)
     if not rows:
-        st.caption("No data.")
+        st.caption("Geen data.")
         return
 
     cdf = pd.DataFrame(rows)
     cdf.insert(0, "", [COIN_EMOJI.get(c, "") for c in cdf["coin"]])
     cdf = cdf.rename(columns={
         "coin": "Coin", "trades": "Trades", "win_rate": "Win %",
-        "total_pnl": "Net P&L", "avg_pnl": "Avg P&L",
-        "avg_peak_bid": "Avg Peak Bid", "avg_trail_time": "Avg Trail (s)",
-        "avg_fees": "Avg Fees",
+        "total_pnl": "Net P&L", "avg_pnl": "Gem. P&L",
+        "avg_peak_bid": "Gem. Peak Bid", "avg_trail_time": "Gem. Trail (s)",
+        "avg_fees": "Gem. Fees",
     })
     st.dataframe(cdf, use_container_width=True, hide_index=True)
 
 
 def _cumulative_pnl(df: pd.DataFrame) -> None:
-    st.markdown("### Cumulative P&L")
+    st.markdown("### Cumulatief P&L")
     plot_df = df[["created_at", "coin", "net_pnl"]].copy()
     plot_df["created_at"] = pd.to_datetime(plot_df["created_at"], format="mixed", utc=True)
     plot_df = plot_df.sort_values("created_at")
@@ -249,80 +297,58 @@ def _cumulative_pnl(df: pd.DataFrame) -> None:
         .sort_index().fillna(0).cumsum()
     )
     chart.columns.name = None
-    chart["Total"] = plot_df.groupby("created_at")["net_pnl"].sum().cumsum()
+    chart["Totaal"] = plot_df.groupby("created_at")["net_pnl"].sum().cumsum()
     st.line_chart(chart.ffill().fillna(0))
 
 
 def _trailing_metrics(df: pd.DataFrame) -> None:
     triggered = df[df["trigger_hit"] == 1].copy() if "trigger_hit" in df.columns else df.copy()
     if triggered.empty:
+        st.caption("Geen getriggerde trades in deze periode.")
         return
 
-    st.markdown("### Trailing Strategy Metrics")
+    st.markdown("**Trailing strategie metrics**")
     c = st.columns(4)
     avg_trail = triggered["time_in_trail_seconds"].mean() if "time_in_trail_seconds" in triggered else None
     avg_peak = triggered["peak_bid"].mean() if "peak_bid" in triggered else None
     avg_ratchet = triggered["ratchet_count"].mean() if "ratchet_count" in triggered else None
     avg_fees = triggered["fees_paid"].mean() if "fees_paid" in triggered else None
 
-    c[0].metric("Avg Trail Time", f"{avg_trail:.1f}s" if pd.notna(avg_trail) else "—")
-    c[1].metric("Avg Peak Bid", f"{float(avg_peak):.4f}" if pd.notna(avg_peak) else "—")
-    c[2].metric("Avg Ratchets", f"{avg_ratchet:.1f}" if pd.notna(avg_ratchet) else "—")
-    c[3].metric("Avg Fees", f"€{float(avg_fees):.4f}" if pd.notna(avg_fees) else "—")
+    c[0].metric("Gem. Trail Tijd", f"{avg_trail:.1f}s" if pd.notna(avg_trail) else "—")
+    c[1].metric("Gem. Peak Bid", f"{float(avg_peak):.4f}" if pd.notna(avg_peak) else "—")
+    c[2].metric("Gem. Ratchets", f"{avg_ratchet:.1f}" if pd.notna(avg_ratchet) else "—")
+    c[3].metric("Gem. Fees", f"€{float(avg_fees):.4f}" if pd.notna(avg_fees) else "—")
 
     scatter = triggered[["time_in_trail_seconds", "net_pnl", "winner_exit_reason"]].dropna()
     if not scatter.empty:
-        st.markdown("**Trail Time vs P&L**")
+        st.markdown("**Trail Tijd vs P&L**")
         st.scatter_chart(scatter, x="time_in_trail_seconds", y="net_pnl", color="winner_exit_reason")
 
 
 def _hourly_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
-    st.markdown("### Avg P&L by Hour of Day (UTC)")
+    st.markdown("**Gem. P&L per uur van de dag (UTC)**")
     hourly = _q_hourly_pnl(coin, days, only_today)
     if not hourly:
-        st.caption("Not enough data yet (needs 100+ trades for reliable signal).")
+        st.caption("Onvoldoende data (minimaal 100+ trades voor betrouwbaar signaal).")
         return
     hdf = pd.DataFrame(hourly).set_index("hour_utc")
     col_pnl, col_acc = st.columns(2)
     with col_pnl:
-        st.caption("Avg P&L per hour")
+        st.caption("Gem. P&L per uur")
         st.bar_chart(hdf[["avg_pnl"]])
     with col_acc:
-        st.caption("Direction accuracy % per hour")
+        st.caption("Richtingsnauwkeurigheid % per uur")
         acc = hdf[["direction_accuracy"]].dropna()
         if not acc.empty:
             st.bar_chart(acc)
         else:
-            st.caption("No direction accuracy data yet.")
-
-
-def _trade_history(df: pd.DataFrame) -> None:
-    with st.expander(f"📋 Full Trade History ({len(df)} trades)", expanded=False):
-        if not st.session_state.get("_hist_open"):
-            st.caption("Klik 'Toon' om de tabel te laden.")
-            if st.button("Toon", key="hist_open_btn"):
-                st.session_state["_hist_open"] = True
-                st.rerun()
-            return
-        display_cols = [
-            "created_at", "coin", "status", "mode", "triggered_by",
-            "entry_yes_price", "entry_no_price",
-            "loser_exit_price", "winner_exit_price", "winner_exit_reason",
-            "actual_winner", "peak_bid", "ratchet_count", "time_in_trail_seconds",
-            "fees_paid", "net_pnl",
-        ]
-        available = [c for c in display_cols if c in df.columns]
-        show = df[available].copy().sort_values("created_at", ascending=False).head(200)
-        if "created_at" in show.columns:
-            show["created_at"] = pd.to_datetime(show["created_at"], format="mixed", utc=True).dt.strftime("%m-%d %H:%M")
-        st.dataframe(show, use_container_width=True, hide_index=True)
+            st.caption("Nog geen richtingsdata.")
 
 
 def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
-    st.markdown("### Exit Analyse")
     st.caption(
-        "P&L per exit-reden — laat zien welk exit-kanaal het meeste verlies veroorzaakt. "
-        "Rood = verliesgevend kanaal; groen = winstgevend. Gesorteerd van slechtste naar beste."
+        "P&L per exit-reden — laat zien welk kanaal het meeste verlies veroorzaakt. "
+        "Rood = verliesgevend; groen = winstgevend. Gesorteerd van slechtste naar beste."
     )
     rows = _q_pnl_by_exit_reason(coin, days, only_today)
     if not rows:
@@ -353,11 +379,9 @@ def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = F
         use_container_width=True, hide_index=True,
     )
 
-    # Bar chart: total P&L per exit reason (sorted worst → best = left → right)
     chart_data = edf.set_index("exit_reason")[["total_pnl"]].sort_values("total_pnl")
     st.bar_chart(chart_data, use_container_width=True)
 
-    # Summary: biggest loss driver highlighted
     worst = edf.iloc[0]
     best = edf.iloc[-1]
     col_w, col_b = st.columns(2)
@@ -378,7 +402,6 @@ def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = F
 
 
 def _signal_analytics(coin: str | None, days: int | None, only_today: bool = False) -> None:
-    st.markdown("### Signal Analytics")
     st.caption(
         "Win rate en P&L per signaalklasse — gebaseerd op getriggerde + gesloten trades. "
         "Gebruik dit om te bepalen welke signaalcombinaties daadwerkelijk een edge geven."
@@ -395,7 +418,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.dataframe(
                 bdf.rename(columns={
                     "bucket": "Conviction bucket", "n": "Trades",
-                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
+                    "win_pct": "Win %", "avg_net_pnl": "Gem. P&L", "total_pnl": "Totaal P&L",
                 }),
                 use_container_width=True, hide_index=True,
             )
@@ -412,7 +435,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.dataframe(
                 rdf.rename(columns={
                     "regime": "Regime", "n": "Trades",
-                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L",
+                    "win_pct": "Win %", "avg_net_pnl": "Gem. P&L",
                     "total_pnl": "Totaal P&L", "peg_cross_pct": "PegCross %",
                 }),
                 use_container_width=True, hide_index=True,
@@ -428,7 +451,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.dataframe(
                 odf.rename(columns={
                     "bucket": "OFI bucket", "n": "Trades",
-                    "win_pct": "Win %", "avg_net_pnl": "Avg P&L", "total_pnl": "Totaal P&L",
+                    "win_pct": "Win %", "avg_net_pnl": "Gem. P&L", "total_pnl": "Totaal P&L",
                 }),
                 use_container_width=True, hide_index=True,
             )
@@ -439,172 +462,213 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.caption("Nog geen data.")
 
     with tab_backtest:
-        bt = _run_backtest_engine(coin, days)
+        st.caption(
+            "Replay van historische trades. Elke rij toont wat er was gebeurd als je "
+            "alleen onder die conditie had gehandeld. Kan 1–10 seconden duren."
+        )
+        if st.button("▶️ Bereken Scenario Replay", key="bt_run"):
+            with st.spinner("Scenario replay berekenen…"):
+                bt_data = _run_backtest_engine(coin, days)
+            st.session_state["bt_cache"] = {"coin": coin, "days": days, "data": bt_data}
+
+        cached = st.session_state.get("bt_cache", {})
+        bt = cached.get("data") if (cached.get("coin") == coin and cached.get("days") == days) else None
+
         if bt is None:
-            st.caption("Nog geen gesloten trades met signaaldata beschikbaar.")
+            st.caption("Klik '▶️ Bereken' om de scenario replay te starten.")
         else:
-            st.caption(
-                f"Replay van {bt['n_trades']} gesloten trades. "
-                "Elke rij toont wat er was gebeurd als je alleen onder die conditie had gehandeld. "
-                "Sharpe = dagelijkse gemiddelde P&L / standaarddeviatie (min. 5 handelsdagen vereist)."
-            )
-
-            # ── 1. Conviction sweep ───────────────────────────────────────────
-            st.markdown("**Conviction drempel**")
-            cdf = _results_to_df(bt["conviction"])
-            st.dataframe(cdf, use_container_width=True, hide_index=True)
-            col_wl, col_pnl = st.columns(2)
-            with col_wl:
-                st.caption("Win % per drempel")
-                st.line_chart(cdf.set_index("Strategie")[["Winrate %"]])
-            with col_pnl:
-                st.caption("Totaal P&L per drempel")
-                st.line_chart(cdf.set_index("Strategie")[["Totaal P&L"]])
-
-            st.divider()
-
-            # ── 2. Regime sweep ──────────────────────────────────────────────
-            st.markdown("**Regime filter**")
-            rdf = _results_to_df(bt["regime"])
-            st.dataframe(rdf, use_container_width=True, hide_index=True)
-            st.bar_chart(rdf.set_index("Strategie")[["Totaal P&L", "Winrate %"]])
-
-            st.divider()
-
-            # ── 3. Exit reason breakdown ─────────────────────────────────────
-            st.markdown("**Exit-reden analyse**")
-            st.caption("Hoe presteren peg_cross, limit_filled en held_for_resolution apart?")
-            edf = _results_to_df(bt["exit_reason"])
-            st.dataframe(edf, use_container_width=True, hide_index=True)
-
-            st.divider()
-
-            # ── 4. Grid search ───────────────────────────────────────────────
-            st.markdown("**Grid search: conviction × regime** *(gesorteerd op P&L)*")
-            gdf = _results_to_df(bt["grid"])
-            st.dataframe(gdf, use_container_width=True, hide_index=True)
-
-            # Best vs baseline equity curve
-            grid_results: list[BacktestResult] = bt["grid"]
-            conv_results: list[BacktestResult] = bt["conviction"]
-            baseline = next((r for r in conv_results if r.name == "≥0.00"), None)
-            best = grid_results[0] if grid_results else None
-            if best and baseline and best.cumulative_pnl and baseline.cumulative_pnl:
-                st.divider()
-                st.markdown("**Equity curve: baseline vs beste strategie**")
-                n = min(len(best.cumulative_pnl), len(baseline.cumulative_pnl))
-                curve_df = pd.DataFrame({
-                    "Baseline (alle trades)": baseline.cumulative_pnl[:n],
-                    f"Beste: {best.name}": best.cumulative_pnl[:n],
-                })
-                st.line_chart(curve_df)
+            st.caption(f"Gebaseerd op {bt['n_trades']} gesloten trades.")
+            _render_backtest_results(bt, coin, days)
 
     with tab_weighting:
-        bt = _run_backtest_engine(coin, days)
-        if bt is None:
-            st.caption("Nog geen gesloten trades met signaaldata beschikbaar.")
+        st.markdown("**Gewogen inkoop simulatie**")
+        st.caption(
+            "Simuleert wat de historische P&L was geweest als de biased kant "
+            "meer ingekocht was op basis van de conviction score. "
+            "**Let op:** hogere max ratio vergroot ook verlies bij foute richting."
+        )
+        max_ratio = st.slider(
+            "Max gewichtsverhouding (biased/neutraal)", 1.2, 3.0, 2.0, 0.1,
+            key="sim_max_ratio",
+        )
+        if st.button("▶️ Bereken gewogen inkoop", key="wt_run"):
+            with st.spinner("Simulatie berekenen…"):
+                engine = BacktestEngine(coin=coin if coin != "All" else None, days=days)
+                sim_rows = engine.simulate_weighting(max_ratio=max_ratio)
+            st.session_state["wt_cache"] = {
+                "coin": coin, "days": days, "rows": sim_rows, "ratio": max_ratio,
+            }
+
+        cached_wt = st.session_state.get("wt_cache", {})
+        sim_rows = (
+            cached_wt.get("rows")
+            if (cached_wt.get("coin") == coin and cached_wt.get("days") == days)
+            else None
+        )
+
+        if sim_rows is None:
+            st.caption("Klik '▶️ Bereken' om de simulatie te starten.")
         else:
-            st.markdown("### Gewogen inkoop simulatie")
-            st.caption(
-                "Simuleert wat de historische P&L was geweest als de biased kant "
-                "meer ingekocht was op basis van de conviction score. "
-                "**Let op:** een hogere max ratio vergroot ook het verlies als de richting fout is. "
-                "Zet dit alleen aan als 'Delta P&L' consistent positief is én 'Fout gewogen' laag."
-            )
-
-            max_ratio = st.slider("Max gewichtsverhouding (biased/neutraal)", 1.2, 3.0, 2.0, 0.1,
-                                   key="sim_max_ratio")
-
-            engine = BacktestEngine(coin=coin if coin != "All" else None, days=days)
-            sim_rows = engine.simulate_weighting(max_ratio=max_ratio)
-
-            if sim_rows:
-                sdf = pd.DataFrame(sim_rows)
-                st.dataframe(sdf, use_container_width=True, hide_index=True)
-
-                col_delta, col_dd = st.columns(2)
-                with col_delta:
-                    st.caption("Delta P&L per min_score (positief = weging helpt)")
-                    st.bar_chart(sdf.set_index("Min score")[["Delta P&L"]])
-                with col_dd:
-                    st.caption("Max drawdown (sim) per min_score")
-                    st.bar_chart(sdf.set_index("Min score")[["Max drawdown (sim)"]])
-
-                best_row = max(sim_rows, key=lambda r: r["Delta P&L"])
-                st.divider()
-                st.markdown(f"**Beste drempel: min_score = {best_row['Min score']}**")
-                col_a, col_b, col_c, col_d = st.columns(4)
-                col_a.metric("Delta P&L", f"€{best_row['Delta P&L']:+.4f}")
-                col_b.metric("Correct gewogen", best_row["Correct gewogen"])
-                col_c.metric("Fout gewogen", best_row["Fout gewogen"])
-                col_d.metric("Max drawdown (sim)", f"€{best_row['Max drawdown (sim)']:.4f}")
-
-                cw_on = CONFIG.get("conviction_weighting", {}).get("enabled", False)
-                if cw_on:
-                    st.success("Gewogen inkoop staat AAN (`conviction_weighting.enabled: true` in config.yaml)")
-                else:
-                    st.info(
-                        "Gewogen inkoop staat UIT. Zet aan via `config.yaml`:\n\n"
-                        "```yaml\nconviction_weighting:\n  enabled: true\n"
-                        f"  min_score: {best_row['Min score']}\n  max_ratio: {max_ratio}\n```"
-                    )
-            else:
-                st.caption(
-                    "Nog geen data. De simulatie vereist trades met `conviction_at_entry` "
-                    "en `winner_exit_price` gevuld — dit zijn trades na de Phase 2 deploy."
-                )
+            _render_weighting_results(sim_rows, max_ratio)
 
     with tab_vroeg:
-        bt = _run_backtest_engine(coin, days)
-        if bt is None or not bt.get("early_loser"):
+        cached = st.session_state.get("bt_cache", {})
+        bt = cached.get("data") if (cached.get("coin") == coin and cached.get("days") == days) else None
+
+        if bt is None:
+            st.caption("Bereken eerst via de **Scenario Replay** tab — de vroeg-verkopen analyse deelt dezelfde berekening.")
+        elif not bt.get("early_loser"):
             st.caption(
-                "Nog geen data. Vereist gesloten triggered trades met snapshot-geschiedenis "
-                "(snapshots worden elke 30s opgeslagen tijdens monitoring)."
+                "Geen data voor vroeg verkopen. Vereist gesloten triggered trades met "
+                "snapshot-geschiedenis (snapshots elke 30s opgeslagen tijdens monitoring)."
             )
         else:
-            st.markdown("### Vroeg verkopen simulatie")
-            st.caption(
-                "Per drempel: wat was de P&L als we de loser hadden verkocht op het moment "
-                "dat zijn mid-prijs onder die drempel zakte — in plaats van bij de trigger (~27¢)? "
-                "Winner trail blijft ongewijzigd (zelfde uitkomst). "
-                "Bied-schatting voor NO-loser via spread-model (gecalibreerd op mid=0.27→bid=0.17)."
+            _render_early_loser_results(bt["early_loser"])
+
+
+def _render_backtest_results(bt: dict, coin: str | None, days: int | None) -> None:
+    # 1. Conviction sweep
+    st.markdown("**Conviction drempel**")
+    cdf = _results_to_df(bt["conviction"])
+    st.dataframe(cdf, use_container_width=True, hide_index=True)
+    col_wl, col_pnl = st.columns(2)
+    with col_wl:
+        st.caption("Win % per drempel")
+        st.line_chart(cdf.set_index("Strategie")[["Winrate %"]])
+    with col_pnl:
+        st.caption("Totaal P&L per drempel")
+        st.line_chart(cdf.set_index("Strategie")[["Totaal P&L"]])
+
+    st.divider()
+
+    # 2. Regime sweep
+    st.markdown("**Regime filter**")
+    rdf = _results_to_df(bt["regime"])
+    st.dataframe(rdf, use_container_width=True, hide_index=True)
+    st.bar_chart(rdf.set_index("Strategie")[["Totaal P&L", "Winrate %"]])
+
+    st.divider()
+
+    # 3. Exit reason breakdown
+    st.markdown("**Exit-reden analyse**")
+    st.caption("Hoe presteren peg_cross, limit_filled en held_for_resolution apart?")
+    edf = _results_to_df(bt["exit_reason"])
+    st.dataframe(edf, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # 4. Grid search
+    st.markdown("**Grid search: conviction × regime** *(gesorteerd op P&L)*")
+    gdf = _results_to_df(bt["grid"])
+    st.dataframe(gdf, use_container_width=True, hide_index=True)
+
+    # Equity curve: best vs baseline
+    grid_results: list[BacktestResult] = bt["grid"]
+    conv_results: list[BacktestResult] = bt["conviction"]
+    baseline = next((r for r in conv_results if r.name == "≥0.00"), None)
+    best = grid_results[0] if grid_results else None
+    if best and baseline and best.cumulative_pnl and baseline.cumulative_pnl:
+        st.divider()
+        st.markdown("**Equity curve: baseline vs beste strategie**")
+        n = min(len(best.cumulative_pnl), len(baseline.cumulative_pnl))
+        curve_df = pd.DataFrame({
+            "Baseline (alle trades)": baseline.cumulative_pnl[:n],
+            f"Beste: {best.name}": best.cumulative_pnl[:n],
+        })
+        st.line_chart(curve_df)
+
+
+def _render_weighting_results(sim_rows: list, max_ratio: float) -> None:
+    sdf = pd.DataFrame(sim_rows)
+    st.dataframe(sdf, use_container_width=True, hide_index=True)
+
+    col_delta, col_dd = st.columns(2)
+    with col_delta:
+        st.caption("Delta P&L per min_score (positief = weging helpt)")
+        st.bar_chart(sdf.set_index("Min score")[["Delta P&L"]])
+    with col_dd:
+        st.caption("Max drawdown (sim) per min_score")
+        st.bar_chart(sdf.set_index("Min score")[["Max drawdown (sim)"]])
+
+    best_row = max(sim_rows, key=lambda r: r["Delta P&L"])
+    st.divider()
+    st.markdown(f"**Beste drempel: min_score = {best_row['Min score']}**")
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Delta P&L", f"€{best_row['Delta P&L']:+.4f}")
+    col_b.metric("Correct gewogen", best_row["Correct gewogen"])
+    col_c.metric("Fout gewogen", best_row["Fout gewogen"])
+    col_d.metric("Max drawdown (sim)", f"€{best_row['Max drawdown (sim)']:.4f}")
+
+    cw_on = CONFIG.get("conviction_weighting", {}).get("enabled", False)
+    if cw_on:
+        st.success("Gewogen inkoop staat AAN (`conviction_weighting.enabled: true` in config.yaml)")
+    else:
+        st.info(
+            "Gewogen inkoop staat UIT. Zet aan via `config.yaml`:\n\n"
+            "```yaml\nconviction_weighting:\n  enabled: true\n"
+            f"  min_score: {best_row['Min score']}\n  max_ratio: {max_ratio}\n```"
+        )
+
+
+def _render_early_loser_results(early_loser: list) -> None:
+    st.markdown("**Vroeg verkopen simulatie**")
+    st.caption(
+        "Per drempel: wat was de P&L als we de loser hadden verkocht op het moment "
+        "dat zijn mid-prijs onder die drempel zakte — in plaats van bij de trigger (~27¢)? "
+        "Winner trail blijft ongewijzigd."
+    )
+    eldf = pd.DataFrame(early_loser)
+    st.dataframe(eldf, use_container_width=True, hide_index=True)
+
+    if not eldf.empty and "Delta P&L" in eldf.columns:
+        col_delta, col_price = st.columns(2)
+        with col_delta:
+            st.caption("Delta P&L per drempel (positief = vroeg verkopen helpt)")
+            st.bar_chart(eldf.set_index("Loser mid drempel")[["Delta P&L"]])
+        with col_price:
+            st.caption("Gem. loser exit prijs: vroeg vs. huidig")
+            price_cols = [c for c in ["Gem. loser bid (vroeg)", "Gem. loser bid (huidig)"]
+                          if c in eldf.columns]
+            if price_cols:
+                plot_df = eldf.set_index("Loser mid drempel")[price_cols].dropna()
+                if not plot_df.empty:
+                    st.line_chart(plot_df)
+
+        best = max(early_loser, key=lambda r: r.get("Delta P&L", 0))
+        if best["Delta P&L"] > 0:
+            st.divider()
+            st.markdown(f"**Beste drempel: loser mid ≤ {best['Loser mid drempel']}**")
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("Delta P&L", f"€{best['Delta P&L']:+.4f}")
+            col_b.metric("Gem. loser bid (vroeg)", f"{best.get('Gem. loser bid (vroeg)', 0):.3f}")
+            col_c.metric("Gem. loser bid (huidig)", f"{best.get('Gem. loser bid (huidig)', 0):.3f}")
+            col_d.metric("Trades vroeg exit", best["Trades vroeg exit"])
+            st.info(
+                f"Aanbevolen: verkoop de loser zodra zijn mid ≤ **{best['Loser mid drempel']}** "
+                f"(ca. {best.get('Gem. loser bid (vroeg)', 0):.2f} bid)."
             )
+        else:
+            st.caption("Geen drempel verbetert de P&L — vroeg verkopen helpt hier niet.")
 
-            eldf = pd.DataFrame(bt["early_loser"])
-            st.dataframe(eldf, use_container_width=True, hide_index=True)
 
-            if not eldf.empty and "Delta P&L" in eldf.columns:
-                col_delta, col_price = st.columns(2)
-                with col_delta:
-                    st.caption("Delta P&L per drempel (positief = vroeg verkopen helpt)")
-                    st.bar_chart(eldf.set_index("Loser mid drempel")[["Delta P&L"]])
-                with col_price:
-                    st.caption("Gem. loser exit prijs: vroeg vs. huidig")
-                    price_cols = [c for c in ["Gem. loser bid (vroeg)", "Gem. loser bid (huidig)"]
-                                  if c in eldf.columns]
-                    if price_cols:
-                        plot_df = eldf.set_index("Loser mid drempel")[price_cols].dropna()
-                        if not plot_df.empty:
-                            st.line_chart(plot_df)
-
-                # Recommendation: best threshold by Delta P&L
-                best = max(bt["early_loser"], key=lambda r: r.get("Delta P&L", 0))
-                if best["Delta P&L"] > 0:
-                    st.divider()
-                    st.markdown(f"**Beste drempel: loser mid ≤ {best['Loser mid drempel']}**")
-                    col_a, col_b, col_c, col_d = st.columns(4)
-                    col_a.metric("Delta P&L", f"€{best['Delta P&L']:+.4f}")
-                    col_b.metric("Gem. loser bid (vroeg)", f"{best.get('Gem. loser bid (vroeg)', 0):.3f}")
-                    col_c.metric("Gem. loser bid (huidig)", f"{best.get('Gem. loser bid (huidig)', 0):.3f}")
-                    col_d.metric("Trades vroeg exit", best["Trades vroeg exit"])
-                    early_threshold = best["Loser mid drempel"]
-                    st.info(
-                        f"Aanbevolen: verkoop de loser zodra zijn mid ≤ **{early_threshold}** (ca. "
-                        f"{best.get('Gem. loser bid (vroeg)', 0):.2f} bid). "
-                        f"Dit is te implementeren in de monitoring loop."
-                    )
-                else:
-                    st.caption("Geen drempel verbetert de P&L t.o.v. de huidige aanpak — vroeg verkopen helpt hier niet.")
+def _trade_history_inner(df: pd.DataFrame) -> None:
+    display_cols = [
+        "created_at", "coin", "status", "mode", "triggered_by",
+        "entry_yes_price", "entry_no_price",
+        "loser_exit_price", "winner_exit_price", "winner_exit_reason",
+        "actual_winner", "peak_bid", "ratchet_count", "time_in_trail_seconds",
+        "fees_paid", "net_pnl",
+    ]
+    available = [c for c in display_cols if c in df.columns]
+    show = df[available].copy().sort_values("created_at", ascending=False).head(200)
+    if "created_at" in show.columns:
+        show["created_at"] = (
+            pd.to_datetime(show["created_at"], format="mixed", utc=True)
+            .dt.strftime("%m-%d %H:%M")
+        )
+    st.dataframe(show, use_container_width=True, hide_index=True)
+    if len(df) > 200:
+        st.caption(f"Toont 200 van de {len(df)} trades. Download via de CSV-knop voor het volledige overzicht.")
 
 
 def _build_current_params() -> dict:
@@ -629,20 +693,21 @@ def _build_current_params() -> dict:
 
 
 def _claude_analysis_section(df: pd.DataFrame, coin: str | None, days: int | None) -> None:
-    st.markdown("### 🤖 Claude Analyse")
-
     if st.button("Analyseer met Claude", key="an_claude_btn"):
         try:
-            with st.spinner("Claude analyseert..."):
+            with st.status("Claude analyseert…", expanded=True) as _s:
+                _s.write("Trades ophalen en samenvatten…")
                 params = _build_current_params()
+                _s.write("Claude API aanroepen (kan 15–30s duren)…")
                 result = analyze_trades_sync(df.to_dict("records"), params)
+                _s.update(label="✅ Analyse klaar!", state="complete")
             st.session_state["manual_analysis"] = result
-            st.success("Analyse klaar!")
         except Exception as exc:
             st.error(f"Analyse mislukt: {exc}")
 
     result = st.session_state.get("manual_analysis")
     if not result:
+        st.caption("Klik 'Analyseer met Claude' om een AI-analyse te starten op de huidige dataset.")
         return
 
     conf = result.get("confidence_score", 0)
