@@ -268,10 +268,11 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 
 def get_analytics_trades(coin: str | None = None, days: int | None = None,
                          only_today: bool = False) -> list[dict]:
-    """All trades, optionally filtered by coin and date range. No trigger/status filter."""
+    """Straddle trades only (excludes signal_trader mode), ordered by created_at ASC."""
     if not _db_path.exists():
         return []
-    conditions: list[str] = []
+    # Exclude signal_trader mode — die heeft eigen analytics tab en ander P&L-bereik (±€10)
+    conditions: list[str] = ["(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -281,7 +282,7 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None,
     elif days:
         conditions.append("created_at >= datetime('now', ?)")
         params.append(f"-{days} days")
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
     with _conn() as conn:
         rows = conn.execute(
             f"SELECT * FROM trades {where} ORDER BY created_at ASC",
@@ -292,10 +293,11 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None,
 
 def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
                           only_today: bool = False) -> list[dict]:
-    """Aggregate stats grouped by winner_exit_reason."""
+    """Aggregate stats grouped by winner_exit_reason (straddle only)."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
+                  "(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -326,10 +328,11 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
 
 
 def get_coin_comparison(days: int | None = None, only_today: bool = False) -> list[dict]:
-    """Per-coin aggregated stats for closed triggered trades."""
+    """Per-coin aggregated stats for closed triggered straddle trades."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
+                  "(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if only_today:
         conditions.append("date(created_at) = date('now')")
@@ -359,10 +362,11 @@ def get_coin_comparison(days: int | None = None, only_today: bool = False) -> li
 
 def get_hourly_pnl(coin: str | None = None, days: int | None = None,
                    only_today: bool = False) -> list[dict]:
-    """Average P&L by hour of day (UTC)."""
+    """Average P&L by hour of day (UTC), straddle trades only."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
+                  "(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -549,13 +553,15 @@ def get_pattern_stats(
     coin: str | None = None,
     days: int | None = 90,
 ) -> list[dict]:
-    """Historical trade outcomes grouped by (regime, conviction_bucket, ofi_bucket).
+    """Historical straddle outcomes grouped by (regime, conviction_bucket, ofi_bucket).
 
     Used by pattern_matcher to find how trades fared under similar conditions.
+    Excludes signal_trader mode — patterns (trailing, peg-cross) don't apply there.
     """
     if not _db_path.exists():
         return []
-    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
+    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')",
+                  "(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -849,8 +855,11 @@ def _signal_where(
     only_today: bool,
     extra_conditions: list[str] | None = None,
 ) -> tuple[str, list]:
-    """Build WHERE clause + params for signal analytics queries."""
-    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
+    """Build WHERE clause + params for straddle signal analytics queries.
+    Excludes signal_trader mode — die heeft eigen accuracybereik en P&L-schaal.
+    """
+    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')",
+                  "(mode IS NULL OR mode != 'signal_trader')"]
     params: list = []
     if coin:
         conditions.append("coin = ?")
