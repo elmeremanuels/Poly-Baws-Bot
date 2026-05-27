@@ -328,5 +328,20 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("signal_trader_paper_mode", str(paper))
         log.info("signal_trader_paper_mode_set", paper=paper)
 
+    elif command == "apply_signal_trader_config":
+        st_cfg = CONFIG.setdefault("signal_trader", {})
+        for key in ("conviction_threshold", "trade_size_eur", "entry_price_max",
+                    "max_concurrent_positions"):
+            if key in payload:
+                st_cfg[key] = payload[key]
+        if "coins" in payload:
+            coins_cfg = st_cfg.setdefault("coins", {})
+            for coin, coin_payload in payload["coins"].items():
+                if coin not in coins_cfg or coins_cfg[coin] is None:
+                    coins_cfg[coin] = {}
+                coins_cfg[coin].update(coin_payload)
+        log.info("apply_signal_trader_config_applied",
+                 keys=list(payload.keys()))
+
     else:
         log.warning("unknown_command", command=command)

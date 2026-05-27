@@ -73,6 +73,7 @@ def create_trade_state(
         "market_id": market.get("market_id"),
         "condition_id_yes": market.get("yes_token"),
         "condition_id_no": market.get("no_token"),
+        "question": market.get("question", ""),   # market title — zoekbaar op Polymarket
         "mode": mode,
         "triggered_by": triggered_by,
         "window_start_ts": window_start.isoformat() if window_start else None,
@@ -168,6 +169,7 @@ async def persist_trade(trade_id: str) -> None:
     db_fields = {
         "trade_id", "created_at",
         "coin", "market_id", "condition_id_yes", "condition_id_no",
+        "question",
         "mode", "triggered_by", "window_start_ts", "window_end_ts",
         "entry_placed_ts", "entry_filled_ts", "entry_yes_price", "entry_no_price",
         "entry_size", "yes_size", "no_size", "bias_certainty",
