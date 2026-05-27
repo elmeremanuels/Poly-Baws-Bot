@@ -266,7 +266,51 @@ def get_signal_trade_stats(days: int | None = None) -> dict:
     }
 
 
-def delete_signal_trades(status: str | None = None) -> int:
+def get_signal_trades_paginated(
+    hours: int | None = None,
+    page: int = 0,
+    per_page: int = 20,
+    exclude_status: list[str] | None = None,
+) -> tuple[list[dict], int]:
+    """Pagineerd ophalen van signal_trader trades (afgeronde trades).
+
+    Geeft (rows, total_count) terug.
+    exclude_status: lijst van statussen die uitgesloten worden (bv. ['signal_holding'])
+    """
+    if not _db_path.exists():
+        return [], 0
+    exclude_status = exclude_status or ["signal_holding"]
+    placeholders = ",".join("?" for _ in exclude_status)
+    if hours is not None:
+        where = (f"mode='signal_trader' AND status NOT IN ({placeholders})"
+                 f" AND created_at >= datetime('now', ?)")
+        params_count = [*exclude_status, f"-{hours} hours"]
+    else:
+        where = f"mode='signal_trader' AND status NOT IN ({placeholders})"
+        params_count = list(exclude_status)
+
+    with _conn() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM trades WHERE {where}", params_count
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM trades WHERE {where}"
+            f" ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            [*params_count, per_page, page * per_page],
+        ).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
+def get_signal_active_trades() -> list[dict]:
+    """Signal_trader trades die momenteel open zijn (status=signal_holding)."""
+    if not _db_path.exists():
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE mode='signal_trader' AND status='signal_holding'"
+            " ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
     """Verwijder signal_trader trades uit de DB.
     status=None → alle signal_trader trades; anders alleen die status.
     Geeft het aantal verwijderde rijen terug.

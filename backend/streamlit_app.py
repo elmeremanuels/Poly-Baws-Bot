@@ -22,7 +22,9 @@ from src.db_sync import (
     get_learn_coin_counts,
     get_open_trades,
     get_signal_accuracy_per_coin,
+    get_signal_active_trades,
     get_signal_trades,
+    get_signal_trades_paginated,
     get_phase_stats,
     get_portfolio_snapshot,
     get_recent_events,
@@ -1326,63 +1328,143 @@ def _signal_trader_panel() -> None:
 
     st.divider()
 
-    # ── Trades tabel (hoofd focus) ───────────────────────────────────────────────
-    total = len(trades)
-    st.markdown(f"#### 📋 Trades ({total})" if total else "#### 📋 Trades")
-    if not df.empty:
-        show_cols = ["coin", "triggered_by", "winner_side", "status",
-                     "winner_exit_reason", "net_pnl",
-                     "conviction_score_at_entry", "question", "created_at"]
-        avail = [c for c in show_cols if c in df.columns]
-        rec = df[avail].head(50).copy()
+    # ── Actieve posities (tegels) ────────────────────────────────────────────────
+    active_trades = get_signal_active_trades()
+    if active_trades:
+        st.markdown(f"#### ⚡ Open posities ({len(active_trades)})")
+        now_utc = datetime.now(timezone.utc)
+        cols_per_row = 3
+        rows_needed = (len(active_trades) + cols_per_row - 1) // cols_per_row
+        for row_i in range(rows_needed):
+            tile_cols = st.columns(cols_per_row)
+            for col_i in range(cols_per_row):
+                idx = row_i * cols_per_row + col_i
+                if idx >= len(active_trades):
+                    break
+                t = active_trades[idx]
+                with tile_cols[col_i]:
+                    coin      = t.get("coin", "?")
+                    side      = t.get("winner_side", "?")
+                    conv      = t.get("conviction_score_at_entry")
+                    direction = t.get("conviction_at_entry", "?")
+                    fill_p    = t.get("entry_yes_price") or t.get("entry_no_price")
+                    size      = t.get("entry_size")
+                    paper     = "📄" if "paper" in str(t.get("triggered_by","")) else "💸"
+                    q         = t.get("question", "")
 
-        # Type: paper of live
-        if "triggered_by" in rec.columns:
-            rec["Type"] = rec["triggered_by"].map({
-                "signal_paper": "📄 Paper",
-                "signal_live":  "💸 Live",
-                "signal":       "📄 Paper",
-            }).fillna("—")
-            rec = rec.drop(columns=["triggered_by"])
+                    # Resterende tijd
+                    we_ts = t.get("window_end_ts")
+                    if we_ts:
+                        try:
+                            we = datetime.fromisoformat(str(we_ts))
+                            if we.tzinfo is None:
+                                we = we.replace(tzinfo=timezone.utc)
+                            secs_left = max(0, (we - now_utc).total_seconds())
+                            mins_left = int(secs_left // 60)
+                            secs_rem  = int(secs_left % 60)
+                            time_str  = f"{mins_left}m {secs_rem:02d}s" if secs_left > 0 else "afgelopen"
+                        except Exception:
+                            time_str = "?"
+                    else:
+                        time_str = "?"
 
-        # Resultaat: gebruik winner_exit_reason + status als fallback
+                    side_color = "#34d399" if side == "YES" else "#f87171"
+                    dir_arrow  = "↑" if direction == "UP" else "↓"
+                    emoji      = COIN_EMOJI.get(coin, "🔵")
+                    conv_str   = f"{conv:.2f}" if conv else "—"
+                    fill_str   = f"€{fill_p:.3f}" if fill_p else "—"
+                    size_str   = f"{size:.1f} shares" if size else "—"
+                    q_short    = (q[:55] + "…") if q and len(q) > 55 else (q or "—")
+
+                    st.markdown(
+                        f"""<div style="background:#111827;border:1px solid #1f2937;
+                            border-left:4px solid {side_color};border-radius:10px;
+                            padding:12px 14px;margin-bottom:8px">
+                          <div style="font-size:16px;font-weight:700;margin-bottom:4px">
+                            {emoji} {coin} &nbsp;
+                            <span style="color:{side_color}">{side} {dir_arrow}</span>
+                            &nbsp;<span style="font-size:12px;color:#6b7280">{paper}</span>
+                          </div>
+                          <div style="font-size:12px;color:#9ca3af;margin-bottom:2px">{q_short}</div>
+                          <div style="display:flex;gap:16px;margin-top:6px;font-size:13px">
+                            <span>🎯 Conv. <b>{conv_str}</b></span>
+                            <span>💰 Entry <b>{fill_str}</b></span>
+                            <span>📦 <b>{size_str}</b></span>
+                          </div>
+                          <div style="margin-top:6px;font-size:12px;color:#fbbf24">
+                            ⏱ {time_str} resterend
+                          </div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+        st.divider()
+
+    # ── Voltooide trades — pagineerd tabel ──────────────────────────────────────
+    PER_PAGE   = 20
+    MAX_PAGES  = 5
+
+    if "st_trade_page" not in st.session_state:
+        st.session_state["st_trade_page"] = 0
+
+    page = st.session_state["st_trade_page"]
+    completed, total_count = get_signal_trades_paginated(
+        hours=_hours, page=page, per_page=PER_PAGE
+    )
+    max_page = min(MAX_PAGES - 1, max(0, (total_count - 1) // PER_PAGE))
+
+    # Clamp page als filter veranderd
+    if page > max_page:
+        page = max_page
+        st.session_state["st_trade_page"] = page
+
+    shown_from = page * PER_PAGE + 1
+    shown_to   = min((page + 1) * PER_PAGE, total_count)
+    st.markdown(
+        f"#### 📋 Voltooide trades"
+        + (f" — {shown_from}–{shown_to} van {total_count}" if total_count else "")
+    )
+
+    if completed:
+        cdf = pd.DataFrame(completed)
+
         def _fmt_result(row) -> str:
-            reason = row.get("winner_exit_reason") if isinstance(row, dict) else None
-            status = row.get("status") if isinstance(row, dict) else None
-            if reason == "resolution_won":   return "✅ Won"
-            if reason == "resolution_lost":  return "❌ Lost"
-            if reason and "abort" in str(reason).lower(): return "⚠️ Afgebroken"
-            if status == "signal_holding":   return "⏳ Open"
-            if status == "aborted":          return "⚠️ Afgebroken"
-            return "⏳ Open"
+            reason = row.get("winner_exit_reason", "")
+            status = row.get("status", "")
+            if reason == "resolution_won":  return "✅ Won"
+            if reason == "resolution_lost": return "❌ Lost"
+            if "abort" in str(reason).lower() or status == "aborted": return "⚠️ Afgebr."
+            return "—"
 
+        show_cols = ["coin", "triggered_by", "winner_side",
+                     "winner_exit_reason", "status",
+                     "net_pnl", "conviction_score_at_entry",
+                     "question", "created_at"]
+        avail = [c for c in show_cols if c in cdf.columns]
+        rec = cdf[avail].copy()
+
+        if "triggered_by" in rec.columns:
+            rec["Type"] = rec["triggered_by"].map(
+                {"signal_paper": "📄", "signal_live": "💸", "signal": "📄"}
+            ).fillna("—")
+            rec = rec.drop(columns=["triggered_by"])
         if "winner_exit_reason" in rec.columns or "status" in rec.columns:
-            rec["Resultaat"] = rec.apply(
-                lambda r: _fmt_result(r.to_dict()), axis=1
-            )
+            rec["Resultaat"] = rec.apply(lambda r: _fmt_result(r.to_dict()), axis=1)
         if "winner_exit_reason" in rec.columns:
             rec = rec.drop(columns=["winner_exit_reason"])
         if "status" in rec.columns:
             rec = rec.drop(columns=["status"])
-
-        # P&L: toon waarde als beschikbaar, anders context-label
         if "net_pnl" in rec.columns:
             rec["P&L"] = rec["net_pnl"].apply(
-                lambda x: f"€{x:+.2f}" if pd.notna(x) else "—"
-            )
+                lambda x: f"€{x:+.2f}" if pd.notna(x) else "—")
             rec = rec.drop(columns=["net_pnl"])
-
         if "conviction_score_at_entry" in rec.columns:
             rec["Conv."] = rec["conviction_score_at_entry"].apply(
                 lambda x: f"{x:.2f}" if pd.notna(x) else "—")
             rec = rec.drop(columns=["conviction_score_at_entry"])
-
         if "question" in rec.columns:
             rec["Markt"] = rec["question"].apply(
-                lambda q: (q[:70] + "…") if q and len(q) > 70 else (q or "—")
-            )
+                lambda q: (q[:60] + "…") if q and len(q) > 60 else (q or "—"))
             rec = rec.drop(columns=["question"])
-
         if "coin" in rec.columns:
             rec = rec.rename(columns={"coin": "Coin"})
         if "winner_side" in rec.columns:
@@ -1391,8 +1473,35 @@ def _signal_trader_panel() -> None:
             rec = rec.rename(columns={"created_at": "Tijdstip"})
 
         st.dataframe(rec, use_container_width=True, hide_index=True)
+
+        # Paginatieknoppen
+        if total_count > PER_PAGE:
+            nav_cols = st.columns([1, 1, 4, 1, 1])
+            with nav_cols[0]:
+                if st.button("⏮", disabled=(page == 0), key="st_page_first"):
+                    st.session_state["st_trade_page"] = 0
+                    st.rerun()
+            with nav_cols[1]:
+                if st.button("◀", disabled=(page == 0), key="st_page_prev"):
+                    st.session_state["st_trade_page"] = max(0, page - 1)
+                    st.rerun()
+            with nav_cols[2]:
+                st.markdown(
+                    f'<div style="text-align:center;padding-top:6px;color:#9ca3af;font-size:13px">'
+                    f'Pagina {page + 1} van {max_page + 1}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            with nav_cols[3]:
+                if st.button("▶", disabled=(page >= max_page), key="st_page_next"):
+                    st.session_state["st_trade_page"] = min(max_page, page + 1)
+                    st.rerun()
+            with nav_cols[4]:
+                if st.button("⏭", disabled=(page >= max_page), key="st_page_last"):
+                    st.session_state["st_trade_page"] = max_page
+                    st.rerun()
     else:
-        st.caption("Nog geen trades in deze periode — zodra de bot een signaal ≥ conviction-drempel ziet, verschijnen ze hier.")
+        st.caption("Nog geen voltooide trades in deze periode.")
 
     st.divider()
 
