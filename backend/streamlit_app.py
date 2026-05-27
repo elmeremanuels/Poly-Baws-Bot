@@ -1517,15 +1517,15 @@ def _signal_trader_panel() -> None:
             with col_l:
                 conv_thr = st.slider(
                     "Conviction drempel",
-                    min_value=0.50, max_value=0.90,
-                    value=float(cfg.get("conviction_threshold", 0.65)),
+                    min_value=0.10, max_value=0.90,
+                    value=float(cfg.get("conviction_threshold", 0.35)),
                     step=0.05,
-                    help="Minimum signaalsterkte om een trade te plaatsen. Break-even ≈ 52% accuracy.",
+                    help="Minimum signaalsterkte om een trade te plaatsen. Lager = meer trades, hogere drempel = strengere selectie.",
                 )
                 entry_max = st.slider(
                     "Max entry prijs (ct per share)",
-                    min_value=0.50, max_value=0.60,
-                    value=float(cfg.get("entry_price_max", 0.55)),
+                    min_value=0.50, max_value=0.65,
+                    value=float(cfg.get("entry_price_max", 0.58)),
                     step=0.01, format="%.2f",
                     help="Nooit meer dan dit betalen per share bij entry.",
                 )
