@@ -95,7 +95,7 @@ fees:
 
 risk:
   daily_loss_limit_eur: 10.00
-  daily_coin_loss_limit_eur: 5.00   # per-coin dag-cap; guard schakelt coin uit bij ≤ -€5
+  daily_coin_loss_limit_eur: 25.00  # per-coin dag-cap; verhoogd 5→25 (signal_trader tradeert €10/trade — €5 was te krap)
   max_trades_per_day_total: 8000
   global_max_positions: 25
 

@@ -1380,13 +1380,15 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     try:
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
-        from .logger import save_dashboard_state as _save_state
         _paper = trade.get("mode", "").startswith("paper")
         _daily = _sync_daily_pnl(coin)
         _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
         if _new_state == "disabled":
+            # Disable in-memory only — do NOT write coin_{coin}_enabled to dashboard_state.
+            # The cg_{coin}_state="disabled" persisted by coin_guard is enough to block
+            # entries via risk.can_enter(). Writing enabled=False here would also exclude
+            # the coin from the scanner on restart, hiding market data unnecessarily.
             CONFIG["coins"][coin]["enabled"] = False
-            await _save_state(f"coin_{coin}_enabled", "False")
             asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
     except Exception:
         pass  # never block trade close on guard errors
@@ -1525,11 +1527,10 @@ def _directional_coin_guard(trade_id, coin, net_pnl, trade, broadcast_fn) -> Non
 async def _run_directional_guard(coin, net_pnl, daily_pnl, paper, broadcast_fn) -> None:
     try:
         from . import coin_guard as _cg
-        from .logger import save_dashboard_state as _save_state
         _new_state = await _cg.record_result(coin, net_pnl, daily_pnl, paper=paper)
         if _new_state == "disabled":
+            # In-memory disable only — see comment in close_straddle_trade for rationale.
             CONFIG["coins"][coin]["enabled"] = False
-            await _save_state(f"coin_{coin}_enabled", "False")
             asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
     except Exception:
         pass
@@ -1582,15 +1583,14 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
     try:
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
-        from .logger import save_dashboard_state as _save_state
         _paper = trade.get("mode", "").startswith("paper")
         coin = trade.get("coin", "")
         if coin:
             _daily = _sync_daily_pnl(coin)
             _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
             if _new_state == "disabled":
+                # In-memory disable only — see comment in close_straddle_trade for rationale.
                 CONFIG["coins"][coin]["enabled"] = False
-                await _save_state(f"coin_{coin}_enabled", "False")
                 asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
     except Exception:
         pass

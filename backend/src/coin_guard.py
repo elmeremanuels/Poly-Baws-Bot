@@ -112,7 +112,13 @@ async def record_result(
     streak = _streak[coin]
     cap = _daily_cap()
 
-    if not paper and daily_coin_pnl <= -cap:
+    # Paper trades (learning, signal_lab_bg) never trigger coin disabling —
+    # the coin guard only protects against LIVE monetary losses.
+    if paper:
+        await _persist(coin)
+        return None
+
+    if daily_coin_pnl <= -cap:
         await _do_disable(coin, f"dag-cap bereikt ({daily_coin_pnl:.2f} EUR ≤ -{cap:.0f})")
         return "disabled"
 
