@@ -329,6 +329,28 @@ async def _wait_resolution(
         remove_active_trade(trade_id)
 
 
+async def _get_midpoint_rest(token_id: str) -> float | None:
+    """Haal de mid-price op via CLOB REST — werkt ook na settlement (lege orderbook).
+
+    Na resolution laat de CLOB REST API de settlement-prijs zien (1.0 of 0.0).
+    De WS-cache is dan leeg (geen bids/asks meer) en geeft None terug.
+    """
+    import httpx
+    clob_url = CONFIG.get("polymarket", {}).get("clob_rest_url",
+                                                "https://clob.polymarket.com")
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(f"{clob_url}/midpoint",
+                                    params={"token_id": token_id})
+        if resp.status_code == 200:
+            data = resp.json()
+            mid = data.get("mid")
+            return float(mid) if mid is not None else None
+    except Exception as exc:
+        log.debug("midpoint_rest_error", token_id=token_id, error=str(exc))
+    return None
+
+
 async def _do_wait_resolution(
     trade_id: str,
     buy_token: str,
@@ -338,7 +360,14 @@ async def _do_wait_resolution(
     size: float,
     fees: float,
 ) -> None:
-    """Interne implementatie van resolution-watcher (gecalled vanuit _wait_resolution)."""
+    """Interne implementatie van resolution-watcher (gecalled vanuit _wait_resolution).
+
+    Databronnen (in prioriteit):
+      1. CLOB REST /midpoint  — betrouwbaar ook na settlement (lege orderbook)
+      2. WS orderbook cache   — werkt alleen als er nog bids/asks in de book zitten
+      3. Signal Lab (straddle) — DB-backup: actual_winner van zelfde market_id
+      4. Abort                 — geen enkele bron heeft een conclusie
+    """
     trade = get_active_trades().get(trade_id)
     if not trade:
         return
@@ -355,38 +384,54 @@ async def _do_wait_resolution(
     if wait_secs > 0:
         await asyncio.sleep(wait_secs)
 
-    # Uitkomst bepalen via mid-price (na settlement: 1.0 of 0.0)
-    # Retry tot maximaal 8 pogingen want settlement kan iets vertraagd zijn
-    mid = None
-    for attempt in range(8):
-        mid = ws_client.get_mid_price(buy_token)
+    mid: float | None = None
+    source = "unknown"
+
+    # ── 1. CLOB REST midpoint (primair — betrouwbaar na settlement) ─────────────
+    for attempt in range(5):
+        mid = await _get_midpoint_rest(buy_token)
         if mid is not None and (mid >= 0.9 or mid <= 0.1):
-            break  # Duidelijk resultaat
-        await asyncio.sleep(5)
+            source = "clob_rest"
+            break
+        # Nog niet settled of endpoint traag — kort wachten
+        await asyncio.sleep(4)
 
-    # Als WS-prijs niet beschikbaar is, gebruik Signal Lab (straddle) als backup
-    if mid is None:
+    # ── 2. WS orderbook cache (fallback als REST nog geen clear resultaat heeft) ─
+    if mid is None or (mid is not None and 0.1 < mid < 0.9):
+        for attempt in range(4):
+            ws_mid = ws_client.get_mid_price(buy_token)
+            if ws_mid is not None and (ws_mid >= 0.9 or ws_mid <= 0.1):
+                mid = ws_mid
+                source = "ws_cache"
+                break
+            await asyncio.sleep(3)
+
+    # ── 3. Signal Lab straddle-data (DB backup voor zelfde market) ───────────────
+    if mid is None or (mid is not None and 0.1 < mid < 0.9):
         from .db_sync import get_market_resolution as _get_mkt_res
-        trade_now  = get_active_trades().get(trade_id, {})
-        market_id  = trade_now.get("market_id")
-        sl_winner  = _get_mkt_res(market_id) if market_id else None
-
+        trade_now = get_active_trades().get(trade_id, {})
+        market_id = trade_now.get("market_id")
+        sl_winner = _get_mkt_res(market_id) if market_id else None
         if sl_winner is not None:
-            # Straddle-data heeft de uitkomst — gebruik die
-            mid = 1.0 if sl_winner == side else 0.0
+            mid    = 1.0 if sl_winner == side else 0.0
+            source = "signal_lab"
             log.info("signal_resolution_from_straddle", trade_id=trade_id,
                      coin=coin, sl_winner=sl_winner, side=side)
-        else:
-            # Geen enkel databron — markeer als aborted
-            log.warning("signal_mid_unavailable", trade_id=trade_id, coin=coin,
-                        side=side, buy_token=buy_token)
-            update_trade_field(trade_id, "status", "aborted")
-            update_trade_field(trade_id, "notes",  "resolution_mid_unavailable")
-            await persist_trade(trade_id)
-            remove_active_trade(trade_id)
-            return
 
+    # ── 4. Abort als alle bronnen falen ─────────────────────────────────────────
+    if mid is None:
+        log.warning("signal_mid_unavailable", trade_id=trade_id, coin=coin,
+                    side=side, buy_token=buy_token)
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes",  "resolution_mid_unavailable")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        return
+
+    # Mid beschikbaar maar niet conclusief (tussen 0.1 en 0.9) — gebruik > 0.5
     won = mid >= 0.5
+    log.info("signal_resolution_source", trade_id=trade_id, source=source,
+             mid=round(mid, 4), won=won)
 
     if won:
         gross_pnl     = (1.0 - fill_price) * size
