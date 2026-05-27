@@ -9,6 +9,10 @@ from .logger import log, write_event, save_dashboard_state
 from . import volatility
 
 GAMMA_URL = CONFIG["polymarket"]["gamma_url"]
+
+# COIN_FILTERS wordt dynamisch berekend in refresh_markets zodat runtime-wijzigingen
+# in config.yaml (via het dashboard) direct worden opgepikt zonder herstart.
+# De module-level dict blijft beschikbaar voor externe callers (scanner_test etc.)
 COIN_FILTERS = {coin: cfg["market_filter"] for coin, cfg in CONFIG["coins"].items()}
 
 _market_cache: dict[str, list[dict]] = {}
@@ -137,14 +141,24 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
 
 
 async def refresh_markets(coin: str | None = None) -> None:
-    coins = [coin] if coin else [c for c in COIN_FILTERS if CONFIG["coins"][c]["enabled"]]
+    if coin:
+        coins = [coin]
+    else:
+        # Lees direct uit CONFIG zodat wijzigingen via het dashboard direct werken,
+        # ongeacht de module-load-time snapshot in COIN_FILTERS.
+        coins = [
+            c for c, cfg in CONFIG["coins"].items()
+            if cfg.get("enabled") and cfg.get("market_filter")
+        ]
+    log.debug("scanner_refresh_coins", coins=coins)
     # Sequential — parallel gather caused 5 simultaneous DB writes → database is locked
     for c in coins:
         await _refresh_coin(c)
 
 
 async def _refresh_coin(coin: str) -> None:
-    filter_slug = COIN_FILTERS[coin]
+    # Lees market_filter direct uit CONFIG (niet uit COIN_FILTERS snapshot)
+    filter_slug = CONFIG["coins"].get(coin, {}).get("market_filter") or COIN_FILTERS.get(coin, "")
     markets = await _fetch_markets_for_coin(coin, filter_slug)
     now = datetime.now(timezone.utc)
 
