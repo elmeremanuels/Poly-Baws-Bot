@@ -65,9 +65,9 @@ async def _recover_stuck_trades(coin: str) -> None:
 
     Bij een herstart gaan asyncio-tasks verloren. Trades die gevuld waren maar
     nog niet resolved zijn blijven op status='signal_holding'. Deze functie
-    detecteert zulke trades en start de watcher opnieuw.
+    detecteert zulke trades en start de watcher opnieuw — zowel voor trades
+    waarvan het window al voorbij is ALS voor trades die nog actief zijn.
     """
-    now = datetime.now(timezone.utc)
     recovered = 0
     for trade_id, trade in list(get_active_trades().items()):
         if trade.get("coin") != coin:
@@ -87,10 +87,6 @@ async def _recover_stuck_trades(coin: str) -> None:
         except (ValueError, TypeError):
             continue
 
-        # Alleen als het window al voorbij is (trades die nog lopen, laten we met rust)
-        if window_end > now:
-            continue
-
         side       = trade.get("winner_side", "YES")
         buy_token  = (trade.get("condition_id_yes") if side == "YES"
                       else trade.get("condition_id_no"))
@@ -99,16 +95,19 @@ async def _recover_stuck_trades(coin: str) -> None:
         size       = float(trade.get("entry_size") or 0.0)
         fees       = float(trade.get("fees_paid") or 0.0)
 
-        # Bouw een mini market-dict met alleen window_end (genoeg voor _wait_resolution)
+        # Bouw een mini market-dict met window_end (genoeg voor _wait_resolution)
         mini_market = {"window_end": window_end}
 
+        now = datetime.now(timezone.utc)
+        already_expired = window_end <= now
         asyncio.create_task(
             _wait_resolution(trade_id, buy_token, side, mini_market,
                              fill_price, size, fees)
         )
         recovered += 1
         log.info("signal_trade_recovered", trade_id=trade_id, coin=coin,
-                 window_end=window_end.isoformat())
+                 window_end=window_end.isoformat(),
+                 already_expired=already_expired)
 
     if recovered:
         log.info("signal_recovery_done", coin=coin, recovered=recovered)
