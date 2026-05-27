@@ -205,6 +205,10 @@ async def _process_coin_window(coin: str, market: dict) -> None:
 
 async def _coin_loop(coin: str) -> None:
     while True:
+        # Stap terug als signal_trader actief is — die modus heeft eigen loop
+        if get_mode() == "signal_trader":
+            await asyncio.sleep(5)
+            continue
         if risk.is_killed():
             await asyncio.sleep(5)
             continue
@@ -366,9 +370,16 @@ async def run_bot() -> None:
         asyncio.create_task(_signals.run_trade_poll_loop()),
         asyncio.create_task(_signals.funding_rate_loop()),
     ]
+
+    # Per-coin straddle loops (self-gate op signal_trader mode)
     for coin in COINS:
         if CONFIG["coins"][coin]["enabled"]:
             tasks.append(asyncio.create_task(_coin_loop(coin)))
+
+    # Signal trader loops (self-gate op niet-signal_trader mode)
+    from .signal_trader import signal_trader_loop as _st_loop
+    for coin in COINS:
+        tasks.append(asyncio.create_task(_st_loop(coin)))
 
     # Always spawn the learning loop; it self-gates on live_learning mode so a
     # runtime mode switch (not just a restart-into-live_learning) activates it.

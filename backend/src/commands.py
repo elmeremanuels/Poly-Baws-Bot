@@ -322,5 +322,11 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("directional_entry_enabled", str(enabled))
         log.info("directional_entry_set", enabled=enabled)
 
+    elif command == "set_signal_trader_paper":
+        paper = bool(payload.get("paper_mode", True))
+        CONFIG.setdefault("signal_trader", {})["paper_mode"] = paper
+        await save_dashboard_state("signal_trader_paper_mode", str(paper))
+        log.info("signal_trader_paper_mode_set", paper=paper)
+
     else:
         log.warning("unknown_command", command=command)

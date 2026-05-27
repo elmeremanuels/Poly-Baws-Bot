@@ -21,6 +21,9 @@ from src.db_sync import (
     get_latest_snapshot_for_trade,
     get_learn_coin_counts,
     get_open_trades,
+    get_signal_trades,
+    get_signal_trades_today,
+    get_signal_trade_stats,
     get_phase_stats,
     get_portfolio_snapshot,
     get_recent_events,
@@ -38,7 +41,7 @@ from coin_protection_tab import coin_protection_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning"]
+MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader"]
 
 st.set_page_config(
     page_title="Poly-Baws-Bot",
@@ -1156,6 +1159,185 @@ def _portfolio_panel() -> None:
         st.rerun()
 
 
+# ── Signal Trader Panel ────────────────────────────────────────────────────────
+
+@st.fragment(run_every=10)
+def _signal_trader_panel() -> None:
+    """Dashboard panel voor de signal_trader modus."""
+    mode = current_mode()
+    cfg  = CONFIG.get("signal_trader", {})
+    is_active = (mode == "signal_trader")
+    is_paper  = cfg.get("paper_mode", True)
+
+    # ── Modus status banner ─────────────────────────────────────────────────────
+    if is_active:
+        paper_label = "📄 PAPER" if is_paper else "💸 LIVE"
+        st.markdown(
+            f'<div style="background:rgba(16,185,129,0.15);border:1px solid #34d399;'
+            f'border-radius:8px;padding:10px 16px;margin-bottom:12px">'
+            f'🎯 <b>Signal Trader is ACTIEF</b> &nbsp;·&nbsp; {paper_label} mode'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="background:rgba(55,65,81,0.2);border:1px solid #374151;'
+            'border-radius:8px;padding:10px 16px;margin-bottom:12px">'
+            '⏸ Signal Trader is <b>inactief</b> — activeer via de sidebar of onderstaande knop'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Mode-activatie knoppen ──────────────────────────────────────────────────
+    col_act, col_deact, col_paper, col_live = st.columns(4)
+    with col_act:
+        if st.button("▶ Activeer Signal Trader", type="primary",
+                     disabled=is_active, key="st_activate"):
+            write_command("set_mode", {"mode": "signal_trader"})
+            st.rerun()
+    with col_deact:
+        if st.button("⏹ Deactiveer", disabled=not is_active, key="st_deactivate"):
+            write_command("set_mode", {"mode": "paper_auto"})
+            st.rerun()
+    with col_paper:
+        if st.button("📄 Paper mode", disabled=(is_paper), key="st_paper"):
+            write_command("set_signal_trader_paper", {"paper_mode": True})
+            st.rerun()
+    with col_live:
+        if st.button("💸 Live mode", disabled=(not is_paper),
+                     type="secondary", key="st_live"):
+            write_command("set_signal_trader_paper", {"paper_mode": False})
+            st.rerun()
+
+    st.divider()
+
+    # ── Stats ophalen ───────────────────────────────────────────────────────────
+    # Periode filter
+    period_opts = {"Vandaag": 1, "7 dagen": 7, "30 dagen": 30, "Alle tijd": None}
+    period = st.radio(
+        "Periode", list(period_opts.keys()), index=0,
+        horizontal=True, key="st_period",
+    )
+    days = period_opts[period]
+
+    if days == 1:
+        trades = get_signal_trades_today()
+    else:
+        trades = get_signal_trades(days=days)
+
+    if not trades:
+        st.info("Geen signal_trader trades gevonden voor deze periode.")
+        return
+
+    df = pd.DataFrame(trades)
+
+    # Bereken stats
+    won     = (df.get("winner_exit_reason") == "resolution_won").sum()
+    lost    = (df.get("winner_exit_reason") == "resolution_lost").sum()
+    pending = (df.get("status") == "signal_holding").sum()
+    closed  = won + lost
+    accuracy = won / closed * 100.0 if closed else 0.0
+    net_pnl  = df["net_pnl"].fillna(0).sum()
+
+    # Break-even threshold (bij 52ct gemiddelde inkoop)
+    break_even_pct = 52.0
+
+    # ── Scorebord ───────────────────────────────────────────────────────────────
+    st.markdown("#### 📊 Scorebord")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Trades (gesloten)", closed)
+    c2.metric("✅ Gewonnen", won)
+    c3.metric("❌ Verloren", lost)
+    c4.metric("⏳ Open", pending)
+    c5.metric("Accuracy", f"{accuracy:.1f}%" if closed else "—")
+    c6.metric("Netto P&L", f"€{net_pnl:+.2f}")
+
+    # Break-even indicator
+    if closed >= 5:
+        margin = accuracy - break_even_pct
+        if accuracy >= break_even_pct:
+            st.success(
+                f"📈 **Boven break-even** ({break_even_pct:.0f}%) — winstgevend!"
+                f" Marge: **+{margin:.1f}pp**"
+            )
+        else:
+            st.error(
+                f"📉 **Onder break-even** ({break_even_pct:.0f}%) — verliesgevend."
+                f" Tekort: {margin:.1f}pp"
+            )
+    else:
+        st.caption(f"⏳ Nog te weinig trades voor statistisch oordeel (min. 5, nu {closed}).")
+
+    # ── Per coin ────────────────────────────────────────────────────────────────
+    st.markdown("#### Per Coin")
+    coin_rows = []
+    for coin in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        sub = df[df["coin"] == coin] if "coin" in df.columns else pd.DataFrame()
+        if len(sub) == 0:
+            continue
+        w = (sub["winner_exit_reason"] == "resolution_won").sum()
+        l = (sub["winner_exit_reason"] == "resolution_lost").sum()
+        p = (sub["status"] == "signal_holding").sum()
+        t = w + l
+        pnl_val = sub["net_pnl"].fillna(0).sum()
+        enabled = CONFIG.get("signal_trader", {}).get("coins", {}).get(coin, {}).get("enabled", True)
+        coin_rows.append({
+            "Coin":     f"{COIN_EMOJI.get(coin, '')} {coin}",
+            "Status":   "✅" if enabled else "⏸",
+            "Gesloten": t,
+            "Won":      w,
+            "Lost":     l,
+            "Open":     p,
+            "Accuracy": f"{w/t*100:.1f}%" if t else "—",
+            "P&L":      f"€{pnl_val:+.2f}",
+        })
+    if coin_rows:
+        st.dataframe(pd.DataFrame(coin_rows), use_container_width=True, hide_index=True)
+
+    # ── Recente trades ──────────────────────────────────────────────────────────
+    st.markdown("#### Recente Signal Trades")
+    display_cols = ["coin", "winner_side", "winner_exit_reason", "net_pnl",
+                    "conviction_score_at_entry", "created_at"]
+    avail = [c for c in display_cols if c in df.columns]
+    recent = df[avail].head(30).copy()
+
+    # Formatting
+    if "winner_exit_reason" in recent.columns:
+        recent["Resultaat"] = recent["winner_exit_reason"].map({
+            "resolution_won":  "✅ Won",
+            "resolution_lost": "❌ Lost",
+        }).fillna("⏳ Open")
+        recent = recent.drop(columns=["winner_exit_reason"])
+
+    if "net_pnl" in recent.columns:
+        recent["P&L"] = recent["net_pnl"].apply(
+            lambda x: f"€{x:+.2f}" if pd.notna(x) else "—"
+        )
+        recent = recent.drop(columns=["net_pnl"])
+
+    if "conviction_score_at_entry" in recent.columns:
+        recent["Conv."] = recent["conviction_score_at_entry"].apply(
+            lambda x: f"{x:.2f}" if pd.notna(x) else "—"
+        )
+        recent = recent.drop(columns=["conviction_score_at_entry"])
+
+    st.dataframe(recent, use_container_width=True, hide_index=True)
+
+    # ── Config overzicht ────────────────────────────────────────────────────────
+    with st.expander("⚙️ Signal Trader configuratie"):
+        st.json({
+            "conviction_threshold": cfg.get("conviction_threshold", 0.65),
+            "trade_size_eur":       cfg.get("trade_size_eur", 10.0),
+            "entry_price_max":      cfg.get("entry_price_max", 0.55),
+            "paper_mode":           is_paper,
+            "max_concurrent":       cfg.get("max_concurrent_positions", 10),
+            "coins_enabled":        {
+                c: cfg.get("coins", {}).get(c, {}).get("enabled", True)
+                for c in ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            },
+        })
+
+
 # ── Loading screen (eerste keer dat deze sessie de pagina laadt) ───────────────
 if not st.session_state.get("_page_loaded"):
     st.markdown("""
@@ -1219,8 +1401,8 @@ if not st.session_state.get("_page_loaded"):
 # Render 3+ (_tabs_ready=True): alles normaal.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
-    ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
+tab_live, tab_st, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
+    ["🔴 Live", "🎯 Signal Trader", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
 )
 with tab_live:
     if _tabs_ready:
@@ -1228,6 +1410,12 @@ with tab_live:
         dashboard_event_log()
     else:
         _tab_loading("🔴 Live", "Handelsdata en open posities worden geladen…")
+
+with tab_st:
+    if _tabs_ready:
+        _signal_trader_panel()
+    else:
+        _tab_loading("🎯 Signal Trader", "Signal Trader data wordt geladen…")
 
 with tab_analytics:
     if _tabs_ready:

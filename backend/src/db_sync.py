@@ -86,6 +86,104 @@ def get_today_trade_count(coin: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
+# ── Signal Trader ─────────────────────────────────────────────────────────────
+
+def get_signal_trades(days: int | None = None) -> list[dict]:
+    """Alle signal_trader trades, meest recent eerst. days=None → alles."""
+    if not _db_path.exists():
+        return []
+    with _conn() as conn:
+        if days is not None:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE mode='signal_trader'"
+                " AND created_at >= datetime('now', ?)"
+                " ORDER BY created_at DESC",
+                (f"-{days} days",),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE mode='signal_trader'"
+                " ORDER BY created_at DESC"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_signal_trades_today() -> list[dict]:
+    """Signal_trader trades van vandaag (UTC kalenderdag)."""
+    if not _db_path.exists():
+        return []
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE mode='signal_trader'"
+            " AND date(created_at)=?"
+            " ORDER BY created_at DESC",
+            (today,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_signal_trade_stats(days: int | None = None) -> dict:
+    """
+    Geaggregeerde stats voor signal_trader trades.
+    Retourneert: {total, won, lost, pending, accuracy, net_pnl, by_coin}
+    """
+    if not _db_path.exists():
+        return {}
+    with _conn() as conn:
+        if days is not None:
+            where = "mode='signal_trader' AND created_at >= datetime('now', ?)"
+            params: tuple = (f"-{days} days",)
+        else:
+            where = "mode='signal_trader'"
+            params = ()
+
+        row = conn.execute(
+            f"""SELECT
+                COUNT(*) total,
+                SUM(CASE WHEN winner_exit_reason='resolution_won' THEN 1 ELSE 0 END) won,
+                SUM(CASE WHEN winner_exit_reason='resolution_lost' THEN 1 ELSE 0 END) lost,
+                SUM(CASE WHEN status='signal_holding' THEN 1 ELSE 0 END) pending,
+                ROUND(COALESCE(SUM(net_pnl), 0), 4) net_pnl
+            FROM trades WHERE {where}""",
+            params,
+        ).fetchone()
+
+        if not row:
+            return {}
+
+        total  = int(row["total"])
+        won    = int(row["won"])
+        lost   = int(row["lost"])
+        pending = int(row["pending"])
+        net_pnl = float(row["net_pnl"])
+        closed  = won + lost
+        accuracy = won / closed * 100.0 if closed else 0.0
+
+        # Per-coin breakdown
+        coin_rows = conn.execute(
+            f"""SELECT coin,
+                COUNT(*) n,
+                SUM(CASE WHEN winner_exit_reason='resolution_won' THEN 1 ELSE 0 END) won,
+                SUM(CASE WHEN winner_exit_reason='resolution_lost' THEN 1 ELSE 0 END) lost,
+                ROUND(COALESCE(SUM(net_pnl), 0), 4) net_pnl
+            FROM trades WHERE {where}
+            GROUP BY coin ORDER BY coin""",
+            params,
+        ).fetchall()
+
+    return {
+        "total": total,
+        "won": won,
+        "lost": lost,
+        "pending": pending,
+        "closed": closed,
+        "accuracy": round(accuracy, 1),
+        "net_pnl": net_pnl,
+        "by_coin": [dict(r) for r in coin_rows],
+    }
+
+
 # ── State / config ────────────────────────────────────────────────────────────
 
 def get_state(key: str) -> str | None:
