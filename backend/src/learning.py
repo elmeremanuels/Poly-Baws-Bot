@@ -462,9 +462,9 @@ async def load_and_apply_latest_params() -> bool:
 
     params = json.loads(row["claude_params"])
 
-    # Snapshot current values before overwriting
+    # Snapshot current values before overwriting (enabled is not applied, so not snapshotted)
     _applied_learned_params = {
-        coin: {k: CONFIG["coins"][coin].get(k) for k in ("trigger_threshold", "enabled")}
+        coin: {k: CONFIG["coins"][coin].get(k) for k in ("trigger_threshold",)}
         for coin in CONFIG["coins"]
     }
     _applied_learned_params["__entry__"] = {
@@ -477,8 +477,10 @@ async def load_and_apply_latest_params() -> bool:
             continue
         if "trigger_threshold" in cp:
             CONFIG["coins"][coin]["trigger_threshold"] = float(cp["trigger_threshold"])
-        if "enabled" in cp:
-            CONFIG["coins"][coin]["enabled"] = bool(cp["enabled"])
+        # NOTE: "enabled" is intentionally NOT applied here.
+        # Whether a coin is active is a user configuration decision (config.yaml /
+        # dashboard toggle). The learning cycle must not override it — doing so caused
+        # cycle-42 to permanently disable ETH/SOL on every restart.
 
     gp = params.get("global_params", {})
     if "max_entry_cost" in gp:
