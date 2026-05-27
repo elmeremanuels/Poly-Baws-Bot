@@ -111,6 +111,27 @@ div[data-testid="stMetricValue"] { color: #e5e7eb; }
 """, unsafe_allow_html=True)
 
 
+# ── Tab loading placeholder ────────────────────────────────────────────────────
+
+def _tab_loading(title: str, subtitle: str = "Data wordt opgehaald…") -> None:
+    """Pulsing skeleton shown while a tab's content is still initialising."""
+    st.markdown(f"""
+<div style="display:flex;flex-direction:column;align-items:center;
+            justify-content:center;padding:80px 20px;color:#6b7280">
+  <svg width="36" height="36" viewBox="0 0 24 24" fill="none"
+       stroke="#3b82f6" stroke-width="2" stroke-linecap="round"
+       style="animation:spin 1.2s linear infinite">
+    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+  </svg>
+  <p style="font-size:16px;font-weight:600;color:#9ca3af;margin:16px 0 4px">{title}</p>
+  <p style="font-size:12px;color:#4b5563;margin:0">{subtitle}</p>
+</div>
+<style>
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+</style>
+""", unsafe_allow_html=True)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def current_mode() -> str:
@@ -1063,46 +1084,98 @@ if not st.session_state.get("_page_loaded"):
 """, unsafe_allow_html=True)
     _pb = st.progress(0, text="Opstarten… 0%")
 
-    _pb.progress(15, text="🔌 Database verbinding… 15%")
+    # ── Stap 1: bot status (Live tab) ─────────────────────────────────────────
+    _pb.progress(10, text="🔌 Database verbinding… 10%")
     _ = get_bot_heartbeat_age()
 
-    _pb.progress(35, text="📈 Dagelijkse P&L laden… 35%")
+    # ── Stap 2: dagelijkse P&L + trade counts (Beveiliging) ───────────────────
+    _pb.progress(20, text="📈 Dagelijkse P&L laden… 20%")
     for _lc_coin in COINS:
         get_daily_pnl(_lc_coin)
+        get_today_trade_count(_lc_coin)
 
-    _pb.progress(55, text="📂 Open posities ophalen… 55%")
+    # ── Stap 3: guard state per coin (Beveiliging) ────────────────────────────
+    _pb.progress(35, text="🛡️ Beveiligingsstatus ophalen… 35%")
+    for _lc_coin in COINS:
+        get_state(f"cg_{_lc_coin}_state")
+        get_state(f"cg_{_lc_coin}_streak")
+        get_state(f"cg_{_lc_coin}_reason")
+
+    # ── Stap 4: learning cyclus (Learning tab) ────────────────────────────────
+    _pb.progress(50, text="🧠 Learning cyclus laden… 50%")
+    get_current_cycle()
+    get_latest_completed_cycle()
+    get_learn_coin_counts()
+
+    # ── Stap 5: open posities + scanner (Live tab) ────────────────────────────
+    _pb.progress(65, text="📂 Open posities ophalen… 65%")
     _ = get_open_trades()
-
-    _pb.progress(75, text="💼 Portfolio laden… 75%")
-    _ = get_portfolio_snapshot()
-
-    _pb.progress(90, text="🔭 Scanner status ophalen… 90%")
     for _lc_coin in COINS:
         get_scanner_state(_lc_coin)
+
+    # ── Stap 6: portfolio (Portfolio tab) ─────────────────────────────────────
+    _pb.progress(80, text="💼 Portfolio laden… 80%")
+    _ = get_portfolio_snapshot()
+
+    # ── Stap 7: recente events (Live tab) ─────────────────────────────────────
+    _pb.progress(92, text="📋 Recente events laden… 92%")
+    get_recent_events(limit=50)
+    get_recent_trades(limit=10)
 
     _pb.progress(100, text="✅ Dashboard gereed! 100%")
 
     import time as _time_mod
     _time_mod.sleep(0.4)   # brief pause so user sees 100%
     st.session_state["_page_loaded"] = True
-    st.rerun()             # clean re-render with actual dashboard; stops script here
+    st.session_state["_tabs_ready"] = False  # tabs still need their own init pass
+    st.rerun()             # → render 2: Beveiliging + Learning direct, rest skeleton
+
+# ── Tab rendering — fase-gebaseerd ─────────────────────────────────────────────
+# Render 2 (_tabs_ready=False): Learning + Beveiliging direct, andere tabs tonen
+#   een laadindicator. Aan het einde st.rerun() → render 3 volledig dashboard.
+# Render 3+ (_tabs_ready=True): alles normaal.
+_tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
 tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
     ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
 )
 with tab_live:
-    dashboard()
-    dashboard_event_log()
+    if _tabs_ready:
+        dashboard()
+        dashboard_event_log()
+    else:
+        _tab_loading("🔴 Live", "Handelsdata en open posities worden geladen…")
+
 with tab_analytics:
-    analytics_panel()
+    if _tabs_ready:
+        analytics_panel()
+    else:
+        _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
+
 with tab_signal_lab:
-    signal_lab_panel()
+    if _tabs_ready:
+        signal_lab_panel()
+    else:
+        _tab_loading("🔬 Signal Lab", "Trade-data en signalen worden geladen…")
+
 with tab_learning:
-    _learning_panel()
+    _learning_panel()   # ← direct beschikbaar na startup
+
 with tab_portfolio:
-    _portfolio_panel()
+    if _tabs_ready:
+        _portfolio_panel()
+    else:
+        _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
+
 with tab_guard:
-    coin_protection_panel()
+    coin_protection_panel()  # ← direct beschikbaar na startup
+
+# ── Auto-advance naar volledig dashboard ───────────────────────────────────────
+# Na render 2 (skeleton pass) → trigger render 3 (volledig).
+# Na render 3+ doet dit niets (_tabs_ready is al True).
+if not _tabs_ready:
+    st.session_state["_tabs_ready"] = True
+    st.rerun()
 
 # Trade detail dialog — rendered outside all fragments/tabs so it is not
 # affected by the dashboard fragment's 5-second auto-refresh.
