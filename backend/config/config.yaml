@@ -158,13 +158,13 @@ ab_test:
   conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
 
 directional_entry:
-  # DATA 1287 trades: conviction-drempel sweep toont LAGERE drempel = beter P&L.
-  # straddle_min terug naar 0.45 — meer trades doorlaten verbetert totale P&L.
-  # directional (enkelvijdig) blijft aan voor zeer hoge conviction (≥0.65).
-  # Eerder "single-side beter"-conclusie was door winner_stop_loss vertekend (nu null).
-  enabled: true
-  conviction_threshold: 0.65     # conviction >= this → koop alleen de biased zijde
-  straddle_min_conviction: 0.45  # terug naar 0.45 — data toont alle trades winstgevend zonder stop_loss
+  # ANALYSE 1287 trades: directional €10 per trade → -€994.83 netto over 332 trades.
+  # Conviction-richting is slechts 50.3% correct (muntenworp).
+  # Asymmetrie: goed = +€4-6, fout = -€10 → structureel verliesgevend.
+  # Straddle is superieur: houdt altijd de winnende kant, richting irrelevant.
+  enabled: false
+  conviction_threshold: 0.65     # ongebruikt zolang enabled: false
+  straddle_min_conviction: 0.45  # trades <0.45 worden overgeslagen (geen straddle)
   min_depth_shares: 20           # top-3 ask levels must hold >= 20 shares before going directional
   pricing_model:
     enabled: true
