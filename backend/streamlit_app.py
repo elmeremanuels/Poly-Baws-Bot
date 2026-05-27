@@ -23,7 +23,6 @@ from src.db_sync import (
     get_open_trades,
     get_signal_accuracy_per_coin,
     get_signal_trades,
-    get_signal_trades_today,
     get_phase_stats,
     get_portfolio_snapshot,
     get_recent_events,
@@ -1273,12 +1272,26 @@ def _signal_trader_panel() -> None:
     st.divider()
 
     # ── Periode + metrics ────────────────────────────────────────────────────────
-    period_opts = {"Vandaag": 1, "7 dagen": 7, "30 dagen": 30, "Alle tijd": None}
-    period = st.radio("Periode", list(period_opts.keys()), index=0,
-                      horizontal=True, key="st_period")
-    days = period_opts[period]
+    # (label → hours; None = alle tijd)
+    _PERIOD_HOURS: dict[str, int | None] = {
+        "1u":       1,
+        "2u":       2,
+        "4u":       4,
+        "24u":      24,
+        "2 dagen":  48,
+        "7 dagen":  168,
+        "Alle tijd": None,
+    }
+    period = st.radio(
+        "Periode",
+        list(_PERIOD_HOURS.keys()),
+        index=0,                      # standaard: 1 uur
+        horizontal=True,
+        key="st_period",
+    )
+    _hours = _PERIOD_HOURS[period]
 
-    trades = get_signal_trades_today() if days == 1 else get_signal_trades(days=days)
+    trades = get_signal_trades(hours=_hours)
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
     if not df.empty:

@@ -133,12 +133,23 @@ def get_signal_accuracy_per_coin(days: int | None = None) -> list[dict]:
 
 # ── Signal Trader ─────────────────────────────────────────────────────────────
 
-def get_signal_trades(days: int | None = None) -> list[dict]:
-    """Alle signal_trader trades, meest recent eerst. days=None → alles."""
+def get_signal_trades(days: int | None = None,
+                      hours: int | None = None) -> list[dict]:
+    """Alle signal_trader trades, meest recent eerst.
+
+    hours heeft prioriteit over days. Beide None → alles.
+    """
     if not _db_path.exists():
         return []
     with _conn() as conn:
-        if days is not None:
+        if hours is not None:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE mode='signal_trader'"
+                " AND created_at >= datetime('now', ?)"
+                " ORDER BY created_at DESC",
+                (f"-{hours} hours",),
+            ).fetchall()
+        elif days is not None:
             rows = conn.execute(
                 "SELECT * FROM trades WHERE mode='signal_trader'"
                 " AND created_at >= datetime('now', ?)"
