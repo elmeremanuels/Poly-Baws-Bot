@@ -20,6 +20,7 @@ COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
 _LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
 _PAGE_SIZE = 50
+_MAX_UI_PAGES = 10   # max pages visible in the UI; full data always available via CSV download
 
 # ── Column groups definition ───────────────────────────────────────────────────
 # Each group: list of (display_name, source_column_or_computed_key)
@@ -301,6 +302,12 @@ def signal_lab_panel() -> None:
         offset=offset,
     )
     total_pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    ui_total_pages = min(total_pages, _MAX_UI_PAGES)
+
+    # Clamp current page if it somehow exceeds the UI cap
+    if page >= _MAX_UI_PAGES:
+        st.session_state["slab_page"] = _MAX_UI_PAGES - 1
+        st.rerun()
 
     # ── Download (altijd zichtbaar, haalt ALLE gefilterde trades op) ─────────
     _dc1, _dc2 = st.columns([5, 1])
@@ -377,15 +384,23 @@ def signal_lab_panel() -> None:
             st.dataframe(df, use_container_width=True, hide_index=True, height=520)
 
     # ── Pagination ────────────────────────────────────────────────────────────
-    st.markdown(f"<p style='color:#6b7280;font-size:12px'>Pagina {page+1} van {total_pages} — {total} trades totaal</p>",
+    if total_pages > _MAX_UI_PAGES:
+        _page_note = (
+            f"Pagina {page+1} van {ui_total_pages} "
+            f"<span style='color:#fbbf24'>(UI max {_MAX_UI_PAGES}×{_PAGE_SIZE} = {_MAX_UI_PAGES*_PAGE_SIZE} rijen)</span>"
+            f" · {total} trades totaal · gebruik ⬇ CSV voor volledige dataset"
+        )
+    else:
+        _page_note = f"Pagina {page+1} van {ui_total_pages} — {total} trades totaal"
+    st.markdown(f"<p style='color:#6b7280;font-size:12px'>{_page_note}</p>",
                 unsafe_allow_html=True)
     pc1, pc2, pc3 = st.columns([1, 3, 1])
     if pc1.button("◀ Vorige", disabled=(page == 0), key="slab_prev"):
         st.session_state["slab_page"] = max(0, page - 1)
         st.rerun()
     pc2.empty()
-    if pc3.button("Volgende ▶", disabled=(page >= total_pages - 1), key="slab_next"):
-        st.session_state["slab_page"] = page + 1
+    if pc3.button("Volgende ▶", disabled=(page >= ui_total_pages - 1), key="slab_next"):
+        st.session_state["slab_page"] = min(page + 1, ui_total_pages - 1)
         st.rerun()
 
     # ── Export ────────────────────────────────────────────────────────────────

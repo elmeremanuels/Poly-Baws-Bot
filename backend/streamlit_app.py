@@ -1053,6 +1053,38 @@ def _portfolio_panel() -> None:
         st.rerun()
 
 
+# ── Loading screen (eerste keer dat deze sessie de pagina laadt) ───────────────
+if not st.session_state.get("_page_loaded"):
+    _lp = st.empty()
+    with _lp.container():
+        _, _lc, _ = st.columns([1, 2, 1])
+        with _lc:
+            st.markdown("## 📡 Poly-Baws-Bot")
+            st.caption("Dashboard wordt geladen, even geduld...")
+            _pb = st.progress(0, text="Opstarten… 0%")
+
+            _pb.progress(15, text="🔌 Database verbinding… 15%")
+            _ = get_bot_heartbeat_age()
+
+            _pb.progress(35, text="📈 Dagelijkse P&L laden… 35%")
+            for _lc_coin in COINS:
+                get_daily_pnl(_lc_coin)
+
+            _pb.progress(55, text="📂 Open posities ophalen… 55%")
+            _ = get_open_trades()
+
+            _pb.progress(70, text="💼 Portfolio laden… 70%")
+            _ = get_portfolio_snapshot()
+
+            _pb.progress(85, text="🔭 Scanner status ophalen… 85%")
+            for _lc_coin in COINS:
+                get_scanner_state(_lc_coin)
+
+            _pb.progress(100, text="✅ Dashboard gereed! 100%")
+
+    st.session_state["_page_loaded"] = True
+    _lp.empty()
+
 tab_live, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
     ["🔴 Live", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
 )
