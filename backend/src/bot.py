@@ -91,8 +91,10 @@ async def trigger_hybrid_entry(market_id: str) -> bool:
     return False
 
 
-async def _process_coin_window(coin: str, market: dict) -> None:
-    mode = get_mode()
+async def _process_coin_window(coin: str, market: dict, force_paper: bool = False) -> None:
+    # force_paper=True: achtergrond Signal Lab straddle terwijl signal_trader actief is.
+    # Gebruikt mode="paper" zodat execute_entry altijd simuleert, ongeacht live/paper instelling.
+    mode = "paper" if force_paper else get_mode()
 
     # Skip new entries during live_learning analysis phase
     if mode == "live_learning":
@@ -116,16 +118,17 @@ async def _process_coin_window(coin: str, market: dict) -> None:
                  hour=market["window_start"].hour if market.get("window_start") else None)
         return
 
-    # In auto mode: verify entry conditions BEFORE consuming the window slot.
-    # If the check fails (e.g. no orderbook data yet), the window stays available
-    # so the next _coin_loop iteration (10s later) can retry the same window.
-    if _effective_is_auto(mode):
+    # In auto mode OR force_paper (background signal lab): verify entry conditions BEFORE
+    # consuming the window slot. If the check fails (e.g. no orderbook data yet), the
+    # window stays available so the next iteration (10s later) can retry.
+    if force_paper or _effective_is_auto(mode):
         ok_entry, entry_reason = _should_enter(market)
         if not ok_entry:
             log.info("trade_skipped_spread", coin=coin, reason=entry_reason)
             return  # window NOT registered — retried next iteration
 
-    trade = create_trade_state(coin, market, mode, triggered_by="bot")
+    triggered_by = "signal_lab_bg" if force_paper else "bot"
+    trade = create_trade_state(coin, market, mode, triggered_by=triggered_by)
 
     # Stamp trade with current regime + price context
     from . import regime as _regime
@@ -153,7 +156,7 @@ async def _process_coin_window(coin: str, market: dict) -> None:
     add_active_trade(trade)  # registers window in _window_registry
     trade_id = trade["trade_id"]
 
-    if not _effective_is_auto(mode):
+    if not force_paper and not _effective_is_auto(mode):
         market_id = market.get("market_id") or market.get("condition_id")
         evt = asyncio.Event()
         _pending_hybrid_triggers[market_id] = evt
@@ -205,9 +208,27 @@ async def _process_coin_window(coin: str, market: dict) -> None:
 
 async def _coin_loop(coin: str) -> None:
     while True:
-        # Stap terug als signal_trader actief is — die modus heeft eigen loop
         if get_mode() == "signal_trader":
-            await asyncio.sleep(5)
+            # Achtergrond paper straddle — houdt Signal Lab data vers terwijl
+            # Signal Trader actief is. Handelt ALLEEN in:
+            #   • windows die Signal Trader niet heeft geclaimd (has_traded_window=False)
+            #   • binnen 20 min voor window-start zodat Signal Trader 25+ min
+            #     voorrang heeft om zijn conviction-check te doen
+            # Trades worden opgeslagen als mode="paper", triggered_by="signal_lab_bg"
+            # zodat Signal Lab ze meeneemt in de per-coin accuraatheid.
+            if not risk.is_killed():
+                try:
+                    market = scanner.get_tradeable_market(coin)
+                    if market and market.get("window_start"):
+                        now = datetime.now(timezone.utc)
+                        mins_to_start = (market["window_start"] - now).total_seconds() / 60
+                        if mins_to_start <= 20:
+                            window_ts = market["window_start"].isoformat()
+                            if not has_traded_window(coin, window_ts):
+                                await _process_coin_window(coin, market, force_paper=True)
+                except Exception as e:
+                    log.error("bg_paper_loop_error", coin=coin, error=str(e))
+            await asyncio.sleep(10)
             continue
         if risk.is_killed():
             await asyncio.sleep(5)
