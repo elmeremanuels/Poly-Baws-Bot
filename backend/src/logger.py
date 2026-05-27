@@ -12,14 +12,30 @@ from .config_loader import CONFIG
 _db_path = Path(__file__).parent.parent / CONFIG["logging"]["db_path"]
 _db_path.parent.mkdir(parents=True, exist_ok=True)
 
+_LOG_LEVEL = (CONFIG.get("logging", {}).get("level") or "INFO").upper()
+_LOG_LEVEL_NUM = getattr(logging, _LOG_LEVEL, logging.INFO)
+
+# Mapping van level-naam → integer (zelfde schaal als stdlib logging)
+_LEVEL_MAP = {"debug": 10, "info": 20, "warning": 30, "error": 40, "critical": 50}
+
+
+def _level_filter(logger, method: str, event_dict: dict) -> dict:
+    """Drop events below the configured log level (works with PrintLoggerFactory)."""
+    if _LEVEL_MAP.get(method, 20) < _LOG_LEVEL_NUM:
+        raise structlog.DropEvent()
+    return event_dict
+
+
 structlog.configure(
     processors=[
+        _level_filter,                             # ← filtert debug weg op INFO-instelling
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.stdlib.add_log_level,
         structlog.processors.JSONRenderer(),
     ],
-    wrapper_class=structlog.BoundLogger,
+    wrapper_class=structlog.make_filtering_bound_logger(_LOG_LEVEL_NUM),
     logger_factory=structlog.PrintLoggerFactory(),
+    cache_logger_on_first_use=True,
 )
 
 log = structlog.get_logger()
