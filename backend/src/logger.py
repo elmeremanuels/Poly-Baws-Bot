@@ -376,6 +376,19 @@ async def get_daily_pnl(coin: str | None = None) -> float:
         return row[0] if row else 0.0
 
 
+async def get_mode_daily_pnl(mode: str) -> float:
+    """Sum today's net P&L for trades of a specific mode (e.g. 'signal_trader')."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    async with _db() as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(net_pnl), 0) FROM trades "
+            "WHERE date(created_at) = ? AND mode = ? AND status IN ('closed', 'resolved')",
+            (today, mode),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0.0
+
+
 async def get_today_trade_count(coin: str | None = None) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     async with _db() as db:

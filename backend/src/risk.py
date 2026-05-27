@@ -40,14 +40,20 @@ def get_kill_reason() -> str:
 def _enforces_daily_loss_limit(mode: str) -> bool:
     """Whether the global daily-loss kill applies to this mode.
 
-    Only real-money modes (live_hybrid/live_auto) are subject to it. Paper modes
-    and live_learning are exempt: paper trades are simulated, and live_learning is
-    paper during learn/validate while its deploy phase has its own max_live_loss
-    circuit breaker (orchestrator._tick_deploy). get_daily_pnl() sums ALL trades
-    incl. paper, so without this exemption paper losses trip a kill that immediately
-    re-fires after every reset — making the dashboard's Resume button appear dead.
+    Only real-money straddle modes (live_hybrid/live_auto) are subject to it.
+    Exempt modes:
+      - paper modes: simulated, no real money at stake.
+      - live_learning: paper during learn/validate; its deploy phase has its own
+        max_live_loss circuit breaker (orchestrator._tick_deploy).
+      - signal_trader: has its own max_daily_loss_eur gate measured against only
+        its own live trades (see signal_trader._daily_loss_exceeded). The global
+        kill here is wrong because get_daily_pnl() sums ALL trades incl. the
+        background paper straddle, so a few paper losses trip a €10 kill that
+        immediately re-fires after every reset — making Resume appear dead.
     """
-    return not mode.startswith("paper") and mode != "live_learning"
+    return (not mode.startswith("paper")
+            and mode != "live_learning"
+            and mode != "signal_trader")
 
 
 async def check_daily_loss_limit() -> bool:

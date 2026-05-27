@@ -45,6 +45,23 @@ def _is_paper() -> bool:
     return _cfg().get("paper_mode", True)
 
 
+async def _daily_loss_exceeded() -> bool:
+    """True if today's LIVE signal_trader P&L has hit max_daily_loss_eur.
+
+    Measured against signal_trader trades only (not the background paper straddle
+    or learning trades), so it gates new entries without tripping the global kill.
+    Paper mode is exempt — simulated losses don't count.
+    """
+    if _is_paper():
+        return False
+    limit = float(_cfg().get("max_daily_loss_eur", 50.0))
+    if limit <= 0:
+        return False
+    from .logger import get_mode_daily_pnl
+    pnl = await get_mode_daily_pnl("signal_trader")
+    return pnl <= -limit
+
+
 def _in_skip_hours(window_start) -> bool:
     """Uur-filter. Signal_trader negeert dit standaard (respect_trading_hours=false)
     omdat de conviction-gate al slechte uren uitfiltert."""
@@ -166,6 +183,12 @@ async def _check_and_trade(coin: str) -> None:
     # Basis risico-check (kill switch, dagelijks verlies, etc.)
     if risk.is_killed():
         log.debug("signal_trader_skip", coin=coin, reason="kill_switch")
+        return
+
+    # Eigen dag-verlieslimiet: stop nieuwe live entries (pauzeert niet de hele bot)
+    if await _daily_loss_exceeded():
+        log.info("signal_trader_skip", coin=coin, reason="daily_loss_limit",
+                 limit=_cfg().get("max_daily_loss_eur", 50.0))
         return
 
     # Zoek tradeable market
