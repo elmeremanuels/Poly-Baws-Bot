@@ -155,17 +155,50 @@ def coin_protection_panel() -> None:
         with st.expander(header, expanded=(g["state"] != "active")):
             if g["state"] == "disabled" and g["reason"]:
                 st.error(f"🚫 Uitgeschakeld wegens: {g['reason']}")
+
+                # ── Snelle diagnose ──────────────────────────────────────────
+                _diag_key = f"_diag_{coin}"
+                col_diag, _ = st.columns([2, 3])
+                with col_diag:
+                    if st.button("🔍 Wat ging er fout?", key=f"diag_{coin}",
+                                 help="Claude geeft een korte diagnose van de verliezen vandaag"):
+                        from src.claude_analyzer import analyze_guard_trigger_sync
+                        from src.db_sync import get_exit_reason_stats
+                        with st.spinner("Claude analyseert (~15s)..."):
+                            try:
+                                trades_t = get_analytics_trades(coin=coin, only_today=True)
+                                exit_s   = get_exit_reason_stats(coin=coin, only_today=True)
+                                dpnl     = get_daily_pnl(coin=coin)
+                                analysis = analyze_guard_trigger_sync(
+                                    coin, g["reason"], dpnl, trades_t, exit_s
+                                )
+                                st.session_state[_diag_key] = analysis
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Diagnose mislukt: {exc}")
+
+                if _diag_key in st.session_state:
+                    with st.container(border=True):
+                        st.markdown("**🔍 Claude-diagnose**")
+                        st.markdown(st.session_state[_diag_key])
+                        if st.button("✕ Wis diagnose", key=f"clr_diag_{coin}"):
+                            del st.session_state[_diag_key]
+                            st.rerun()
+                st.markdown("")
+
             elif g["state"] == "watch":
                 st.warning(
                     f"⚠️ Watch mode — {g['streak']} verlies op rij. "
                     "Eén kans nog: als de volgende trade wint gaat de coin terug naar Actief."
                 )
 
+            # ── Heractiveer knoppen ──────────────────────────────────────────
             col_a, col_b = st.columns(2)
             with col_a:
                 if g["state"] in ("watch", "disabled"):
                     if st.button(f"✅ Heractiveer {coin} direct", key=f"cpt_en_{coin}"):
                         write_command("coin_guard_enable", {"coin": coin})
+                        st.session_state.pop(f"_diag_{coin}", None)
                         st.toast(f"{coin} wordt heractiveerd...", icon="✅")
                         st.rerun()
 
@@ -173,11 +206,12 @@ def coin_protection_panel() -> None:
                 if g["state"] == "disabled":
                     if st.button(f"📄 Heractiveer {coin} met 5 paper trades", key=f"pp_{coin}"):
                         write_command("coin_guard_paper_gate", {"coin": coin, "n": 5})
+                        st.session_state.pop(f"_diag_{coin}", None)
                         st.toast(f"{coin}: re-enable + 5-paper-gate gestart", icon="📄")
                         st.rerun()
 
             st.markdown("---")
-            st.markdown("**🧠 Herzie Strategie — Claude AI analyse**")
+            st.markdown("**🧠 Herzie Strategie — Claude AI diepe analyse**")
             st.caption(
                 f"Claude analyseert de recente trades van {coin}, de resultaten per regime "
                 "en de huidige parameters. Het stelt concrete verbeteringen voor."

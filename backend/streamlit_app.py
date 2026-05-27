@@ -504,43 +504,13 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
         f'<p style="color:#6b7280;font-size:12px">{count} trades</p>',
         unsafe_allow_html=True,
     )
-    # Coin guard status badge
+    # Coin guard status badge — beheer via het Beveiliging-tabblad
     _guard_state = get_state(f"cg_{coin}_state") or "active"
     _guard_streak = get_state(f"cg_{coin}_streak") or "0"
     if _guard_state == "disabled":
-        _guard_reason = get_state(f"cg_{coin}_reason") or ""
-        _dismissed = st.session_state.get(f"_gd_dismissed_{coin}", False)
-        if not _dismissed:
-            _c1, _c2 = st.columns([5, 1])
-            with _c1:
-                st.error(f"🚫 Guard: {_guard_reason or 'uitgeschakeld'}", icon=None)
-            with _c2:
-                if st.button("✕", key=f"gd_x_{coin}", help="Verberg waarschuwing"):
-                    st.session_state[f"_gd_dismissed_{coin}"] = True
-                    st.rerun()
-            if st.button("🧠 Analyseer oorzaak", key=f"gd_analyse_{coin}"):
-                st.session_state["_guard_analyse_coin"] = coin
-                st.session_state["_guard_analyse_reason"] = _guard_reason
-                st.rerun(scope="app")
+        st.error("🚫 Guard actief — zie Beveiliging", icon=None)
     elif _guard_state == "watch":
         st.warning(f"⚠️ Watch: {_guard_streak}× verlies op rij")
-
-
-@st.dialog("🧠 Guard-analyse", width="large")
-def _guard_analysis_dialog(coin: str, guard_reason: str) -> None:
-    from src.db_sync import get_analytics_trades, get_exit_reason_stats, get_daily_pnl as _dpnl
-    from src.claude_analyzer import analyze_guard_trigger_sync
-    st.markdown(f"### {COIN_EMOJI.get(coin, '')} {coin} — Guard: {guard_reason}")
-    st.caption("Claude analyseert wat er vandaag mis is gegaan...")
-    with st.spinner("Analyse wordt uitgevoerd (~15s)..."):
-        try:
-            trades_t  = get_analytics_trades(coin=coin, only_today=True)
-            exit_s    = get_exit_reason_stats(coin=coin, only_today=True)
-            dpnl      = _dpnl(coin=coin)
-            analysis  = analyze_guard_trigger_sync(coin, guard_reason, dpnl, trades_t, exit_s)
-            st.markdown(analysis)
-        except Exception as exc:
-            st.error(f"Analyse mislukt: {exc}")
 
 
 @st.dialog("Trade Details", width="large")
@@ -1102,8 +1072,3 @@ if _detail_id:
     if _detail_trade:
         _trade_detail_dialog(_detail_trade)
 
-# Guard analysis dialog — triggered by "🧠 Analyseer oorzaak" in coin card.
-_guard_coin = st.session_state.pop("_guard_analyse_coin", None)
-_guard_rsn  = st.session_state.pop("_guard_analyse_reason", None)
-if _guard_coin:
-    _guard_analysis_dialog(_guard_coin, _guard_rsn or "")
