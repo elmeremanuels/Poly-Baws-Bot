@@ -32,8 +32,11 @@ exit:
   # Early loser sell: market-sell the declining side during monitoring (before trigger fires).
   # Data shows bid ~0.316 at 0.45 mid vs ~0.165 at trigger — nearly double the exit price.
   # Override per regime in regime_profiles (use null to disable for a specific regime).
-  early_loser_threshold: 0.47       # sell loser when its mid drops below this (raised 0.45→0.47 for earlier capture)
-  early_loser_winner_min: 0.57      # other side must be above this (confirms direction)
+  # DATA 1287 trades: early_loser_was_winner = 13 trades, -€27.23 (avg -€2.09).
+  # Verlaging drempel (0.47→0.42): verkoop loser alleen als hij duidelijker verliest.
+  # Verhoging winner_min (0.57→0.63): eis sterkere bevestiging van de winnende kant.
+  early_loser_threshold: 0.42       # verlaagd 0.47→0.42: wacht op duidelijker verlies voor verkoop
+  early_loser_winner_min: 0.63      # verhoogd 0.57→0.63: winnende kant moet overtuigend boven staan
   early_loser_rebuy_threshold: 0.55 # rebuy if sold side recovers above this (null = disabled)
   early_loser_cooldown_secs: 90     # wait at least this long after entry fill before selling early
   # Loss-control knobs — cap the magnitude of peg_cross / force-exit losses.
@@ -137,7 +140,7 @@ trading_hours:
   # DATA 27-05: uur 02:00 UTC (+€8.92, 83% WR), 04:00 UTC (+€10.91, 87% WR)
   #             uur 05:00 UTC (-€8.21, 41% WR), 07:00 UTC (-€6.73, 43% WR)
   enabled: true
-  skip_utc_hours: [5, 7]       # sla deze UTC-uren over (window_start valt in dit uur)
+  skip_utc_hours: [5, 7, 8, 12, 14, 18]  # DATA 1287 trades: 08=-€6.92(55%WR), 12=-€9.38(35%), 14=-€6.75(33%), 18=-€10.30(29%)
 
 weighting_guard:
   enabled: true             # auto-disables conviction_weighting / directional_entry on poor performance
@@ -155,12 +158,13 @@ ab_test:
   conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
 
 directional_entry:
-  # DATA 27-05: directional (conviction ≥ 0.70) → 78.7% WR, +€29.16 over 75 trades
-  # Dual-side straddels (lage conviction) → 37.1% WR, -€33.04 over 105 trades
-  # Drempel verlaagd naar 0.65; straddle_min ook op 0.65 → alles onder 0.65 overgeslagen
+  # DATA 1287 trades: conviction-drempel sweep toont LAGERE drempel = beter P&L.
+  # straddle_min terug naar 0.45 — meer trades doorlaten verbetert totale P&L.
+  # directional (enkelvijdig) blijft aan voor zeer hoge conviction (≥0.65).
+  # Eerder "single-side beter"-conclusie was door winner_stop_loss vertekend (nu null).
   enabled: true
   conviction_threshold: 0.65     # conviction >= this → koop alleen de biased zijde
-  straddle_min_conviction: 0.65  # conviction 0 < score < this → skip trade volledig (geen straddle)
+  straddle_min_conviction: 0.45  # terug naar 0.45 — data toont alle trades winstgevend zonder stop_loss
   min_depth_shares: 20           # top-3 ask levels must hold >= 20 shares before going directional
   pricing_model:
     enabled: true
