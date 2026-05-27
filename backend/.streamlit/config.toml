@@ -1,0 +1,18 @@
+# Streamlit server configuration for Poly-Baws-Bot dashboard
+
+[server]
+headless = true                 # no browser auto-open
+enableStaticServing = false
+runOnSave = false
+maxUploadSize = 50
+maxMessageSize = 200            # MB — large trade data payloads
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true               # skip intermediate state updates for quick reruns
+
+[client]
+showErrorDetails = false        # hide raw Python tracebacks from end-user
+toolbarMode = "minimal"

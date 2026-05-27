@@ -47,36 +47,62 @@ def _overview_table() -> None:
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
-def _apply_coin_params_to_config(coin: str, params: dict) -> str:
-    """Write params to config.yaml under coins.{coin}, preserving all comments.
-    Returns an error string on failure, or '' on success."""
+def _apply_coin_params_to_config(
+    coin: str,
+    global_params: dict,
+    regime_params: dict | None = None,
+) -> str:
+    """Write params to config.yaml preserving all comments.
+
+    global_params  → config.yaml → coins.{coin}
+    regime_params  → config.yaml → regime_profiles.{REGIME}  (per-regime suggestions)
+
+    Returns error string on failure, '' on success.
+    """
     try:
         from ruamel.yaml import YAML
         ryaml = YAML()
         ryaml.preserve_quotes = True
-        ryaml.width = 4096  # avoid line-wrapping
+        ryaml.width = 4096
 
         with open(_CONFIG_PATH) as f:
             cfg = ryaml.load(f)
 
+        # ── Coin-level params ────────────────────────────────────────────────
         if "coins" not in cfg:
             cfg["coins"] = {}
         if coin not in cfg["coins"] or cfg["coins"][coin] is None:
             cfg["coins"][coin] = {}
-
-        for k, v in params.items():
+        for k, v in global_params.items():
             cfg["coins"][coin][k] = v
+
+        # ── Regime-level params ──────────────────────────────────────────────
+        if regime_params:
+            if "regime_profiles" not in cfg:
+                cfg["regime_profiles"] = {}
+            for regime, rp in regime_params.items():
+                if not rp:
+                    continue
+                if regime not in cfg["regime_profiles"] or cfg["regime_profiles"][regime] is None:
+                    cfg["regime_profiles"][regime] = {}
+                for k, v in rp.items():
+                    cfg["regime_profiles"][regime][k] = v  # None → null in YAML
 
         with open(_CONFIG_PATH, "w") as f:
             ryaml.dump(cfg, f)
 
     except ImportError:
-        # Fallback: PyYAML (loses inline comments, but keeps structure)
+        # Fallback: PyYAML (loses inline comments, keeps structure)
         import yaml
         try:
             with open(_CONFIG_PATH) as f:
                 cfg = yaml.safe_load(f)
-            cfg.setdefault("coins", {}).setdefault(coin, {}).update(params)
+            cfg.setdefault("coins", {}).setdefault(coin, {}).update(global_params)
+            if regime_params:
+                rp_cfg = cfg.setdefault("regime_profiles", {})
+                for regime, rp in regime_params.items():
+                    if rp:
+                        rp_cfg.setdefault(regime, {}).update(rp)
             with open(_CONFIG_PATH, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         except Exception as exc2:
@@ -85,8 +111,14 @@ def _apply_coin_params_to_config(coin: str, params: dict) -> str:
     except Exception as exc:
         return str(exc)
 
-    # Mirror into the in-memory CONFIG so Streamlit sees the change immediately
-    CONFIG.setdefault("coins", {}).setdefault(coin, {}).update(params)
+    # Mirror into in-memory CONFIG
+    CONFIG.setdefault("coins", {}).setdefault(coin, {}).update(global_params)
+    if regime_params:
+        for regime, rp in regime_params.items():
+            if rp:
+                CONFIG.setdefault("regime_profiles", {}).setdefault(regime, {}).update(
+                    {k: v for k, v in rp.items() if v is not None}  # skip None for in-memory
+                )
     return ""
 
 
@@ -177,16 +209,28 @@ def _render_herzie_result(coin: str, result: dict) -> None:
                     "✅ Pas toe in config.yaml",
                     key=f"apply_herzie_{coin}",
                     type="primary",
-                    help="Schrijft de voorgestelde basisparameters direct naar config.yaml en activeert ze live in de bot.",
+                    help="Schrijft basisparameters (coins.{coin}) én regime-specifieke params (regime_profiles) naar config.yaml.",
                 ):
-                    err = _apply_coin_params_to_config(coin, global_params)
+                    # Build regime_params from regime_specific (all regimes that have suggestions)
+                    _regime_params: dict = {}
+                    for _rgm, _rdata in regime_specific.items():
+                        _rp = _rdata.get("suggested_params", {})
+                        if _rp:
+                            _regime_params[_rgm] = _rp
+
+                    err = _apply_coin_params_to_config(coin, global_params, _regime_params or None)
                     if err:
                         st.error(f"Fout bij schrijven config.yaml: {err}")
                     else:
-                        write_command("apply_coin_params", {"coin": coin, "params": global_params})
+                        write_command("apply_coin_params", {
+                            "coin": coin,
+                            "params": global_params,
+                            "regime_params": _regime_params,
+                        })
+                        n_regimes = len(_regime_params)
                         st.session_state[_applied_key] = True
                         st.toast(
-                            f"✅ {coin}-parameters opgeslagen en naar bot verstuurd! "
+                            f"✅ {coin}-params + {n_regimes} regime-profielen opgeslagen! "
                             "Herstart de bot voor volledige persistentie.",
                             icon="✅",
                         )
@@ -199,7 +243,7 @@ def _render_herzie_result(coin: str, result: dict) -> None:
 
         elif st.session_state.get(_applied_key):
             st.success(
-                "✅ Parameters zijn toegepast in `config.yaml` en naar de bot verstuurd. "
+                "✅ Coin-params én regime-profielen toegepast in `config.yaml` en naar de bot verstuurd. "
                 "De bot gebruikt ze direct — herstart voor 100% persistentie."
             )
         else:
@@ -233,18 +277,35 @@ def _herzie_section(coin: str) -> None:
             if len(trades) < 5:
                 st.warning(f"Te weinig data ({len(trades)} trades). Kies een langere periode.")
             else:
-                with st.spinner(f"Claude analyseert {coin}… (kan ~30s duren)"):
+                with st.status(
+                    f"🧠 Claude analyseert {coin}…",
+                    expanded=True,
+                ) as _hz_status:
                     try:
-                        from src.claude_analyzer import analyze_coin_strategy_sync
+                        _hz_status.write("📊 Handelsdata + signalen verzamelen…")
                         trades_24h = get_analytics_trades(coin=coin, days=1)
+                        _hz_status.write(
+                            "🤖 Claude API aanvragen — dit duurt ~20–40 seconden. "
+                            "Als de browser een melding geeft, wacht dan nog even of ververs de pagina."
+                        )
+                        from src.claude_analyzer import analyze_coin_strategy_sync
                         result = analyze_coin_strategy_sync(
                             coin, trades,
                             recent_trades_24h=trades_24h if trades_24h else None,
                         )
+                        _hz_status.update(
+                            label=f"✅ Analyse van {coin} klaar",
+                            state="complete",
+                            expanded=False,
+                        )
                         st.session_state[f"herzie_{coin}"] = result
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Analyse mislukt: {exc}")
+                        _hz_status.update(
+                            label=f"❌ Analyse mislukt — {exc}",
+                            state="error",
+                            expanded=True,
+                        )
 
     if f"herzie_{coin}" in st.session_state:
         st.markdown("### 📋 Analyse resultaat")
@@ -312,21 +373,32 @@ def coin_protection_panel() -> None:
                     ):
                         from src.claude_analyzer import analyze_guard_trigger_sync
                         from src.db_sync import get_exit_reason_stats
-                        with st.spinner("Claude analyseert (~15s)…"):
+                        with st.status("🔍 Claude diagnoseert…", expanded=True) as _diag_status:
                             try:
+                                _diag_status.write("📊 Handelsdata ophalen (24h)…")
                                 trades_t = get_analytics_trades(coin=coin, days=1)
                                 exit_s   = get_exit_reason_stats(coin=coin, days=1)
                                 dpnl     = sum(
                                     t.get("net_pnl") or 0 for t in trades_t
                                     if t.get("net_pnl") is not None
                                 )
+                                _diag_status.write("🤖 Claude API — duurt ~15 seconden…")
                                 analysis = analyze_guard_trigger_sync(
                                     coin, g["reason"], dpnl, trades_t, exit_s
+                                )
+                                _diag_status.update(
+                                    label="✅ Diagnose klaar",
+                                    state="complete",
+                                    expanded=False,
                                 )
                                 st.session_state[_diag_key] = analysis
                                 st.rerun()
                             except Exception as exc:
-                                st.error(f"Diagnose mislukt: {exc}")
+                                _diag_status.update(
+                                    label=f"❌ Diagnose mislukt — {exc}",
+                                    state="error",
+                                    expanded=True,
+                                )
 
                 if _diag_key in st.session_state:
                     with st.container(border=True):
