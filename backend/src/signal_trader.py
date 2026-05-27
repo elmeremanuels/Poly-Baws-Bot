@@ -198,8 +198,9 @@ async def _execute_entry(
     # Aantal shares te kopen
     size = round(trade_size_eur / best_ask, 2)
 
-    # Trade state aanmaken
-    trade = create_trade_state(coin, market, "signal_trader", triggered_by="signal")
+    # Trade state aanmaken — triggered_by onderscheidt paper vs live voor logging
+    triggered_by = "signal_paper" if _is_paper() else "signal_live"
+    trade = create_trade_state(coin, market, "signal_trader", triggered_by=triggered_by)
     trade_id = trade["trade_id"]
 
     # Signals stampen

@@ -229,6 +229,24 @@ def get_signal_trade_stats(days: int | None = None) -> dict:
     }
 
 
+def delete_signal_trades(status: str | None = None) -> int:
+    """Verwijder signal_trader trades uit de DB.
+    status=None → alle signal_trader trades; anders alleen die status.
+    Geeft het aantal verwijderde rijen terug.
+    """
+    if not _db_path.exists():
+        return 0
+    with _conn() as conn:
+        if status:
+            cur = conn.execute(
+                "DELETE FROM trades WHERE mode='signal_trader' AND status=?",
+                (status,),
+            )
+        else:
+            cur = conn.execute("DELETE FROM trades WHERE mode='signal_trader'")
+        return cur.rowcount
+
+
 # ── State / config ────────────────────────────────────────────────────────────
 
 def get_state(key: str) -> str | None:

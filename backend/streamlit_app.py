@@ -34,6 +34,7 @@ from src.db_sync import (
     get_today_trade_count,
 )
 from src.commands import write_command, delete_hybrid_pending
+from src.db_sync import delete_signal_trades
 from src.risk import KILL_FLAG_PATH
 from analytics_tab import analytics_panel
 from signal_lab_tab import signal_lab_panel
@@ -1164,6 +1165,22 @@ def _portfolio_panel() -> None:
 _ST_CONFIG_PATH = Path(__file__).parent / "config" / "config.yaml"
 
 
+def _read_st_cfg_from_yaml() -> dict:
+    """Lees signal_trader config direct uit config.yaml (bypassed module-cache).
+
+    CONFIG is een module-level singleton die niet herlaadt na een YAML-schrijf.
+    Deze functie leest elke keer vers uit het bestand zodat instellingen na
+    opslaan correct worden weergegeven.
+    """
+    try:
+        import yaml
+        with open(_ST_CONFIG_PATH) as f:
+            data = yaml.safe_load(f)
+        return (data or {}).get("signal_trader", {}) or {}
+    except Exception:
+        return CONFIG.get("signal_trader", {})
+
+
 def _save_signal_trader_to_yaml(global_params: dict, coin_params: dict) -> str:
     """Schrijf signal_trader config naar config.yaml. Geeft '' bij succes, fout-string bij fout."""
     try:
@@ -1211,7 +1228,7 @@ def _save_signal_trader_to_yaml(global_params: dict, coin_params: dict) -> str:
 def _signal_trader_panel() -> None:
     """Dashboard panel voor de signal_trader modus."""
     mode      = current_mode()
-    cfg       = CONFIG.get("signal_trader", {})
+    cfg       = _read_st_cfg_from_yaml()   # altijd vers uit YAML, niet de cache
     is_active = (mode == "signal_trader")
     is_paper  = cfg.get("paper_mode", True)
 
@@ -1298,18 +1315,28 @@ def _signal_trader_panel() -> None:
     total = len(trades)
     st.markdown(f"#### 📋 Trades ({total})" if total else "#### 📋 Trades")
     if not df.empty:
-        show_cols = ["coin", "winner_side", "winner_exit_reason",
+        show_cols = ["coin", "triggered_by", "winner_side", "winner_exit_reason",
                      "net_pnl", "conviction_score_at_entry",
                      "question", "market_id", "created_at"]
         avail = [c for c in show_cols if c in df.columns]
         rec = df[avail].head(50).copy()
 
         # Format columns
+        if "triggered_by" in rec.columns:
+            rec["Type"] = rec["triggered_by"].map({
+                "signal_paper": "📄 Paper",
+                "signal_live":  "💸 Live",
+                "signal":       "📄 Paper",   # legacy label vóór de fix
+            }).fillna("—")
+            rec = rec.drop(columns=["triggered_by"])
         if "winner_exit_reason" in rec.columns:
             rec["Resultaat"] = rec["winner_exit_reason"].map({
                 "resolution_won":  "✅ Won",
                 "resolution_lost": "❌ Lost",
-            }).fillna("⏳ Open")
+                "aborted":         "⚠️ Afgebroken",
+            }).fillna(rec["winner_exit_reason"].map(
+                lambda x: "⚠️ Afgebroken" if x and "abort" in str(x).lower() else "⏳ Open"
+            ))
             rec = rec.drop(columns=["winner_exit_reason"])
         if "net_pnl" in rec.columns:
             rec["P&L"] = rec["net_pnl"].apply(lambda x: f"€{x:+.2f}" if pd.notna(x) else "—")
@@ -1445,6 +1472,22 @@ def _signal_trader_panel() -> None:
                 st.rerun()
             else:
                 st.error(f"❌ Schrijffout config.yaml: {err}")
+
+        # ── Verwijder signal trades ─────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("**🗑️ Trade-geschiedenis verwijderen**")
+        col_del_ab, col_del_all = st.columns(2)
+        with col_del_ab:
+            if st.button("🗑️ Verwijder aborted trades", key="st_del_aborted"):
+                n = delete_signal_trades(status="aborted")
+                st.success(f"✅ {n} afgebroken trades verwijderd.")
+                st.rerun()
+        with col_del_all:
+            if st.button("⚠️ Verwijder ALLE signal trades", key="st_del_all",
+                         type="secondary"):
+                n = delete_signal_trades()
+                st.success(f"✅ {n} trades verwijderd — schone lei!")
+                st.rerun()
 
 
 # ── Loading screen (eerste keer dat deze sessie de pagina laadt) ───────────────
