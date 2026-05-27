@@ -826,3 +826,78 @@ Regime profielen (actief):
     log.info("coin_strategy_analysis_done", coin=coin,
              confidence=result.get("confidence", 0), n_trades=len(triggered))
     return result
+
+
+def analyze_guard_trigger_sync(
+    coin: str,
+    guard_reason: str,
+    daily_pnl: float,
+    trades_today: list[dict],
+    exit_stats: list[dict],
+) -> str:
+    """Quick Claude diagnosis when the coin guard fires.
+
+    Returns plain-text Dutch analysis (max ~150 words):
+      - Hoofdoorzaak van de verliezen
+      - Welk exit-mechanisme of regime het meest bijdroeg
+      - Één concrete aanbeveling
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
+        raise ValueError("ANTHROPIC_API_KEY niet ingesteld — kan analyse niet uitvoeren")
+
+    model = CONFIG.get("claude", {}).get("model", "claude-sonnet-4-6")
+
+    # Compact trade summary (max 25 most recent)
+    trade_lines = []
+    for t in trades_today[-25:]:
+        pnl   = t.get("net_pnl")
+        regime = t.get("regime_at_entry") or "?"
+        exit_r = t.get("winner_exit_reason") or t.get("status") or "?"
+        won    = t.get("actual_winner") == t.get("winner_side")
+        mark   = "✅" if won else "❌"
+        pnl_s  = f"€{pnl:+.4f}" if pnl is not None else "?"
+        trade_lines.append(f"  {mark} {regime} | {exit_r} | {pnl_s}")
+
+    exit_lines = [
+        f"  {e.get('winner_exit_reason','?')}: {e.get('count',0)}× "
+        f"gem €{e.get('avg_net_pnl') or 0:+.4f}"
+        for e in exit_stats
+    ]
+
+    prompt = f"""De coin guard voor {coin} is afgegaan.
+
+Reden: {guard_reason}
+Dag-P&L: €{daily_pnl:+.2f}
+Trades vandaag ({len(trades_today)}):
+{chr(10).join(trade_lines) if trade_lines else "  (geen trades)"}
+
+Exit-verdeling:
+{chr(10).join(exit_lines) if exit_lines else "  (geen data)"}
+
+Geef een korte analyse in het Nederlands (max 150 woorden):
+1. Hoofdoorzaak van de verliezen vandaag
+2. Welk exit-mechanisme of regime het meest bijdroeg
+3. Één concrete parameter-aanbeveling om dit te voorkomen
+
+Antwoord als plain tekst zonder JSON of markdown headers."""
+
+    with httpx.Client(timeout=60) as client:
+        resp = client.post(
+            _CLAUDE_URL,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": model,
+                "max_tokens": 512,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        resp.raise_for_status()
+
+    text = resp.json()["content"][0]["text"].strip()
+    log.info("guard_analysis_done", coin=coin, daily_pnl=daily_pnl, n_trades=len(trades_today))
+    return text
