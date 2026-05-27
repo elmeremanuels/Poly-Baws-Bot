@@ -117,6 +117,7 @@ async def signal_trader_loop(coin: str) -> None:
     await asyncio.sleep(20)
     await _recover_stuck_trades(coin)
 
+    _tick = 0
     while True:
         if get_mode() != "signal_trader":
             await asyncio.sleep(5)
@@ -127,7 +128,22 @@ async def signal_trader_loop(coin: str) -> None:
         try:
             await _check_and_trade(coin)
         except Exception as e:
-            log.error("signal_trader_error", coin=coin, error=str(e))
+            log.error("signal_trader_error", coin=coin, error=str(e), exc_info=True)
+        _tick += 1
+        # Elke 60 s een heartbeat — bevestigt dat de loop actief is
+        if _tick % 6 == 0:
+            cfg = _cfg()
+            market = scanner.get_tradeable_market(coin)
+            direction, score = _signals.get_conviction(coin)
+            log.info(
+                "signal_trader_heartbeat", coin=coin,
+                mode_active=(get_mode() == "signal_trader"),
+                market_found=bool(market),
+                conviction_direction=direction,
+                conviction_score=round(score, 3),
+                threshold=cfg.get("conviction_threshold", 0.65),
+                paper=_is_paper(),
+            )
         await asyncio.sleep(10)
 
 
@@ -141,34 +157,44 @@ async def _check_and_trade(coin: str) -> None:
     total_active = sum(active_counts.values())
     max_concurrent = cfg.get("max_concurrent_positions", 10)
     if total_active >= max_concurrent:
+        log.debug("signal_trader_skip", coin=coin, reason="max_concurrent",
+                  active=total_active, max=max_concurrent)
         return
 
     # Basis risico-check (kill switch, dagelijks verlies, etc.)
-    # Gebruik mode="signal_trader_live" zodat daily loss limit WEL actief is
-    # maar coin_position_limit gebaseerd is op de straddle config (gaat mis)
-    # Doe het handmatig:
     if risk.is_killed():
+        log.debug("signal_trader_skip", coin=coin, reason="kill_switch")
         return
 
     # Zoek tradeable market
     market = scanner.get_tradeable_market(coin)
     if not market:
+        log.debug("signal_trader_skip", coin=coin, reason="no_tradeable_market")
         return
 
     # Skip uren check
     if _in_skip_hours(market.get("window_start")):
+        log.debug("signal_trader_skip", coin=coin, reason="skip_hour")
         return
 
     window_ts = market["window_start"].isoformat() if market["window_start"] else ""
     if has_traded_window(coin, window_ts):
+        log.debug("signal_trader_skip", coin=coin, reason="window_already_traded",
+                  window=window_ts)
         return
 
-    # Signaal ophalen
+    # Signaal ophalen — log altijd zodat je de score kunt volgen
     direction, score = _signals.get_conviction(coin)
     threshold = cfg.get("conviction_threshold", 0.65)
 
+    log.info("signal_trader_signal", coin=coin,
+             direction=direction, score=round(score, 3), threshold=threshold,
+             window=window_ts)
+
     if direction is None or score < threshold:
-        return  # Geen/te weinig signaal — skip
+        log.info("signal_trader_skip", coin=coin, reason="low_conviction",
+                 direction=direction, score=round(score, 3), threshold=threshold)
+        return
 
     # Converteer UP/DOWN naar YES/NO
     side = "YES" if direction == "UP" else "NO"
@@ -179,7 +205,7 @@ async def _check_and_trade(coin: str) -> None:
     max_price = cfg.get("entry_price_max", 0.55)
     if best_ask is None or best_ask > max_price:
         log.info("signal_trader_price_rejected", coin=coin,
-                 ask=best_ask, max=max_price, direction=direction)
+                 ask=best_ask, max=max_price, direction=direction, score=round(score, 3))
         return
 
     await _execute_entry(coin, market, side, buy_token, direction, score, cfg)
