@@ -21,9 +21,9 @@ from src.db_sync import (
     get_latest_snapshot_for_trade,
     get_learn_coin_counts,
     get_open_trades,
+    get_signal_accuracy_per_coin,
     get_signal_trades,
     get_signal_trades_today,
-    get_signal_trade_stats,
     get_phase_stats,
     get_portfolio_snapshot,
     get_recent_events,
@@ -1229,7 +1229,7 @@ def _signal_trader_panel() -> None:
         st.markdown(
             '<div style="background:rgba(55,65,81,0.2);border:1px solid #374151;'
             'border-radius:8px;padding:10px 16px;margin-bottom:12px">'
-            '⏸ Signal Trader is <b>inactief</b> — activeer via de sidebar of onderstaande knop'
+            '⏸ Signal Trader is <b>inactief</b> — activeer via de onderstaande knop'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -1255,19 +1255,13 @@ def _signal_trader_panel() -> None:
 
     st.divider()
 
-    # ── Statistieken ────────────────────────────────────────────────────────────
+    # ── Periode + metrics ────────────────────────────────────────────────────────
     period_opts = {"Vandaag": 1, "7 dagen": 7, "30 dagen": 30, "Alle tijd": None}
     period = st.radio("Periode", list(period_opts.keys()), index=0,
                       horizontal=True, key="st_period")
     days = period_opts[period]
 
     trades = get_signal_trades_today() if days == 1 else get_signal_trades(days=days)
-    # All-time stats voor per-coin accuracy (ook bij disabled coins)
-    all_stats = get_signal_trade_stats(days=None)
-    coin_stats_map: dict[str, dict] = {
-        r["coin"]: r for r in all_stats.get("by_coin", [])
-    }
-
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
     if not df.empty:
@@ -1294,137 +1288,163 @@ def _signal_trader_panel() -> None:
             else:
                 st.error(f"📉 **Onder break-even** ({break_even_pct:.0f}%) — verliesgevend. Tekort: {margin:.1f}pp")
         else:
-            st.caption(f"⏳ Min. 5 trades nodig voor oordeel (nu {closed}).")
-
-        # Recente trades
-        with st.expander(f"📋 Recente trades ({len(trades)})", expanded=False):
-            show_cols = ["coin", "winner_side", "winner_exit_reason",
-                         "net_pnl", "conviction_score_at_entry",
-                         "question", "market_id", "created_at"]
-            avail = [c for c in show_cols if c in df.columns]
-            rec = df[avail].head(40).copy()
-            if "winner_exit_reason" in rec.columns:
-                rec["Resultaat"] = rec["winner_exit_reason"].map({
-                    "resolution_won": "✅ Won", "resolution_lost": "❌ Lost",
-                }).fillna("⏳ Open")
-                rec = rec.drop(columns=["winner_exit_reason"])
-            if "net_pnl" in rec.columns:
-                rec["P&L"] = rec["net_pnl"].apply(lambda x: f"€{x:+.2f}" if pd.notna(x) else "—")
-                rec = rec.drop(columns=["net_pnl"])
-            if "conviction_score_at_entry" in rec.columns:
-                rec["Conv."] = rec["conviction_score_at_entry"].apply(
-                    lambda x: f"{x:.2f}" if pd.notna(x) else "—")
-                rec = rec.drop(columns=["conviction_score_at_entry"])
-            # Polymarket link via market_id (condition_id)
-            if "market_id" in rec.columns:
-                rec["Polymarket"] = rec["market_id"].apply(
-                    lambda mid: f"https://polymarket.com/event/{mid}" if mid else "—"
-                )
-                rec = rec.drop(columns=["market_id"])
-            if "question" in rec.columns:
-                rec["Markt"] = rec["question"].apply(
-                    lambda q: (q[:60] + "…") if q and len(q) > 60 else (q or "—")
-                )
-                rec = rec.drop(columns=["question"])
-            st.dataframe(rec, use_container_width=True, hide_index=True)
+            st.caption(f"⏳ Min. 5 trades nodig voor break-even oordeel (nu {closed}).")
     else:
         st.info("Geen signal_trader trades gevonden voor deze periode.")
 
     st.divider()
 
-    # ── Instellingen (form — wijzigingen pas op Opslaan) ────────────────────────
-    st.markdown("#### ⚙️ Instellingen")
-    with st.form("st_config_form"):
-        col_l, col_r = st.columns(2)
-        with col_l:
-            conv_thr = st.slider(
-                "Conviction drempel",
-                min_value=0.50, max_value=0.90,
-                value=float(cfg.get("conviction_threshold", 0.65)),
-                step=0.05,
-                help="Minimum signaalsterkte om een trade te plaatsen. Break-even ≈ 52% accuracy.",
-            )
-            entry_max = st.slider(
-                "Max entry prijs (ct per share)",
-                min_value=0.50, max_value=0.60,
-                value=float(cfg.get("entry_price_max", 0.55)),
-                step=0.01, format="%.2f",
-                help="Nooit meer dan dit betalen per share bij entry.",
-            )
-        with col_r:
-            trade_size = st.number_input(
-                "Inleg per trade (€)",
-                min_value=1.0, max_value=200.0,
-                value=float(cfg.get("trade_size_eur", 10.0)),
-                step=1.0,
-                help="Hoeveel EUR per trade geïnvesteerd wordt.",
-            )
-            max_conc = st.number_input(
-                "Max gelijktijdige posities",
-                min_value=1, max_value=50,
-                value=int(cfg.get("max_concurrent_positions", 10)),
-                step=1,
-                help="Maximaal aantal open signal_trader posities tegelijk (alle coins samen).",
-            )
+    # ── Trades tabel (hoofd focus) ───────────────────────────────────────────────
+    total = len(trades)
+    st.markdown(f"#### 📋 Trades ({total})" if total else "#### 📋 Trades")
+    if not df.empty:
+        show_cols = ["coin", "winner_side", "winner_exit_reason",
+                     "net_pnl", "conviction_score_at_entry",
+                     "question", "market_id", "created_at"]
+        avail = [c for c in show_cols if c in df.columns]
+        rec = df[avail].head(50).copy()
 
-        # ── Per-coin toggles met accuracy ────────────────────────────────────────
-        st.markdown("**🪙 Coins** — accuracy uit alle beschikbare data")
-        coin_enabled_new: dict[str, bool] = {}
-        for coin in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            default_on = cfg.get("coins", {}).get(coin, {}).get("enabled", True)
-            cs = coin_stats_map.get(coin, {})
-            c_won  = int(cs.get("won",  0))
-            c_lost = int(cs.get("lost", 0))
-            c_closed = c_won + c_lost
-            c_pnl  = float(cs.get("net_pnl", 0.0))
-            c_acc  = c_won / c_closed * 100.0 if c_closed else None
+        # Format columns
+        if "winner_exit_reason" in rec.columns:
+            rec["Resultaat"] = rec["winner_exit_reason"].map({
+                "resolution_won":  "✅ Won",
+                "resolution_lost": "❌ Lost",
+            }).fillna("⏳ Open")
+            rec = rec.drop(columns=["winner_exit_reason"])
+        if "net_pnl" in rec.columns:
+            rec["P&L"] = rec["net_pnl"].apply(lambda x: f"€{x:+.2f}" if pd.notna(x) else "—")
+            rec = rec.drop(columns=["net_pnl"])
+        if "conviction_score_at_entry" in rec.columns:
+            rec["Conv."] = rec["conviction_score_at_entry"].apply(
+                lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+            rec = rec.drop(columns=["conviction_score_at_entry"])
+        if "question" in rec.columns:
+            rec["Markt"] = rec["question"].apply(
+                lambda q: (q[:65] + "…") if q and len(q) > 65 else (q or "—")
+            )
+            rec = rec.drop(columns=["question"])
+        if "market_id" in rec.columns:
+            rec["Polymarket 🔗"] = rec["market_id"].apply(
+                lambda mid: f"https://polymarket.com/event/{mid}" if mid else "—"
+            )
+            rec = rec.drop(columns=["market_id"])
+        if "coin" in rec.columns:
+            rec = rec.rename(columns={"coin": "Coin"})
+        if "winner_side" in rec.columns:
+            rec = rec.rename(columns={"winner_side": "Richting"})
+        if "created_at" in rec.columns:
+            rec = rec.rename(columns={"created_at": "Tijdstip"})
 
-            col_name, col_tog, col_acc = st.columns([1, 1, 3])
-            with col_name:
-                st.markdown(f"**{COIN_EMOJI.get(coin, '')} {coin}**")
-            with col_tog:
-                coin_enabled_new[coin] = st.checkbox(
-                    "Aan", value=default_on, key=f"st_coin_{coin}"
+        st.dataframe(rec, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nog geen trades in deze periode — zodra de bot een signaal ≥ conviction-drempel ziet, verschijnen ze hier.")
+
+    st.divider()
+
+    # ── Instellingen (standaard ingeklapt) ──────────────────────────────────────
+    with st.expander("⚙️ Instellingen", expanded=False):
+        # Accuracy per coin uit Signal Lab (straddle historiek) — geen dubbele tracking
+        sl_accuracy  = get_signal_accuracy_per_coin()
+        sl_acc_map: dict[str, dict] = {r["coin"]: r for r in sl_accuracy}
+
+        with st.form("st_config_form"):
+            col_l, col_r = st.columns(2)
+            with col_l:
+                conv_thr = st.slider(
+                    "Conviction drempel",
+                    min_value=0.50, max_value=0.90,
+                    value=float(cfg.get("conviction_threshold", 0.65)),
+                    step=0.05,
+                    help="Minimum signaalsterkte om een trade te plaatsen. Break-even ≈ 52% accuracy.",
                 )
-            with col_acc:
-                if c_closed >= 3:
-                    color = "#34d399" if (c_acc or 0) >= 55 else ("#fbbf24" if (c_acc or 0) >= 52 else "#f87171")
-                    rec_icon = "✅ zet aan" if (c_acc or 0) >= 55 and not default_on else (
-                               "⚠️ grensgebied" if (c_acc or 0) >= 52 else (
-                               "❌ laat uit" if not default_on else ""))
-                    st.markdown(
-                        f'<span style="color:{color};font-size:13px">'
-                        f'<b>{c_acc:.1f}%</b> accuracy &nbsp;·&nbsp; '
-                        f'{c_closed} trades &nbsp;·&nbsp; €{c_pnl:+.2f}'
-                        f'{(" &nbsp;→ " + rec_icon) if rec_icon else ""}'
-                        f'</span>',
-                        unsafe_allow_html=True,
+                entry_max = st.slider(
+                    "Max entry prijs (ct per share)",
+                    min_value=0.50, max_value=0.60,
+                    value=float(cfg.get("entry_price_max", 0.55)),
+                    step=0.01, format="%.2f",
+                    help="Nooit meer dan dit betalen per share bij entry.",
+                )
+            with col_r:
+                trade_size = st.number_input(
+                    "Inleg per trade (€)",
+                    min_value=1.0, max_value=200.0,
+                    value=float(cfg.get("trade_size_eur", 10.0)),
+                    step=1.0,
+                    help="Hoeveel EUR per trade geïnvesteerd wordt.",
+                )
+                max_conc = st.number_input(
+                    "Max gelijktijdige posities",
+                    min_value=1, max_value=50,
+                    value=int(cfg.get("max_concurrent_positions", 10)),
+                    step=1,
+                    help="Maximaal aantal open signal_trader posities tegelijk (alle coins samen).",
+                )
+
+            st.markdown("---")
+            st.markdown("**🪙 Coins** — accuracy uit 🔬 Signal Lab (straddle historiek)")
+            st.caption("Break-even bij ~52%. Groen ≥ 55%, oranje 52–55%, rood < 52%.")
+
+            coin_enabled_new: dict[str, bool] = {}
+            for coin in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                default_on = cfg.get("coins", {}).get(coin, {}).get("enabled", True)
+                sl = sl_acc_map.get(coin, {})
+                sl_n   = int(sl.get("n", 0))
+                sl_acc = float(sl.get("accuracy_pct", 0.0)) if sl_n >= 3 else None
+                sl_pnl = float(sl.get("total_pnl", 0.0))
+
+                col_name, col_tog, col_info = st.columns([1, 1, 3])
+                with col_name:
+                    st.markdown(f"**{COIN_EMOJI.get(coin, '')} {coin}**")
+                with col_tog:
+                    coin_enabled_new[coin] = st.checkbox(
+                        "Aan", value=default_on, key=f"st_coin_{coin}"
                     )
-                else:
-                    n_desc = f"{c_closed} trades" if c_closed else "geen data"
-                    st.caption(f"te weinig data ({n_desc}) om te beoordelen")
+                with col_info:
+                    if sl_acc is not None:
+                        color = "#34d399" if sl_acc >= 55 else ("#fbbf24" if sl_acc >= 52 else "#f87171")
+                        if sl_acc >= 55 and not default_on:
+                            rec_icon = "✅ overweeg aan te zetten"
+                        elif sl_acc < 52 and default_on:
+                            rec_icon = "⚠️ overweeg uit te zetten"
+                        elif sl_acc < 52 and not default_on:
+                            rec_icon = "❌ laat uit"
+                        elif sl_acc < 55:
+                            rec_icon = "⚠️ grensgebied"
+                        else:
+                            rec_icon = ""
+                        st.markdown(
+                            f'<span style="color:{color};font-size:13px">'
+                            f'<b>{sl_acc:.1f}%</b> signal accuracy &nbsp;·&nbsp; '
+                            f'{sl_n} Signal Lab trades'
+                            f'{(" &nbsp;→ " + rec_icon) if rec_icon else ""}'
+                            f'</span>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        n_desc = f"{sl_n} trades" if sl_n else "geen data"
+                        st.caption(f"te weinig Signal Lab data ({n_desc})")
 
-        submitted = st.form_submit_button("💾 Opslaan", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("💾 Opslaan & doorsturen naar bot", type="primary", use_container_width=True)
 
-    if submitted:
-        global_params = {
-            "conviction_threshold":   conv_thr,
-            "trade_size_eur":         trade_size,
-            "entry_price_max":        entry_max,
-            "max_concurrent_positions": max_conc,
-        }
-        coin_params = {coin: {"enabled": coin_enabled_new[coin]} for coin in coin_enabled_new}
+        if submitted:
+            global_params = {
+                "conviction_threshold":     conv_thr,
+                "trade_size_eur":           trade_size,
+                "entry_price_max":          entry_max,
+                "max_concurrent_positions": max_conc,
+            }
+            coin_params = {coin: {"enabled": coin_enabled_new[coin]} for coin in coin_enabled_new}
 
-        err = _save_signal_trader_to_yaml(global_params, coin_params)
-        if not err:
-            write_command("apply_signal_trader_config", {
-                **global_params,
-                "coins": coin_params,
-            })
-            st.success("✅ Instellingen opgeslagen en doorgestuurd naar de bot!")
-            st.rerun()
-        else:
-            st.error(f"❌ Schrijffout config.yaml: {err}")
+            err = _save_signal_trader_to_yaml(global_params, coin_params)
+            if not err:
+                write_command("apply_signal_trader_config", {
+                    **global_params,
+                    "coins": coin_params,
+                })
+                st.success("✅ Instellingen opgeslagen en doorgestuurd naar de bot!")
+                st.rerun()
+            else:
+                st.error(f"❌ Schrijffout config.yaml: {err}")
 
 
 # ── Loading screen (eerste keer dat deze sessie de pagina laadt) ───────────────

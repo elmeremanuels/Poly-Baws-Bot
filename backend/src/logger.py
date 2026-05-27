@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS trades (
     market_id TEXT,
     condition_id_yes TEXT,
     condition_id_no TEXT,
+    question TEXT,
     mode TEXT NOT NULL,
     triggered_by TEXT,
     window_start_ts TEXT,
@@ -221,6 +222,8 @@ async def init_db() -> None:
             ("theoretical_price_yes", "REAL"),
             ("theoretical_price_no", "REAL"),
             ("edge_at_entry", "REAL"),
+            # Signal trader: market title for Polymarket lookup
+            ("question", "TEXT"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

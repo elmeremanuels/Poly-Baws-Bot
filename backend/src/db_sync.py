@@ -86,6 +86,51 @@ def get_today_trade_count(coin: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
+# ── Signal accuracy per coin (uit Signal Lab / straddle data) ─────────────────
+
+def get_signal_accuracy_per_coin(days: int | None = None) -> list[dict]:
+    """Conviction-richting accuracy per coin vanuit straddle-history (Signal Lab data).
+
+    Vergelijkt conviction_at_trigger ('UP'/'DOWN') met actual_winner ('YES'/'NO').
+    Geen dubbele tracking nodig — hergebruikt de bestaande straddle datapunten.
+    Geeft per coin: n (trades met signaal), accuracy (%), net_pnl (straddle P&L).
+    """
+    if not _db_path.exists():
+        return []
+    conditions = [
+        "trigger_hit = 1",
+        "status IN ('closed','resolved')",
+        "conviction_at_trigger IS NOT NULL",
+        "actual_winner IS NOT NULL",
+        "(mode IS NULL OR mode != 'signal_trader')",
+    ]
+    params: list = []
+    if days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                coin,
+                COUNT(*) AS n,
+                ROUND(
+                    SUM(CASE
+                        WHEN (conviction_at_trigger = 'UP'   AND actual_winner = 'YES')
+                          OR (conviction_at_trigger = 'DOWN' AND actual_winner = 'NO')
+                        THEN 1.0 ELSE 0.0
+                    END) / NULLIF(COUNT(*), 0) * 100
+                , 1) AS accuracy_pct,
+                ROUND(SUM(net_pnl), 4) AS total_pnl
+            FROM trades
+            WHERE {where}
+            GROUP BY coin
+            ORDER BY coin""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Signal Trader ─────────────────────────────────────────────────────────────
 
 def get_signal_trades(days: int | None = None) -> list[dict]:
