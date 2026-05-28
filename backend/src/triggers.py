@@ -581,6 +581,18 @@ async def on_trigger(trade_id: str, winner: str, price: float | None, broadcast_
     else:
         paper = trade_mode.startswith("paper")
     coin = trade["coin"]
+
+    # Stamp Signal Lab fields at trigger time (trigger_hit / winner_side were never
+    # persisted to the DB for straddle trades — only broadcast as events).
+    from . import signals as _sig_trig
+    _trig_sigs = _sig_trig.get_all_signals(coin)
+    update_trade_field(trade_id, "trigger_hit", True)
+    update_trade_field(trade_id, "winner_side", winner)
+    update_trade_field(trade_id, "conviction_at_trigger",       _trig_sigs.get("conviction"))
+    update_trade_field(trade_id, "conviction_score_at_trigger", float(_trig_sigs.get("conviction_score") or 0.0))
+    update_trade_field(trade_id, "ofi_at_trigger",              _trig_sigs.get("ofi"))
+    update_trade_field(trade_id, "funding_rate_at_trigger",     _trig_sigs.get("funding_rate"))
+    update_trade_field(trade_id, "liq_proxy_at_trigger",        _trig_sigs.get("liq_proxy"))
     yes_token = trade["condition_id_yes"]
     no_token = trade["condition_id_no"]
     size = trade["entry_size"]
@@ -1578,6 +1590,20 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
     update_trade_field(trade_id, "gross_pnl", gross_pnl)
     update_trade_field(trade_id, "net_pnl", net_pnl)
     update_trade_field(trade_id, "status", "resolved")
+
+    # Stamp actual_winner from current mid for Signal Lab accuracy tracking.
+    # Straddle always earns $1 regardless, but knowing which side won lets us
+    # evaluate whether conviction_at_entry predicted the correct direction.
+    try:
+        coin = trade.get("coin", "")
+        yes_token = trade.get("condition_id_yes")
+        if coin and yes_token:
+            from . import ws_client as _ws
+            mid = _ws.get_mid(yes_token)
+            if mid is not None:
+                update_trade_field(trade_id, "actual_winner", "YES" if mid >= 0.5 else "NO")
+    except Exception:
+        pass
 
     # Coin guard: resolutions count as wins (full $1.00 payout)
     try:

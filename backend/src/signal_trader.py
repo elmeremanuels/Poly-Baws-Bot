@@ -267,6 +267,7 @@ async def _execute_entry(
     trade["ofi_at_trigger"]              = all_sigs.get("ofi")
     trade["funding_rate_at_trigger"]     = all_sigs.get("funding_rate")
     trade["liq_proxy_at_trigger"]        = all_sigs.get("liq_proxy")
+    trade["bias_direction_at_entry"]     = direction  # Signal Lab: bias = conviction richting
 
     # Trade metadata
     trade["trigger_hit"]  = True
