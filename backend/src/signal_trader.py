@@ -27,7 +27,7 @@ from . import scanner, ws_client, paper_trader, risk, signals as _signals
 from .config_loader import CONFIG
 from .logger import log, write_event
 from .state import (
-    get_mode, get_active_trades, get_active_count_by_coin,
+    get_mode, get_active_trades,
     create_trade_state, add_active_trade, remove_active_trade,
     update_trade_field, persist_trade, has_traded_window,
 )
@@ -171,13 +171,15 @@ async def _check_and_trade(coin: str) -> None:
     if not _coin_enabled(coin):
         return
 
-    # Concurrent positie-limiet (eigen config, niet de straddle coin-max)
-    active_counts = get_active_count_by_coin()
-    total_active = sum(active_counts.values())
+    # Concurrent positie-limiet: tel ALLEEN signal_trader-posities, niet de
+    # achtergrond paper-straddles (signal_lab_bg) die parallel Signal Lab-data
+    # verzamelen — anders vullen die de slots op en blokkeren ze echte entries.
+    st_active = sum(1 for t in get_active_trades().values()
+                    if t.get("mode") == "signal_trader")
     max_concurrent = cfg.get("max_concurrent_positions", 10)
-    if total_active >= max_concurrent:
-        log.debug("signal_trader_skip", coin=coin, reason="max_concurrent",
-                  active=total_active, max=max_concurrent)
+    if st_active >= max_concurrent:
+        log.info("signal_trader_skip", coin=coin, reason="max_concurrent",
+                 active=st_active, max=max_concurrent)
         return
 
     # Basis risico-check (kill switch, dagelijks verlies, etc.)
