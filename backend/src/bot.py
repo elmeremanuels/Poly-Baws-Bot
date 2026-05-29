@@ -304,7 +304,9 @@ async def _auto_router_coin_tick(coin: str) -> None:
     market["_router_yes_size"] = decision.yes_size
     market["_router_no_size"] = decision.no_size
     market["_router_bucket"] = decision.bucket
-    await _process_coin_window(coin, market)
+    # Respect router.paper_mode flag — default True so auto_router starts safe
+    _router_paper = CONFIG.get("router", {}).get("paper_mode", True)
+    await _process_coin_window(coin, market, force_paper=_router_paper)
 
 
 async def _heartbeat_loop() -> None:

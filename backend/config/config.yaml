@@ -105,6 +105,7 @@ risk:
 
 router:
   enabled: true
+  paper_mode: true                    # true = straddle bucket simulated; false = live orders
   signal_trader_priority: true       # signal bucket always wins when conviction qualifies
   signal_min_conviction: 0.55        # lower bound for signal bucket
   straddle_min_conviction: 0.70      # lower bound for straddle bucket
