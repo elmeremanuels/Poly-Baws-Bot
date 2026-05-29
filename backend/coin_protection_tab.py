@@ -11,9 +11,10 @@ from src.db_sync import get_analytics_trades, get_daily_pnl, get_state, get_toda
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
 
 _STATE_ICON = {
-    "active":   ("🟢", "Actief",         "#34d399"),
-    "watch":    ("🟡", "Watch (1 kans)",  "#fbbf24"),
-    "disabled": ("🔴", "Uitgeschakeld",  "#f87171"),
+    "active":     ("🟢", "Actief",           "#34d399"),
+    "watch":      ("🟡", "Watch (1 kans)",   "#fbbf24"),
+    "paper_only": ("📄", "Paper-only herstel","#60a5fa"),
+    "disabled":   ("🔴", "Uitgeschakeld",    "#f87171"),
 }
 
 _CONFIG_PATH = Path(__file__).parent / "config" / "config.yaml"
@@ -25,7 +26,8 @@ def _guard(coin: str) -> dict:
     state = get_state(f"cg_{coin}_state") or "active"
     streak = int(get_state(f"cg_{coin}_streak") or 0)
     reason = get_state(f"cg_{coin}_reason") or ""
-    return {"state": state, "streak": streak, "reason": reason}
+    paper_wins = int(get_state(f"cg_{coin}_paper_wins") or 0)
+    return {"state": state, "streak": streak, "reason": reason, "paper_wins": paper_wins}
 
 
 def _overview_table() -> None:
@@ -36,10 +38,13 @@ def _overview_table() -> None:
         icon, label, _ = _STATE_ICON.get(g["state"], ("⚪", "?", ""))
         daily = get_daily_pnl(coin)
         count = get_today_trade_count(coin)
+        needed = CONFIG.get("coin_guard", {}).get("paper_only_recovery_wins", 3)
+        paper_prog = f"{g['paper_wins']}/{needed}" if g["state"] == "paper_only" else "—"
         rows.append({
             "": f"{COIN_EMOJI.get(coin,'')} {coin}",
             "Status": f"{icon} {label}",
             "Reeks": g["streak"],
+            "Paper-wins": paper_prog,
             "Dag P&L": f"€{daily:+.2f}",
             "Trades vandaag": count,
             "Reden": g["reason"] or "—",
@@ -446,6 +451,32 @@ def coin_protection_panel() -> None:
                         write_command("coin_guard_enable", {"coin": coin})
                         st.toast(f"{coin} wordt heractiveerd…", icon="✅")
                         st.rerun()
+
+                st.markdown("---")
+                _herzie_section(coin)
+
+            # ══════════════════════════════════════════════════════════════════
+            # 📄 PAPER_ONLY — auto-herstel loopt, toon voortgang
+            # ══════════════════════════════════════════════════════════════════
+            elif g["state"] == "paper_only":
+                needed = CONFIG.get("coin_guard", {}).get("paper_only_recovery_wins", 3)
+                wins   = g["paper_wins"]
+                if g["reason"]:
+                    st.info(f"ℹ️ {g['reason']}")
+                st.markdown(
+                    f"**📄 Paper-only modus actief** — "
+                    f"bot handelt `{coin}` alleen op papier totdat {needed} opeenvolgende paper-wins zijn behaald."
+                )
+                st.progress(min(1.0, wins / max(1, needed)),
+                            text=f"{wins} / {needed} paper-wins behaald")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button(f"✅ Forceer heractivering {coin}", key=f"cpt_en_{coin}"):
+                        write_command("coin_guard_enable", {"coin": coin})
+                        st.toast(f"{coin} wordt geforceerd heractiveerd…", icon="✅")
+                        st.rerun()
+                with col_b:
+                    st.caption("Of wacht op automatisch herstel.")
 
                 st.markdown("---")
                 _herzie_section(coin)

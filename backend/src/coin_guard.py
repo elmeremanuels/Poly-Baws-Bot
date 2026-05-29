@@ -1,10 +1,13 @@
-"""Per-coin guard: loss streak, daily P&L cap, watch/disabled states, paper gate.
+"""Per-coin guard: loss streak, daily P&L cap, watch/disabled/paper_only states.
 
 State machine per coin:
-  active  → watch    (2 consecutive losses)
-  watch   → active   (next trade wins — streak resets)
-  watch   → disabled (3rd consecutive loss OR daily cap reached)
-  disabled → active  (manual re-enable via coin_guard_enable command)
+  active     → watch      (2 consecutive losses)
+  watch      → active     (next trade wins — streak resets)
+  watch      → paper_only (3rd consecutive loss — soft landing, paper trades only)
+  watch      → disabled   (daily cap reached — hard stop)
+  paper_only → active     (N consecutive paper wins — auto-recovery)
+  paper_only → disabled   (if daily cap reached while in paper_only)
+  disabled   → active     (manual re-enable via coin_guard_enable command)
 
 Paper gate: after strategy revision, coin re-enters with a countdown of N paper
 trades before the guard starts tracking live losses again.
@@ -22,6 +25,7 @@ _streak: dict[str, int] = {}
 _state: dict[str, str] = {}
 _disable_reason: dict[str, str] = {}
 _paper_gate: dict[str, int] = {}
+_paper_wins: dict[str, int] = {}   # consecutive paper wins in paper_only state
 _loaded: set[str] = set()
 
 
@@ -29,22 +33,29 @@ def _daily_cap() -> float:
     return float(CONFIG.get("risk", {}).get("daily_coin_loss_limit_eur", 5.0))
 
 
+def _paper_recovery_wins() -> int:
+    return int(CONFIG.get("coin_guard", {}).get("paper_only_recovery_wins", 3))
+
+
 def _load(coin: str) -> None:
     if coin in _loaded:
         return
     _loaded.add(coin)
     val = _db_get_state(f"cg_{coin}_state")
-    _state[coin] = val if val in ("active", "watch", "disabled") else "active"
+    _state[coin] = val if val in ("active", "watch", "disabled", "paper_only") else "active"
     val = _db_get_state(f"cg_{coin}_streak")
     _streak[coin] = int(val) if val and val.lstrip("-").isdigit() else 0
     val = _db_get_state(f"cg_{coin}_reason")
     _disable_reason[coin] = val or ""
+    val = _db_get_state(f"cg_{coin}_paper_wins")
+    _paper_wins[coin] = int(val) if val and val.isdigit() else 0
 
 
 async def _persist(coin: str) -> None:
     await save_dashboard_state(f"cg_{coin}_state", _state.get(coin, "active"))
     await save_dashboard_state(f"cg_{coin}_streak", str(_streak.get(coin, 0)))
     await save_dashboard_state(f"cg_{coin}_reason", _disable_reason.get(coin, ""))
+    await save_dashboard_state(f"cg_{coin}_paper_wins", str(_paper_wins.get(coin, 0)))
 
 
 def get_coin_state(coin: str) -> str:
@@ -66,9 +77,19 @@ def get_paper_gate_remaining(coin: str) -> int:
     return _paper_gate.get(coin, 0)
 
 
+def get_paper_wins(coin: str) -> int:
+    _load(coin)
+    return _paper_wins.get(coin, 0)
+
+
 def can_enter(coin: str) -> bool:
-    """True if new trades are allowed for this coin (state == active)."""
-    return get_coin_state(coin) == "active"
+    """True if new trades are allowed (active or paper_only — paper_only still enters but forced paper)."""
+    return get_coin_state(coin) in ("active", "paper_only")
+
+
+def is_paper_forced(coin: str) -> bool:
+    """True when coin is in paper_only state — trades must be paper regardless of global mode."""
+    return get_coin_state(coin) == "paper_only"
 
 
 async def record_result(
@@ -92,6 +113,32 @@ async def record_result(
 
     current = _state.get(coin, "active")
     if current == "disabled":
+        return None
+
+    # ── paper_only recovery path ───────────────────────────────────────────────
+    if current == "paper_only":
+        if net_pnl >= 0 and paper:
+            _paper_wins[coin] = _paper_wins.get(coin, 0) + 1
+            needed = _paper_recovery_wins()
+            wins = _paper_wins[coin]
+            log.info("coin_paper_only_win", coin=coin, paper_wins=wins, needed=needed)
+            if wins >= needed:
+                _state[coin] = "active"
+                _streak[coin] = 0
+                _paper_wins[coin] = 0
+                _disable_reason[coin] = ""
+                await _persist(coin)
+                log.info("coin_paper_only_recovered", coin=coin, paper_wins=wins)
+                return "active"
+        elif net_pnl < 0:
+            # Loss resets paper win streak (but stays in paper_only)
+            _paper_wins[coin] = 0
+            # Hard stop if daily cap blown even in paper_only
+            cap = _daily_cap()
+            if not paper and daily_coin_pnl <= -cap:
+                await _do_disable(coin, f"dag-cap bereikt in paper_only ({daily_coin_pnl:.2f} EUR)")
+                return "disabled"
+        await _persist(coin)
         return None
 
     if net_pnl >= 0:
@@ -123,8 +170,15 @@ async def record_result(
         return "disabled"
 
     if current == "watch":
-        await _do_disable(coin, f"3e verlies op rij (streak={streak})")
-        return "disabled"
+        # Soft landing: paper_only instead of hard disabled
+        _state[coin] = "paper_only"
+        _streak[coin] = 0
+        _paper_wins[coin] = 0
+        _disable_reason[coin] = f"3e verlies op rij → paper_only herstel (streak={streak})"
+        await _persist(coin)
+        log.warning("coin_enter_paper_only", coin=coin, streak=streak,
+                    recovery_wins_needed=_paper_recovery_wins())
+        return "paper_only"
 
     if streak >= 2:
         _state[coin] = "watch"
@@ -144,10 +198,11 @@ async def _do_disable(coin: str, reason: str) -> None:
 
 
 async def enable_coin(coin: str) -> None:
-    """Re-enable a disabled/watch coin. Must be called from the bot async process."""
+    """Re-enable a disabled/watch/paper_only coin. Must be called from the bot async process."""
     _load(coin)
     _state[coin] = "active"
     _streak[coin] = 0
+    _paper_wins[coin] = 0
     _disable_reason[coin] = ""
     _paper_gate.pop(coin, None)
     await _persist(coin)
@@ -168,6 +223,8 @@ def get_all_states() -> dict[str, dict]:
             "streak": get_coin_streak(coin),
             "reason": get_disable_reason(coin),
             "paper_gate": _paper_gate.get(coin, 0),
+            "paper_wins": _paper_wins.get(coin, 0),
+            "paper_recovery_needed": _paper_recovery_wins(),
         }
         for coin in coins
     }

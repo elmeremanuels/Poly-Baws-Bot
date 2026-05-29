@@ -625,6 +625,7 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
     # Coin guard status badge — beheer via het Beveiliging-tabblad
     _guard_state = get_state(f"cg_{coin}_state") or "active"
     _guard_streak = get_state(f"cg_{coin}_streak") or "0"
+    _paper_wins_n = get_state(f"cg_{coin}_paper_wins") or "0"
     if _guard_state == "disabled":
         if not st.session_state.get(f"_gd_card_{coin}"):
             _ga, _gb = st.columns([5, 1])
@@ -634,6 +635,13 @@ def _coin_card(coin: str, open_trades: list[dict], online: bool = True) -> None:
                 if st.button("✕", key=f"gd_card_x_{coin}", help="Verberg"):
                     st.session_state[f"_gd_card_{coin}"] = True
                     st.rerun()
+    elif _guard_state == "paper_only":
+        _needed = CONFIG.get("coin_guard", {}).get("paper_only_recovery_wins", 3)
+        st.info(
+            f"📄 Paper-only herstel: {_paper_wins_n}/{_needed} wins\n\n"
+            f"Na {_needed} opeenvolgende paper-wins gaat deze coin terug naar live.",
+            icon=None,
+        )
     elif _guard_state == "watch":
         st.warning(f"⚠️ Watch: {_guard_streak}× verlies op rij")
 
@@ -1357,6 +1365,7 @@ def _oracle_temperature_widget() -> None:
     gate_on  = oracle_cfg.get("hard_gate", False)
     hard_thr = oracle_cfg.get("temperature_hard_block", 30)
     soft_thr = oracle_cfg.get("temperature_soft_block", 50)
+    coin_paper_thr = int(oracle_cfg.get("per_coin_temp_paper_threshold", 35))
     if not gate_on:
         st.caption("ℹ️ Hard gate uitgeschakeld (`oracle.hard_gate: false`) — Orakel logt alleen, blokkeert niet.")
     elif temp < hard_thr:
@@ -1365,6 +1374,34 @@ def _oracle_temperature_widget() -> None:
         st.warning(f"⚠️ Zachte drempel — temperatuur {temp} < {soft_thr}. Discord confirm vereist (indien ingeschakeld).")
     else:
         st.success("✅ Orakel keurt trades goed.")
+
+    # Per-coin temperature overview
+    coins = list(CONFIG.get("coins", {}).keys())
+    coin_temps = []
+    for c in coins:
+        t_raw = get_state(f"oracle_temp_{c}")
+        try:
+            ct = int(float(t_raw)) if t_raw else None
+        except (ValueError, TypeError):
+            ct = None
+        forced_paper = ct is not None and oracle_cfg.get("enabled", False) and ct < coin_paper_thr
+        coin_temps.append({"coin": c, "temp": ct, "paper_forced": forced_paper})
+
+    if any(x["temp"] is not None for x in coin_temps):
+        st.markdown("**Per-coin temperatuur:**")
+        cols = st.columns(len(coin_temps))
+        for i, ct_row in enumerate(coin_temps):
+            c_name = ct_row["coin"]
+            c_temp = ct_row["temp"]
+            with cols[i]:
+                if c_temp is None:
+                    st.metric(c_name, "—")
+                else:
+                    c_color = "normal" if not ct_row["paper_forced"] else "inverse"
+                    label = f"{c_temp}/100"
+                    delta = "📄 paper" if ct_row["paper_forced"] else None
+                    st.metric(c_name, label, delta=delta,
+                              delta_color="off" if delta else "normal")
 
 
 def _oracle_pattern_table() -> None:

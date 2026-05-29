@@ -319,7 +319,69 @@ async def _auto_router_coin_tick(coin: str) -> None:
     market["_router_conviction_score"] = decision.conviction_score
     # Respect router.paper_mode flag — default True so auto_router starts safe
     _router_paper = CONFIG.get("router", {}).get("paper_mode", True)
+    # coin_guard paper_only state always forces paper regardless of global setting
+    from . import coin_guard as _cg
+    if _cg.is_paper_forced(coin):
+        _router_paper = True
+    # Oracle per-coin temperature gate: if too cold for this coin → force paper
+    _oracle_paper = await _oracle_coin_paper_gate(coin, decision.conviction_score, decision.regime)
+    if _oracle_paper:
+        _router_paper = True
     await _process_coin_window(coin, market, force_paper=_router_paper)
+
+
+async def _oracle_coin_paper_gate(coin: str, conviction_score: float, regime: str) -> bool:
+    """Return True if Oracle per-coin temperature is below the paper threshold.
+
+    Reads pre-cached temperature from dashboard_state (set by _oracle_per_coin_loop).
+    Falls back to False (allow) if Oracle is disabled or temp not yet computed.
+    """
+    oracle_cfg = CONFIG.get("oracle", {})
+    if not oracle_cfg.get("enabled", False):
+        return False
+    threshold = int(oracle_cfg.get("per_coin_temp_paper_threshold", 35))
+    temp_str = None
+    try:
+        from .db_sync import get_state as _get_state
+        temp_str = _get_state(f"oracle_temp_{coin}")
+    except Exception:
+        pass
+    if not temp_str:
+        return False
+    try:
+        temp = int(float(temp_str))
+        if temp < threshold:
+            log.info("oracle_coin_paper_gate", coin=coin, temp=temp, threshold=threshold)
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
+async def _oracle_per_coin_loop() -> None:
+    """Compute Oracle temperature per coin every 120s and persist to dashboard_state."""
+    while True:
+        await asyncio.sleep(120)
+        if not CONFIG.get("oracle", {}).get("enabled", False):
+            continue
+        try:
+            from . import oracle as _oracle
+            from . import regime as _regime
+            from . import signals as _sig
+            for coin in COINS:
+                if not CONFIG["coins"].get(coin, {}).get("enabled", True):
+                    continue
+                try:
+                    _conv_dir, _conv_score = _sig.get_conviction(coin)
+                    _regime_label = _regime.get_current_regime(coin) or "UNKNOWN"
+                    snap = await _oracle.get_temperature_snapshot(
+                        coin, _conv_score or 0.0, _regime_label
+                    )
+                    await save_dashboard_state(f"oracle_temp_{coin}", str(snap.get("temperature", 50)))
+                except Exception as exc:
+                    log.debug("oracle_per_coin_error", coin=coin, error=str(exc))
+        except Exception as exc:
+            log.debug("oracle_per_coin_loop_error", error=str(exc))
 
 
 async def _oracle_temperature_loop() -> None:
@@ -510,6 +572,7 @@ async def run_bot() -> None:
         asyncio.create_task(_portfolio_sync_loop()),
         asyncio.create_task(_regime_sync_loop()),
         asyncio.create_task(_oracle_temperature_loop()),
+        asyncio.create_task(_oracle_per_coin_loop()),
         asyncio.create_task(asset_price_feed.run()),
         asyncio.create_task(_signals.run_trade_poll_loop()),
         asyncio.create_task(_signals.funding_rate_loop()),
