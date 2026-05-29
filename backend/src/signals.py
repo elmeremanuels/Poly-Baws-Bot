@@ -285,7 +285,8 @@ def get_conviction(
       Funding rate → always neutral in all 3239 trades (removed)
 
     Hard gate: if OFI is neutral or unavailable → return (None, 0.0).
-    Other signals (drift, depth, velocity) only contribute when OFI is strong.
+    Secondary signals: perp OFI, L/S ratio, liq proxy, depth, velocity.
+    Removed: price_position (mean-reversion, correlated with OFI) and drift (same).
     """
     ofi = get_order_flow_imbalance(coin)
 
@@ -336,26 +337,10 @@ def get_conviction(
         else:
             bear_score += bonus
 
-    # Price position within 30-min range — mean-reversion signal
-    price_stats = _regime.get_asset_price_stats(coin)
-    if price_stats:
-        pp = price_stats.get("price_position")
-        if pp is not None:
-            if pp < 0.20:
-                bull_score += 0.15 * (0.20 - pp) / 0.20
-            elif pp > 0.80:
-                bear_score += 0.15 * (pp - 0.80) / 0.20
-
-    # Recent price drift (last 5 min) — actual observed direction, not inferred.
-    # Capped at 0.10 (was 0.20): the Black-Scholes edge multiplier in signal_trader
-    # also uses drift via theoretical_price() — halved here to avoid double-counting.
-    drift = get_recent_drift_1m(coin)
-    if drift is not None:
-        _drift_threshold = 0.0005
-        if drift > _drift_threshold:
-            bull_score += min(0.10, (drift - _drift_threshold) / 0.004)
-        elif drift < -_drift_threshold:
-            bear_score += min(0.10, (-drift - _drift_threshold) / 0.004)
+    # price_position (mean-reversion) and drift REMOVED from conviction:
+    # Both measure the same recent price move as OFI but with delay — multicollinear.
+    # Empirical: 0.70-0.85 scores (5/5 losses) were created by OFI + price_pos + drift
+    # all pointing the same direction (same move, 3× measured). Removed 2026-05-29.
 
     # Polymarket CLOB depth imbalance — YES bids vs NO bids shows which side the
     # market is accumulating, independent of OFI on Binance spot
