@@ -517,6 +517,76 @@ async def _do_wait_resolution(
         log.error("signal_no_window_end", trade_id=trade_id)
         return
 
+    # ── Take it / Save it monitoring loop ────────────────────────────────────
+    # Loopt elke 5s tot 30s voor window_end; daarna slaap naar settlement.
+    cfg_st        = CONFIG.get("signal_trader", {})
+    take_it_en    = cfg_st.get("take_it_enabled", True)
+    save_it_en    = cfg_st.get("save_it_enabled", True)
+    take_thr      = float(cfg_st.get("take_it_threshold", 0.82))
+    take_secs     = float(cfg_st.get("take_it_max_secs_remaining", 180))
+    take_eur      = float(cfg_st.get("take_it_size_eur", 3.0))
+    save_drop     = float(cfg_st.get("save_it_drop", 0.15))   # val vanaf fill_price
+    save_other_thr = float(cfg_st.get("save_it_other_threshold", 0.55))
+    save_min_secs = float(cfg_st.get("save_it_min_secs_remaining", 60))
+    save_eur      = float(cfg_st.get("save_it_size_eur", 3.0))
+
+    other_side  = "NO" if side == "YES" else "YES"
+    other_token = market.get("no_token") if side == "YES" else market.get("yes_token")
+
+    take_done = False
+    save_done = False
+    monitor_until = window_end - timedelta(seconds=30)
+
+    while datetime.now(timezone.utc) < monitor_until:
+        await asyncio.sleep(5)
+        cur_mid  = ws_client.get_mid_price(buy_token)
+        secs_rem = (window_end - datetime.now(timezone.utc)).total_seconds()
+
+        # ── Take it: positie wint duidelijk → extra aankoop zelfde kant ──────
+        if (take_it_en and not take_done and cur_mid is not None
+                and cur_mid >= take_thr and secs_rem <= take_secs):
+            extra_shares = round(take_eur / cur_mid, 2)
+            try:
+                if _is_paper():
+                    await paper_trader.simulate_market_buy(buy_token, extra_shares)
+                else:
+                    from . import orders as _ord
+                    await _ord.place_market_order(buy_token, "BUY", extra_shares)
+                take_done = True
+                update_trade_field(trade_id, "take_it_executed", 1)
+                await write_event(trade_id, "signal_take_it", coin, {
+                    "mid": round(cur_mid, 4), "shares": extra_shares, "eur": take_eur,
+                    "secs_rem": round(secs_rem, 0),
+                })
+                log.info("signal_take_it_executed", trade_id=trade_id, coin=coin,
+                         mid=cur_mid, shares=extra_shares)
+            except Exception as e:
+                log.warning("signal_take_it_error", trade_id=trade_id, error=str(e))
+
+        # ── Save it: positie verliest → koop andere kant als hedge ───────────
+        if (save_it_en and not save_done and other_token and cur_mid is not None
+                and cur_mid <= fill_price - save_drop and secs_rem >= save_min_secs):
+            other_mid = ws_client.get_mid_price(other_token)
+            if other_mid and other_mid >= save_other_thr:
+                save_shares = round(save_eur / other_mid, 2)
+                try:
+                    if _is_paper():
+                        await paper_trader.simulate_market_buy(other_token, save_shares)
+                    else:
+                        from . import orders as _ord
+                        await _ord.place_market_order(other_token, "BUY", save_shares)
+                    save_done = True
+                    update_trade_field(trade_id, "save_it_executed", 1)
+                    update_trade_field(trade_id, "save_it_side", other_side)
+                    await write_event(trade_id, "signal_save_it", coin, {
+                        "mid": round(cur_mid, 4), "other_mid": round(other_mid, 4),
+                        "shares": save_shares, "eur": save_eur, "secs_rem": round(secs_rem, 0),
+                    })
+                    log.info("signal_save_it_executed", trade_id=trade_id, coin=coin,
+                             original_mid=cur_mid, other_mid=other_mid, shares=save_shares)
+                except Exception as e:
+                    log.warning("signal_save_it_error", trade_id=trade_id, error=str(e))
+
     # Wacht tot window_end + 8s buffer voor settlement
     now       = datetime.now(timezone.utc)
     wait_secs = (window_end - now).total_seconds() + 8

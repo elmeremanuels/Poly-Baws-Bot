@@ -194,6 +194,16 @@ signal_trader:
   max_daily_loss_eur: 50.00     # dagelijks verlies limiet
   max_trades_per_day: 200       # max trades per dag
   respect_trading_hours: false  # false = negeert skip_utc_hours (conviction-gate is genoeg)
+  # Take it / Save it — maximale winst strategie
+  take_it_enabled: true
+  take_it_threshold: 0.82        # positie moet op >= 82ct staan om bij te kopen
+  take_it_max_secs_remaining: 180 # alleen als <= 3 min resterend (move bevestigd)
+  take_it_size_eur: 3.00         # extra inleg bij Take it
+  save_it_enabled: true
+  save_it_drop: 0.15             # positie moet >= 15ct gezakt zijn tov entry
+  save_it_other_threshold: 0.55  # andere kant moet >= 55ct zijn om hedge te kopen
+  save_it_min_secs_remaining: 60 # minimaal 60s resterend voor Save it
+  save_it_size_eur: 3.00         # inleg hedge bij Save it
   coins:
     BTC:
       enabled: true

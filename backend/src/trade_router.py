@@ -80,18 +80,28 @@ def route_trade(coin: str, market: dict | None = None) -> TradeDecision:
     if _correlated_risk_exceeded(conviction_dir):
         return _skip("correlated_risk")
 
-    # ── Routing: signal_trader has priority ────────────────────────────────
+    # ── Routing: regime-gebaseerd (geen automatische signal_trader-voorrang) ──
+    # Straddle = "koste wat het kost geen verlies" → veilig in onzekere regimes
+    # Signal   = "maximale winst"                  → werkt bij duidelijke momentum
+    #
+    # RANGING / CHOPPY / UNKNOWN → straddle (richting onzeker, beide kanten kopen)
+    # TRENDING / BREAKOUT        → signal (duidelijk momentum, één kant maximaal)
+    # NORMAL                     → signal bij lage conviction, straddle bij hoge
     straddle_min = cfg.get("straddle_min_conviction", 0.70)
-    signal_priority = cfg.get("signal_trader_priority", True)
     trade_size = CONFIG.get("trading", {}).get("trade_size_eur", 1.0)
 
-    # signal_trader: conviction in [signal_min, straddle_min) OR priority flag
-    if signal_priority and conviction_score >= signal_min:
-        log.debug(
-            "route_decision",
-            coin=coin, bucket="signal",
-            conviction=conviction_score, regime=regime,
-        )
+    _straddle_regimes = {"RANGING", "CHOPPY", "UNKNOWN"}
+    _signal_regimes   = {"TRENDING", "BREAKOUT"}
+
+    prefer_straddle = (
+        regime in _straddle_regimes
+        or conviction_score >= straddle_min  # hoge conviction → altijd straddle
+    )
+
+    if not prefer_straddle and conviction_score >= signal_min:
+        # Signal trader: momentum-regime of NORMAL met matige conviction
+        log.debug("route_decision", coin=coin, bucket="signal",
+                  conviction=conviction_score, regime=regime)
         return TradeDecision(
             bucket="signal",
             conviction_score=conviction_score,
@@ -101,7 +111,6 @@ def route_trade(coin: str, market: dict | None = None) -> TradeDecision:
             no_size=0.0,
         )
 
-    # straddle routing (only when signal_trader_priority is False)
     if conviction_score >= straddle_min:
         asym_regimes = cfg.get("straddle_asym_regime", ["RANGING"])
         if regime in asym_regimes:
