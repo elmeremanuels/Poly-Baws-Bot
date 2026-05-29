@@ -1,13 +1,18 @@
-"""Oracle external data feeds: Fear & Greed, CryptoPanic news, Polymarket aggregate.
+"""Oracle external data feeds: Fear & Greed, Massive.com price momentum, Polymarket aggregate.
 
-All feeds are cached to avoid rate-limit issues. Recency weighting is applied
+All feeds are cached to avoid excessive S3 requests. Recency weighting is applied
 to time-series data so recent signals count more than older ones.
 """
 from __future__ import annotations
 
 import asyncio
+import csv
+import gzip
+import io
 import math
+import os
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import httpx
@@ -53,89 +58,160 @@ async def get_fear_greed() -> dict:
     return _fg_cache
 
 
-# ── CryptoPanic news cache ─────────────────────────────────────────────────────
+# ── Massive.com S3 price momentum ─────────────────────────────────────────────
+# Replaces CryptoPanic: derives bullish/bearish sentiment from price momentum
+# (7-day close vs. 30-day average) using Massive crypto day aggregates.
+# Data is available ~11:00 AM ET the day after each trading day.
+# Cached 6 hours — the file only updates once per day anyway.
 
-_news_cache: dict[str, Any] = {}
-_news_cache_ts: float = 0.0
-_NEWS_TTL = 600.0  # 10 minutes
+_massive_cache: dict[str, Any] = {}
+_massive_cache_ts: float = 0.0
+_MASSIVE_TTL = 6 * 3600.0  # 6 hours
+
+# Coin → list of ticker prefixes to match in the CSV
+_COIN_TICKERS: dict[str, list[str]] = {
+    "BTC":  ["BTC-USD", "BTC/USD", "BTCUSD", "XBT-USD"],
+    "ETH":  ["ETH-USD", "ETH/USD", "ETHUSD"],
+    "SOL":  ["SOL-USD", "SOL/USD", "SOLUSD"],
+    "XRP":  ["XRP-USD", "XRP/USD", "XRPUSD"],
+    "DOGE": ["DOGE-USD", "DOGE/USD", "DOGEUSD"],
+}
+
+
+def _get_massive_credentials() -> tuple[str, str]:
+    """Returns (access_key_id, secret_access_key) from env or config."""
+    key = (
+        os.environ.get("MASSIVE_ACCESS_KEY_ID")
+        or CONFIG.get("oracle", {}).get("feeds", {}).get("massive_access_key_id", "")
+    )
+    secret = (
+        os.environ.get("MASSIVE_SECRET_ACCESS_KEY")
+        or CONFIG.get("oracle", {}).get("feeds", {}).get("massive_secret_access_key", "")
+    )
+    return key, secret
+
+
+def _s3_day_agg_key(date: datetime) -> str:
+    """S3 object key for a given date: global_crypto/day_aggs_v1/YYYY/MM/YYYY-MM-DD.csv.gz"""
+    return f"global_crypto/day_aggs_v1/{date:%Y}/{date:%m}/{date:%Y-%m-%d}.csv.gz"
+
+
+def _download_day_agg_sync(key_id: str, secret: str, s3_key: str) -> bytes | None:
+    """Download a single day-agg CSV.gz from Massive S3. Returns raw bytes or None."""
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        session = boto3.Session(
+            aws_access_key_id=key_id,
+            aws_secret_access_key=secret,
+        )
+        s3 = session.client(
+            "s3",
+            endpoint_url="https://files.massive.com",
+            config=BotoConfig(signature_version="s3v4"),
+        )
+        buf = io.BytesIO()
+        s3.download_fileobj("flatfiles", s3_key, buf)
+        return buf.getvalue()
+    except Exception as exc:
+        log.debug("massive_s3_download_failed", key=s3_key, error=str(exc))
+        return None
+
+
+def _parse_day_agg(raw: bytes) -> list[dict]:
+    """Parse a gzip-compressed CSV day-agg file into a list of row dicts."""
+    try:
+        with gzip.open(io.BytesIO(raw), "rt") as f:
+            reader = csv.DictReader(f)
+            return list(reader)
+    except Exception:
+        return []
+
+
+def _compute_momentum(rows: list[dict], coin: str) -> float | None:
+    """Return price momentum score -1..+1 for a coin from a list of daily rows.
+
+    Positive = recent closes above longer-term average (bullish).
+    Negative = recent closes below longer-term average (bearish).
+    """
+    tickers = _COIN_TICKERS.get(coin, [f"{coin}-USD", f"{coin}/USD"])
+    closes: list[float] = []
+    for row in rows:
+        ticker = row.get("ticker", "")
+        if not any(ticker.upper().startswith(t.upper()) for t in tickers):
+            continue
+        try:
+            closes.append(float(row["close"]))
+        except (KeyError, ValueError, TypeError):
+            pass
+
+    if len(closes) < 4:
+        return None
+
+    # Most recent 3 days vs. the rest
+    recent_avg = sum(closes[:3]) / 3
+    baseline_avg = sum(closes) / len(closes)
+    if baseline_avg == 0:
+        return None
+
+    raw_momentum = (recent_avg - baseline_avg) / baseline_avg  # e.g. +0.04 = +4%
+    return max(-1.0, min(1.0, raw_momentum * 10))  # scale: 10% move → ±1.0
 
 
 async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
-    """Fetch recent news from CryptoPanic and return recency-weighted sentiment per coin.
+    """Derive price-momentum-based sentiment from Massive.com day aggregates.
 
     Returns {coin: {"sentiment": "positive"|"negative"|"neutral"|"unknown",
                      "weighted_score": float,  # -1..+1
                      "top_headline": str|None}}
-    """
-    global _news_cache, _news_cache_ts
-    # Env var takes precedence so the token survives deploy overwrites of config.yaml
-    import os as _os
-    token = (
-        _os.environ.get("CRYPTOPANIC_TOKEN")
-        or CONFIG.get("oracle", {}).get("feeds", {}).get("cryptopanic_token", "")
-    )
-    if not token:
-        return {c: {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
-                for c in (coins or [])}
 
-    if time.monotonic() - _news_cache_ts < _NEWS_TTL and _news_cache:
-        return _news_cache
+    Same interface as the former CryptoPanic feed — Oracle code is unchanged.
+    Falls back to "unknown" when credentials are missing or S3 is unavailable.
+    """
+    global _massive_cache, _massive_cache_ts
 
     coins = coins or list(CONFIG.get("coins", {}).keys())
-    currencies = ",".join(coins)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://cryptopanic.com/api/v1/posts/",
-                params={"auth_token": token, "currencies": currencies,
-                        "kind": "news", "limit": 50},
-            )
-            resp.raise_for_status()
-            posts = resp.json().get("results", [])
-    except Exception as exc:
-        log.warning("cryptopanic_fetch_failed", error=str(exc))
+
+    key_id, secret = _get_massive_credentials()
+    if not key_id or not secret:
         return {c: {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
                 for c in coins}
 
-    now_ts = time.time()
-    result: dict[str, dict] = {}
+    if time.monotonic() - _massive_cache_ts < _MASSIVE_TTL and _massive_cache:
+        return _massive_cache
 
+    # Download up to 7 recent trading days (skip today — data only available next day)
+    now_utc = datetime.now(timezone.utc)
+    all_rows: list[dict] = []
+
+    def _fetch_days() -> list[dict]:
+        rows: list[dict] = []
+        for days_back in range(1, 8):
+            date = now_utc - timedelta(days=days_back)
+            s3_key = _s3_day_agg_key(date)
+            raw = _download_day_agg_sync(key_id, secret, s3_key)
+            if raw:
+                rows.extend(_parse_day_agg(raw))
+            if len({r.get("ticker") for r in rows}) > 5:
+                break  # enough data
+        return rows
+
+    try:
+        # Run blocking S3 downloads in a thread so we don't block the event loop
+        all_rows = await asyncio.get_event_loop().run_in_executor(None, _fetch_days)
+    except Exception as exc:
+        log.warning("massive_fetch_failed", error=str(exc))
+        return {c: {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
+                for c in coins}
+
+    result: dict[str, dict] = {}
     for coin in coins:
-        coin_posts = [p for p in posts if coin in (p.get("currencies") or [])]
-        if not coin_posts:
+        score = _compute_momentum(all_rows, coin)
+        if score is None:
             result[coin] = {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
             continue
 
-        _SENT = {"positive": 1.0, "negative": -1.0, "neutral": 0.0, None: 0.0}
-        weighted_sum = 0.0
-        weight_total = 0.0
-        top_headline = None
-
-        for p in coin_posts[:20]:
-            published = p.get("published_at", "")
-            try:
-                from datetime import datetime, timezone
-                pub_ts = datetime.fromisoformat(published.replace("Z", "+00:00")).timestamp()
-                hours_ago = max(0, (now_ts - pub_ts) / 3600)
-            except Exception:
-                hours_ago = 6.0
-            w = recency_weight(hours_ago)
-            sent_val = _SENT.get(p.get("votes", {}).get("positive") and "positive"
-                                 or p.get("votes", {}).get("negative") and "negative"
-                                 or "neutral", 0.0)
-            # Use explicit kind field if available
-            kind = (p.get("kind") or "").lower()
-            if kind in ("positive", "bullish"):
-                sent_val = 1.0
-            elif kind in ("negative", "bearish"):
-                sent_val = -1.0
-
-            weighted_sum += w * sent_val
-            weight_total += w
-            if top_headline is None:
-                top_headline = p.get("title")
-
-        score = weighted_sum / weight_total if weight_total > 0 else 0.0
         if score > 0.15:
             sentiment = "positive"
         elif score < -0.15:
@@ -143,14 +219,20 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
         else:
             sentiment = "neutral"
 
+        # "top_headline" repurposed as a human-readable summary
+        pct = score * 10  # reverse the ×10 scaling for display
+        direction = "+" if pct >= 0 else ""
+        headline = f"7d momentum: {direction}{pct:.1f}% vs 30d gemiddelde (Massive)"
+
         result[coin] = {
             "sentiment": sentiment,
             "weighted_score": round(score, 3),
-            "top_headline": top_headline,
+            "top_headline": headline,
         }
+        log.debug("massive_momentum", coin=coin, score=round(score, 3), sentiment=sentiment)
 
-    _news_cache = result
-    _news_cache_ts = time.monotonic()
+    _massive_cache = result
+    _massive_cache_ts = time.monotonic()
     return result
 
 
