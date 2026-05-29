@@ -246,10 +246,32 @@ async def _check_and_trade(coin: str) -> None:
         if ask_tentative and ask_tentative > 0:
             edge = _signals.get_edge(coin, side_tentative, ask_tentative, 300.0)
             if edge is not None:
-                if edge > 0.05:        # theorie: 5%+ onderprijsd → boost
+                if edge > 0.05:
                     score = min(1.0, score * 1.20)
-                elif edge < -0.03:     # theorie: overprijsd → penalty
+                elif edge < -0.03:
                     score = score * 0.80
+
+    # Multi-coin OFI alignment: breed macro-signaal wanneer 4+ coins dezelfde richting hebben.
+    # Versterkt de score met ×1.10 — moedigt NIET aan om alle coins tegelijk te traden.
+    if direction is not None:
+        aligned = _signals.get_multi_coin_ofi_alignment(direction)
+        if aligned >= 4:
+            score = min(1.0, score * 1.10)
+
+    # TWAP check: betalen we significant boven het tijdsgewogen gemiddelde?
+    # Als ja = we stappen in een micropump → verlaag de score met 10%.
+    # Puur kwaliteitsfilter, geen directionele aanpassing.
+    if direction is not None:
+        yes_token_id = market.get("yes_token")
+        if yes_token_id:
+            twap = _signals.get_yes_twap(yes_token_id)
+            if twap and twap > 0:
+                side_tentative = "YES" if direction == "UP" else "NO"
+                ask_check = ws_client.get_best_ask(
+                    yes_token_id if side_tentative == "YES" else market.get("no_token", "")
+                )
+                if ask_check and ask_check > twap * 1.05:
+                    score = score * 0.90
 
     log.info("signal_trader_signal", coin=coin,
              direction=direction, score=round(score, 3), threshold=threshold,

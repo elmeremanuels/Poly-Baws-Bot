@@ -143,6 +143,65 @@ def get_long_short_ratio(coin: str) -> float | None:
     return _ls_ratios.get(coin)
 
 
+def get_yes_velocity(yes_token: str, window_secs: float = 300.0) -> float | None:
+    """Relative price change of the YES token over window_secs.
+
+    Positive = YES rising (smart money buying YES = bullish).
+    Negative = YES falling (selling pressure = bearish).
+    Returns None when fewer than 5 history points are available.
+    Only used as confirmation — never as standalone signal.
+    """
+    from . import ws_client as _ws
+    history = _ws.get_token_price_history(yes_token, window_secs)
+    if len(history) < 5:
+        return None
+    start, end = history[0][1], history[-1][1]
+    if start <= 0:
+        return None
+    return round((end - start) / start, 4)
+
+
+def get_yes_twap(yes_token: str, window_secs: float = 600.0) -> float | None:
+    """Time-weighted average YES price over window_secs.
+
+    Used as entry-quality check: buying significantly above TWAP = entering a
+    micropump. Returns None when less than 30s of data is available.
+    """
+    from . import ws_client as _ws
+    history = _ws.get_token_price_history(yes_token, window_secs)
+    if len(history) < 3:
+        return None
+    weighted_sum = total_weight = 0.0
+    for i in range(1, len(history)):
+        dt = history[i][0] - history[i - 1][0]
+        price = (history[i][1] + history[i - 1][1]) / 2
+        weighted_sum += price * dt
+        total_weight += dt
+    if total_weight < 30.0:
+        return None
+    return round(weighted_sum / total_weight, 4)
+
+
+def get_multi_coin_ofi_alignment(direction: str) -> int:
+    """Count how many active coins have OFI aligned with direction ('UP' or 'DOWN').
+
+    Used as a macro confirmation: 4+ coins aligned = broad market move.
+    Does NOT encourage trading all coins simultaneously.
+    """
+    from .config_loader import CONFIG as _cfg
+    coins = list(_cfg.get("coins", {}).keys())
+    count = 0
+    for coin in coins:
+        ofi = get_order_flow_imbalance(coin)
+        if ofi is None:
+            continue
+        if direction == "UP" and ofi > 0.55:
+            count += 1
+        elif direction == "DOWN" and ofi < 0.45:
+            count += 1
+    return count
+
+
 def get_liquidation_proxy(coin: str, spike_window_secs: float = 30.0) -> float | None:
     """Volume spike ratio: recent_vol / baseline_vol_per_30s.
 
@@ -282,6 +341,26 @@ def get_conviction(
                 bull_score += min(0.15, depth_bias * 0.20)
             elif depth_bias < -0.10:
                 bear_score += min(0.15, -depth_bias * 0.20)
+
+    # YES token price velocity — rising YES = smart money buying this outcome.
+    # Confirmation only: needs ≥5 history points (requires ws data for this token).
+    # Max contribution ±0.15 at 5%+ move; scaled linearly from 2% threshold.
+    if yes_token:
+        velocity = get_yes_velocity(yes_token)
+        if velocity is not None:
+            if velocity > 0.02:
+                bull_score += min(0.15, (velocity - 0.02) / 0.06 * 0.15)
+            elif velocity < -0.02:
+                bear_score += min(0.15, (-velocity - 0.02) / 0.06 * 0.15)
+
+    # Market activity filter — thin market = signals are less reliable.
+    # Dampens both scores by 10% when fewer than 5 updates in the last 5 min.
+    # Non-directional: does not change which side wins, only reduces confidence.
+    if yes_token:
+        from . import ws_client as _ws2
+        if _ws2.get_market_activity(yes_token) < 5:
+            bull_score *= 0.90
+            bear_score *= 0.90
 
     # Regime multiplier — backtest shows TRENDING has worst P&L despite highest win rate
     # (fast peg_cross losses dominate in trending markets). RANGING is the best regime.

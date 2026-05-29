@@ -2,7 +2,8 @@
 import asyncio
 import json
 import logging
-from collections import defaultdict
+import time as _time
+from collections import defaultdict, deque
 from typing import Callable, Awaitable
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -20,6 +21,10 @@ _listeners: dict[str, list[Callable]] = defaultdict(list)
 _ws_task: asyncio.Task | None = None
 _connected = False
 _subscribed_assets: set[str] = set()
+
+# Mid-price history per token: asset_id -> deque of (unix_ts, mid)
+# maxlen=600 covers ~10 min at 1 update/s; time-filtered in accessors
+_token_price_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=600))
 
 
 def get_orderbook(asset_id: str) -> dict:
@@ -46,6 +51,17 @@ def get_mid_price(asset_id: str) -> float | None:
     if bid is None or ask is None:
         return None
     return (bid + ask) / 2
+
+
+def get_token_price_history(asset_id: str, window_secs: float = 300.0) -> list[tuple[float, float]]:
+    """Return [(unix_ts, mid), ...] for the last window_secs seconds."""
+    cutoff = _time.time() - window_secs
+    return [(ts, p) for ts, p in _token_price_history[asset_id] if ts >= cutoff]
+
+
+def get_market_activity(asset_id: str, window_secs: float = 300.0) -> int:
+    """Number of orderbook mid-price updates in the last window_secs (proxy for trade activity)."""
+    return len(get_token_price_history(asset_id, window_secs))
 
 
 def add_listener(asset_id: str, callback: Callable[..., Awaitable]) -> None:
@@ -101,6 +117,7 @@ async def _apply_book_update(asset_id: str, changes: list[dict]) -> None:
     mid = get_mid_price(asset_id)
     if mid is not None:
         volatility.on_price_update(asset_id, mid)
+        _token_price_history[asset_id].append((_time.time(), mid))
 
     # Notify listeners
     for cb in _listeners[asset_id]:
@@ -142,6 +159,7 @@ async def _handle_single(data: dict) -> None:
         mid = get_mid_price(asset_id)
         if mid is not None:
             volatility.on_price_update(asset_id, mid)
+            _token_price_history[asset_id].append((_time.time(), mid))
         for cb in _listeners[asset_id]:
             try:
                 await cb(asset_id, _orderbooks[asset_id])
