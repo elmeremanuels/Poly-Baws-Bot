@@ -262,7 +262,7 @@ regime_profiles:
     winner_velocity_stop: null      # disabled — 7/7 velocity-stop exits were direction-correct, cut winners for ~€1.7
 
 oracle:
-  enabled: false
+  enabled: true
   hard_gate: false
   per_coin_temp_paper_threshold: 35  # coins with temperature below this are forced to paper
   discord_bot_token: ""
