@@ -570,7 +570,12 @@ async def _learning_tick_loop() -> None:
 
 async def _oracle_discord_task() -> None:
     """Start Oracle Discord bot (no-op if token not configured)."""
-    if not CONFIG.get("oracle", {}).get("discord_bot_token", ""):
+    import os as _os
+    token = (
+        _os.environ.get("DISCORD_BOT_TOKEN", "")
+        or CONFIG.get("oracle", {}).get("discord_bot_token", "")
+    )
+    if not token:
         return
     try:
         from .oracle_discord import start_discord_bot
