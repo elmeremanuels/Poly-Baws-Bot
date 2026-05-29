@@ -160,7 +160,7 @@ async def signal_trader_loop(coin: str) -> None:
                 market_found=bool(market),
                 conviction_direction=direction,
                 conviction_score=round(score, 3),
-                threshold=cfg.get("conviction_threshold", 0.65),
+                threshold=cfg.get("conviction_threshold", 0.35),
                 paper=_is_paper(),
             )
         await asyncio.sleep(10)
@@ -210,9 +210,13 @@ async def _check_and_trade(coin: str) -> None:
                   window=window_ts)
         return
 
+    # OFI verversen zodat de waarde ≤1s oud is op het moment van beslissing
+    # (achtergrond-poll loopt elke 10s — zonder dit kan OFI tot 10s verouderd zijn)
+    await _signals.refresh_ofi(coin)
+
     # Signaal ophalen — log altijd zodat je de score kunt volgen
     direction, score = _signals.get_conviction(coin)
-    threshold = cfg.get("conviction_threshold", 0.65)
+    threshold = cfg.get("conviction_threshold", 0.35)
 
     log.info("signal_trader_signal", coin=coin,
              direction=direction, score=round(score, 3), threshold=threshold,
