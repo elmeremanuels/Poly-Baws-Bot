@@ -1256,15 +1256,42 @@ def _save_router_to_yaml(params: dict) -> str:
         return str(exc)
 
 
+def _save_multi_section_to_yaml(sections: dict) -> str:
+    """Schrijf meerdere config-secties tegelijk naar config.yaml.
+
+    sections: {"router": {"key": val, ...}, "trading": {"key": val}, ...}
+    """
+    try:
+        from ruamel.yaml import YAML
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        with open(_ST_CONFIG_PATH) as f:
+            cfg = ryaml.load(f)
+        for section, params in sections.items():
+            if section not in cfg or cfg[section] is None:
+                cfg[section] = {}
+            for k, v in params.items():
+                cfg[section][k] = v
+        with open(_ST_CONFIG_PATH, "w") as f:
+            ryaml.dump(cfg, f)
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
 @st.fragment(run_every=15)
 def _auto_router_panel() -> None:
-    """Dashboard panel voor de auto_router modus."""
+    """Dashboard panel voor de auto_router modus — alle instellingen op één plek."""
     mode      = current_mode()
     cfg       = _read_router_cfg_from_yaml()
     st_cfg    = _read_st_cfg_from_yaml()
     is_active = (mode == "auto_router")
     straddle_paper = cfg.get("paper_mode", True)
     signal_paper   = st_cfg.get("paper_mode", True)
+
+    saved_straddle_size = get_state("trade_size_eur")
+    straddle_size_db = float(saved_straddle_size) if saved_straddle_size else CONFIG["trading"].get("trade_size_eur", 1.0)
 
     # ── Status banner ────────────────────────────────────────────────────────
     if is_active:
@@ -1300,43 +1327,137 @@ def _auto_router_panel() -> None:
 
     st.divider()
 
-    # ── Straddle bucket: Paper / Live ────────────────────────────────────────
-    st.markdown("**Straddle bucket** (straddle_asym / straddle_sym)")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("📄 Paper", disabled=straddle_paper, key="ar_straddle_paper"):
-            _save_router_to_yaml({"paper_mode": True})
-            write_command("set_router_paper", {"paper_mode": True})
+    # ── Configuratie form ────────────────────────────────────────────────────
+    with st.form("ar_config_form"):
+        st.markdown("#### Trade groottes")
+        c1, c2 = st.columns(2)
+        with c1:
+            straddle_size = st.number_input(
+                "Straddle inleg per trade (EUR)",
+                min_value=0.50, max_value=500.0,
+                value=straddle_size_db, step=0.50, format="%.2f",
+                help="trading.trade_size_eur — gebruikt door straddle_asym en straddle_sym bucket",
+                key="ar_straddle_size",
+            )
+        with c2:
+            signal_size = st.number_input(
+                "Signal inleg per trade (EUR)",
+                min_value=0.50, max_value=500.0,
+                value=float(st_cfg.get("trade_size_eur", 10.0)),
+                step=0.50, format="%.2f",
+                help="signal_trader.trade_size_eur — gebruikt door signal bucket",
+                key="ar_signal_size",
+            )
+
+        st.markdown("#### Paper / Live per bucket")
+        c3, c4 = st.columns(2)
+        with c3:
+            new_straddle_paper = st.selectbox(
+                "Straddle bucket",
+                ["📄 Paper (simulatie)", "💸 Live (echte orders)"],
+                index=0 if straddle_paper else 1,
+                key="ar_straddle_mode",
+                help="Paper = geen echte USDC uitgaven. Live = echte orders.",
+            )
+        with c4:
+            new_signal_paper = st.selectbox(
+                "Signal bucket",
+                ["📄 Paper (simulatie)", "💸 Live (echte orders)"],
+                index=0 if signal_paper else 1,
+                key="ar_signal_mode",
+            )
+
+        st.markdown("#### Take it / Save it")
+        c5, c6 = st.columns(2)
+        with c5:
+            take_it_enabled = st.toggle(
+                "Take it ingeschakeld",
+                value=cfg.get("take_it_enabled", True),
+                key="ar_take_it_enabled",
+                help="Koop extra winner-tokens als de trade duidelijk wint (mid ≥ 0.82, ≤ 240s resterend)",
+            )
+            take_it_size = st.number_input(
+                "Take it extra inleg (EUR)",
+                min_value=0.50, max_value=50.0,
+                value=float(cfg.get("take_it_size_eur", 3.0)),
+                step=0.50, format="%.2f",
+                disabled=not take_it_enabled,
+                key="ar_take_it_size",
+            )
+        with c6:
+            save_it_enabled = st.toggle(
+                "Save it ingeschakeld",
+                value=cfg.get("save_it_enabled", True),
+                key="ar_save_it_enabled",
+                help="Koop de keerzijde als de markt omdraait (winner daalt ≥ 0.20 van piek, ≥ 120s resterend)",
+            )
+            save_it_size = st.number_input(
+                "Save it extra inleg (EUR)",
+                min_value=0.50, max_value=50.0,
+                value=float(cfg.get("save_it_size_eur", 3.0)),
+                step=0.50, format="%.2f",
+                disabled=not save_it_enabled,
+                key="ar_save_it_size",
+            )
+
+        st.markdown("#### Routing drempels")
+        c7, c8, c9 = st.columns(3)
+        with c7:
+            sig_conv = st.slider(
+                "Signal min. conviction",
+                min_value=0.30, max_value=0.90, step=0.05,
+                value=float(cfg.get("signal_min_conviction", 0.55)),
+                key="ar_sig_conv",
+                help="Trades met conviction ≥ deze waarde gaan naar signal bucket",
+            )
+        with c8:
+            str_conv = st.slider(
+                "Straddle min. conviction",
+                min_value=0.30, max_value=0.95, step=0.05,
+                value=float(cfg.get("straddle_min_conviction", 0.70)),
+                key="ar_str_conv",
+                help="Trades met conviction ≥ deze waarde gaan naar straddle bucket (als signal uitstaat)",
+            )
+        with c9:
+            max_corr = st.number_input(
+                "Max gecorr. posities",
+                min_value=1, max_value=10,
+                value=int(cfg.get("max_correlated_positions", 3)),
+                step=1,
+                key="ar_max_corr",
+                help="Blokkeer nieuwe trade als ≥ N open posities al dezelfde richting hebben",
+            )
+
+        submitted = st.form_submit_button("💾 Opslaan", type="primary")
+
+    if submitted:
+        new_straddle_paper_bool = "Paper" in new_straddle_paper
+        new_signal_paper_bool   = "Paper" in new_signal_paper
+
+        router_params = {
+            "paper_mode":               new_straddle_paper_bool,
+            "take_it_enabled":          take_it_enabled,
+            "take_it_size_eur":         take_it_size,
+            "save_it_enabled":          save_it_enabled,
+            "save_it_size_eur":         save_it_size,
+            "signal_min_conviction":    round(sig_conv, 2),
+            "straddle_min_conviction":  round(str_conv, 2),
+            "max_correlated_positions": max_corr,
+        }
+        err = _save_multi_section_to_yaml({
+            "router":       router_params,
+            "trading":      {"trade_size_eur": straddle_size},
+            "signal_trader": {"trade_size_eur": signal_size, "paper_mode": new_signal_paper_bool},
+        })
+        if err:
+            st.error(f"YAML opslaan mislukt: {err}")
+        else:
+            write_command("apply_router_config", router_params)
+            write_command("set_trade_size", {"trade_size_eur": straddle_size})
+            write_command("apply_signal_trader_config", {"trade_size_eur": signal_size})
+            write_command("set_signal_trader_paper", {"paper_mode": new_signal_paper_bool})
+            st.success("Instellingen opgeslagen en doorgevoerd.")
             st.rerun()
-    with c2:
-        if st.button("💸 Live", disabled=not straddle_paper, type="secondary", key="ar_straddle_live"):
-            _save_router_to_yaml({"paper_mode": False})
-            write_command("set_router_paper", {"paper_mode": False})
-            st.rerun()
-
-    st.caption(
-        "📄 Paper = simulatie, geen echte orders. "
-        "💸 Live = echte USDC uitgaven. Zet alleen op Live als paper resultaten stabiel zijn."
-    )
-
-    st.divider()
-
-    # ── Signal bucket: verwijst naar Signal Trader tab ───────────────────────
-    st.markdown("**Signal bucket** (single-side richting-trade)")
-    signal_label_full = "📄 Paper (simulatie)" if signal_paper else "💸 Live (echte orders)"
-    st.info(
-        f"Signal bucket staat op **{signal_label_full}**. "
-        "Pas dit aan via de **🎯 Signal Trader** tab → Paper / Live knop."
-    )
-
-    st.divider()
-
-    # ── Routing drempelwaarden ────────────────────────────────────────────────
-    st.markdown("**Routing drempels** (alleen ter info — wijzig in config.yaml)")
-    col_a, col_b, col_c = st.columns(3)
-    col_a.metric("Signal min. conviction", cfg.get("signal_min_conviction", 0.55))
-    col_b.metric("Straddle min. conviction", cfg.get("straddle_min_conviction", 0.70))
-    col_c.metric("Max gecorr. posities", cfg.get("max_correlated_positions", 3))
 
 
 @st.fragment(run_every=15)

@@ -340,6 +340,15 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("router_paper_mode", str(paper))
         log.info("router_paper_mode_set", paper=paper)
 
+    elif command == "apply_router_config":
+        r = CONFIG.setdefault("router", {})
+        for key in ("signal_min_conviction", "straddle_min_conviction",
+                    "max_correlated_positions", "take_it_size_eur",
+                    "save_it_size_eur", "take_it_enabled", "save_it_enabled"):
+            if key in payload:
+                r[key] = payload[key]
+        log.info("apply_router_config_applied", keys=list(payload.keys()))
+
     elif command == "apply_signal_trader_config":
         st_cfg = CONFIG.setdefault("signal_trader", {})
         for key in ("conviction_threshold", "trade_size_eur", "entry_price_max",
