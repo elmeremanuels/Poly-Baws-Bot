@@ -132,23 +132,24 @@ def get_all_signals(coin: str) -> dict:
     }
 
 
-def get_conviction(coin: str) -> tuple[str | None, float]:
-    """Combine OFI + funding rate + liq_proxy + price_position + regime into (direction, certainty 0–1).
+def get_conviction(
+    coin: str,
+    yes_token: str | None = None,
+    no_token: str | None = None,
+) -> tuple[str | None, float]:
+    """Combine all available signals into (direction, certainty 0–1).
 
     Direction: "UP", "DOWN", or None.
     Score: 0.0 = no signal, 1.0 = all signals aligned strongly.
 
-    Rules:
-      OFI > 0.55 → bullish raw signal (+score)
-      OFI < 0.45 → bearish raw signal (+score)
-      Funding rate > 0.001 (0.1%) → contrarian bearish pressure (+bear)
-      Funding rate < -0.001       → contrarian bullish pressure (+bull)
-      Liquidation proxy > 2.0 → amplify direction signal (+0.1 bonus)
-      price_position < 0.20 → price at 30-min range bottom → mean-revert UP (+0.15)
-      price_position > 0.80 → price at 30-min range top → mean-revert DOWN (+0.15)
-      RANGING regime → amplify score ×1.15 (best P&L regime empirically)
-      TRENDING/BREAKOUT → dampen score ×0.85/×0.90 (high win% but peg_cross losses dominate)
-      CHOPPY regime → dampen score ×0.75
+    Signals (in order):
+      OFI (Binance spot)          → ±0..1.0
+      Funding rate (contrarian)   → ±0..0.30
+      Liquidation proxy           → ±0..0.10 amplifier
+      Price position (mean-rev)   → ±0..0.15
+      Recent drift 5min           → ±0..0.20  ← NEW
+      Polymarket depth imbalance  → ±0..0.15  ← NEW (when tokens provided)
+      Regime multiplier           → ×0.75..1.15
     """
     ofi = get_order_flow_imbalance(coin)
     fr = get_funding_rate(coin)
@@ -189,6 +190,30 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
                 bull_score += 0.15 * (0.20 - pp) / 0.20
             elif pp > 0.80:
                 bear_score += 0.15 * (pp - 0.80) / 0.20
+
+    # Recent price drift (last 5 min) — actual observed direction, not inferred
+    # Threshold 0.0005/min ≈ 0.25% over 5 min; capped contribution at 0.20
+    drift = get_recent_drift_1m(coin)
+    if drift is not None:
+        _drift_threshold = 0.0005
+        if drift > _drift_threshold:
+            bull_score += min(0.20, (drift - _drift_threshold) / 0.004)
+        elif drift < -_drift_threshold:
+            bear_score += min(0.20, (-drift - _drift_threshold) / 0.004)
+
+    # Polymarket CLOB depth imbalance — YES bids vs NO bids shows which side the
+    # market is accumulating, independent of OFI on Binance spot
+    if yes_token and no_token:
+        from . import ws_client as _ws
+        yes_bids = sum(float(v) for v in _ws.get_orderbook(yes_token).get("bids", {}).values())
+        no_bids  = sum(float(v) for v in _ws.get_orderbook(no_token).get("bids", {}).values())
+        total_bids = yes_bids + no_bids
+        if total_bids >= 5.0:  # ignore trivially thin books
+            depth_bias = (yes_bids - no_bids) / total_bids  # -1..+1
+            if depth_bias > 0.10:
+                bull_score += min(0.15, depth_bias * 0.20)
+            elif depth_bias < -0.10:
+                bear_score += min(0.15, -depth_bias * 0.20)
 
     # Regime multiplier — backtest shows TRENDING has worst P&L despite highest win rate
     # (fast peg_cross losses dominate in trending markets). RANGING is the best regime.

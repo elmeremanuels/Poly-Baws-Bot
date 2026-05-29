@@ -226,9 +226,30 @@ async def _check_and_trade(coin: str) -> None:
     # (achtergrond-poll loopt elke 10s — zonder dit kan OFI tot 10s verouderd zijn)
     await _signals.refresh_ofi(coin)
 
-    # Signaal ophalen — log altijd zodat je de score kunt volgen
-    direction, score = _signals.get_conviction(coin)
+    # Signaal ophalen met alle beschikbare context:
+    # drift (5min prijsbeweging) + Polymarket depth imbalance worden nu meegewogen
+    direction, score = _signals.get_conviction(
+        coin,
+        yes_token=market.get("yes_token"),
+        no_token=market.get("no_token"),
+    )
     threshold = cfg.get("conviction_threshold", 0.35)
+
+    # Edge confirmatie: vergelijk Black-Scholes theoretische waarde met de marktprijs.
+    # Positieve edge = Polymarket onderprijst de kans → versterkt het signaal.
+    # Negatieve edge = Polymarket overprijst → zwakt het signaal af.
+    if direction is not None:
+        side_tentative = "YES" if direction == "UP" else "NO"
+        ask_tentative = ws_client.get_best_ask(
+            market["yes_token"] if side_tentative == "YES" else market["no_token"]
+        )
+        if ask_tentative and ask_tentative > 0:
+            edge = _signals.get_edge(coin, side_tentative, ask_tentative, 300.0)
+            if edge is not None:
+                if edge > 0.05:        # theorie: 5%+ onderprijsd → boost
+                    score = min(1.0, score * 1.20)
+                elif edge < -0.03:     # theorie: overprijsd → penalty
+                    score = score * 0.80
 
     log.info("signal_trader_signal", coin=coin,
              direction=direction, score=round(score, 3), threshold=threshold,
