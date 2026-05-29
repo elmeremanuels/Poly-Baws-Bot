@@ -45,8 +45,15 @@ _FAPI_BASE = "https://fapi.binance.com"
 _trades: dict[str, deque] = {}
 _TRADE_WINDOW = 300  # keep 5 minutes of aggTrade data
 
+# Perpetuals aggTrade buffer — separate from spot (same structure)
+_perp_trades: dict[str, deque] = {}
+_perp_last_trade_id: dict[str, int] = {}
+
 # {coin: latest funding rate float}
 _funding_rates: dict[str, float] = {}
+
+# {coin: latest long/short ratio float} — accounts long / accounts short
+_ls_ratios: dict[str, float] = {}
 
 
 # ── aggTrade recording ─────────────────────────────────────────────────────────
@@ -88,9 +95,52 @@ def get_order_flow_imbalance(coin: str, window_secs: float = 60.0) -> float | No
     return round(buy_vol / total_vol, 4)
 
 
+def record_perp_trade(coin: str, qty: float, is_buy: bool) -> None:
+    """Store one perpetual aggTrade event."""
+    buf = _perp_trades.setdefault(coin, deque())
+    now = time.time()
+    buf.append((now, qty, is_buy))
+    cutoff = now - _TRADE_WINDOW
+    while buf and buf[0][0] < cutoff:
+        buf.popleft()
+
+
+def get_perp_order_flow_imbalance(coin: str, window_secs: float = 60.0) -> float | None:
+    """OFI from Binance perpetuals aggTrades.
+
+    Futures traders lead spot price discovery — used as confirmation alongside
+    spot OFI. Same formula, slightly lower weight in get_conviction().
+    """
+    buf = _perp_trades.get(coin)
+    if not buf:
+        return None
+    cutoff = time.time() - window_secs
+    buy_vol = total_vol = 0.0
+    n = 0
+    for ts, qty, is_buy in buf:
+        if ts < cutoff:
+            continue
+        total_vol += qty
+        if is_buy:
+            buy_vol += qty
+        n += 1
+    if total_vol < 1e-8 or n < 10:
+        return None
+    return round(buy_vol / total_vol, 4)
+
+
 def get_funding_rate(coin: str) -> float | None:
     """Return the latest perpetual funding rate, or None if not yet fetched."""
     return _funding_rates.get(coin)
+
+
+def get_long_short_ratio(coin: str) -> float | None:
+    """Return the latest global long/short account ratio, or None if not fetched.
+
+    > 1.5 = >60% accounts long  → contrarian bearish pressure
+    < 0.67 = >60% accounts short → contrarian bullish pressure
+    """
+    return _ls_ratios.get(coin)
 
 
 def get_liquidation_proxy(coin: str, spike_window_secs: float = 30.0) -> float | None:
@@ -143,16 +193,20 @@ def get_conviction(
     Score: 0.0 = no signal, 1.0 = all signals aligned strongly.
 
     Signals (in order):
-      OFI (Binance spot)          → ±0..1.0
+      OFI spot (Binance)          → ±0..1.0
+      OFI perp (Binance futures)  → ±0..0.30  confirmation, half-weight
       Funding rate (contrarian)   → ±0..0.30
+      Long/Short ratio (contrarian)→ ±0..0.15
       Liquidation proxy           → ±0..0.10 amplifier
       Price position (mean-rev)   → ±0..0.15
-      Recent drift 5min           → ±0..0.20  ← NEW
-      Polymarket depth imbalance  → ±0..0.15  ← NEW (when tokens provided)
+      Recent drift 5min           → ±0..0.20
+      Polymarket depth imbalance  → ±0..0.15  (when tokens provided)
       Regime multiplier           → ×0.75..1.15
     """
     ofi = get_order_flow_imbalance(coin)
+    perp_ofi = get_perp_order_flow_imbalance(coin)
     fr = get_funding_rate(coin)
+    ls = get_long_short_ratio(coin)
     liq = get_liquidation_proxy(coin)
 
     # Lazy import to avoid circular dependency at module level
@@ -167,12 +221,26 @@ def get_conviction(
         elif ofi < 0.45:
             bear_score += (0.45 - ofi) / 0.45
 
+    # Perpetuals OFI — futures lead spot; half-weight so spot remains primary
+    if perp_ofi is not None:
+        if perp_ofi > 0.55:
+            bull_score += min(0.30, (perp_ofi - 0.55) / 0.45 * 0.50)
+        elif perp_ofi < 0.45:
+            bear_score += min(0.30, (0.45 - perp_ofi) / 0.45 * 0.50)
+
     if fr is not None:
         if fr > 0.001:
             # Crowded longs → contrarian bearish
             bear_score += min(0.3, (fr - 0.001) / 0.005)
         elif fr < -0.001:
             bull_score += min(0.3, (-fr - 0.001) / 0.005)
+
+    # Long/Short account ratio — contrarian: extreme crowding precedes mean reversion
+    if ls is not None:
+        if ls > 1.5:    # >60% accounts long → contrarian bearish
+            bear_score += min(0.15, (ls - 1.5) / 1.5)
+        elif ls < 0.67:  # >60% accounts short → contrarian bullish
+            bull_score += min(0.15, (0.67 - ls) / 0.67)
 
     if liq is not None and liq > 2.0:
         bonus = min(0.10, (liq - 2.0) * 0.05)
@@ -307,6 +375,25 @@ async def run_trade_poll_loop() -> None:
             except Exception as e:
                 log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
 
+        # Seed perp aggTrades buffer
+        async with httpx.AsyncClient(timeout=10) as perp_client:
+            for coin in coins:
+                symbol = _COIN_TO_PERP[coin]
+                try:
+                    resp = await perp_client.get(
+                        f"{_FAPI_BASE}/fapi/v1/aggTrades",
+                        params={"symbol": symbol, "limit": 500},
+                    )
+                    resp.raise_for_status()
+                    trades = resp.json()
+                    for t in trades:
+                        record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
+                    if trades:
+                        _perp_last_trade_id[coin] = int(trades[-1]["a"])
+                    log.info("perp_trade_poll_seeded", coin=coin, n=len(trades))
+                except Exception as e:
+                    log.warning("perp_trade_poll_seed_failed", coin=coin, error=str(e))
+
         # Background polling loop — keeps rolling buffer current between on-demand refreshes
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
@@ -328,11 +415,53 @@ async def run_trade_poll_loop() -> None:
                 except Exception as e:
                     log.warning("trade_poll_failed", coin=coin, error=str(e))
 
+            # Poll perp aggTrades alongside spot
+            async with httpx.AsyncClient(timeout=10) as perp_client:
+                for coin in coins:
+                    symbol = _COIN_TO_PERP[coin]
+                    try:
+                        params: dict = {"symbol": symbol, "limit": 500}
+                        last = _perp_last_trade_id.get(coin)
+                        if last:
+                            params["fromId"] = last + 1
+                        resp = await perp_client.get(
+                            f"{_FAPI_BASE}/fapi/v1/aggTrades", params=params
+                        )
+                        resp.raise_for_status()
+                        trades = resp.json()
+                        if not trades:
+                            continue
+                        for t in trades:
+                            record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
+                        _perp_last_trade_id[coin] = int(trades[-1]["a"])
+                    except Exception as e:
+                        log.warning("perp_trade_poll_failed", coin=coin, error=str(e))
+
 
 # ── Funding rate background poller ─────────────────────────────────────────────
 
+async def _fetch_ls_ratio(client: httpx.AsyncClient, coin: str) -> None:
+    """Fetch global long/short account ratio for one coin and cache it."""
+    symbol = _COIN_TO_PERP.get(coin)
+    if not symbol:
+        return
+    try:
+        resp = await client.get(
+            f"{_FAPI_BASE}/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol, "period": "5m", "limit": 1},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            ratio = float(data[0]["longShortRatio"])
+            _ls_ratios[coin] = ratio
+            log.debug("ls_ratio_updated", coin=coin, ratio=ratio)
+    except Exception as e:
+        log.warning("ls_ratio_fetch_failed", coin=coin, error=str(e))
+
+
 async def seed_funding_rates() -> None:
-    """Fetch current funding rates once on startup."""
+    """Fetch current funding rates and L/S ratios once on startup."""
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
     async with httpx.AsyncClient(timeout=10) as client:
         for coin in coins:
@@ -349,6 +478,7 @@ async def seed_funding_rates() -> None:
                 log.info("funding_rate_seeded", coin=coin, rate=rate)
             except Exception as e:
                 log.warning("funding_rate_seed_failed", coin=coin, error=str(e))
+            await _fetch_ls_ratio(client, coin)
 
 
 async def funding_rate_loop() -> None:
@@ -372,6 +502,7 @@ async def funding_rate_loop() -> None:
                     log.debug("funding_rate_updated", coin=coin, rate=rate)
                 except Exception as e:
                     log.warning("funding_rate_poll_failed", coin=coin, error=str(e))
+                await _fetch_ls_ratio(client, coin)
 
 
 # ── Pricing Model v1: Black-Scholes binary option ─────────────────────────────
