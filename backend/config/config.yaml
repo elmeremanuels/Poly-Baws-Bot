@@ -281,8 +281,8 @@ oracle:
   per_coin_temp_paper_threshold: 35
   # Discord — vul in via .env of hier direct
   discord_bot_token: ""              # DISCORD_BOT_TOKEN in .env heeft voorrang
-  discord_channel_id: ""             # kanaal voor trade alerts + dagelijkse analyse
-  discord_confirm_channel_id: ""     # kanaal voor interactieve ja/nee vragen
+  discord_channel_id: "1510017194694807595"    # kanaal voor trade alerts + dagelijkse analyse
+  discord_confirm_channel_id: "1510017194694807595"  # kanaal voor interactieve ja/nee vragen
   discord_confirm_enabled: true      # soft-blocks vragen via Discord-knop
   discord_confirm_timeout_secs: 90   # seconden wachten op antwoord (dan auto-approve)
   track_record_min_trades: 10
