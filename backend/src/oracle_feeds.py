@@ -1,7 +1,11 @@
-"""Oracle external data feeds: Fear & Greed, Massive.com price momentum, Polymarket aggregate.
+"""Oracle external data feeds: Fear & Greed, Mediastack news, Massive price momentum, Polymarket.
 
-All feeds are cached to avoid excessive S3 requests. Recency weighting is applied
-to time-series data so recent signals count more than older ones.
+Feed priority for news sentiment:
+  1. Mediastack (real headlines, keyword-based sentiment) — cached 24h (100 req/month limit)
+  2. Massive.com flat files (price momentum proxy) — cached 6h, fallback only
+  3. "unknown" if both unavailable
+
+All feeds fail-open: errors never block a trade verdict.
 """
 from __future__ import annotations
 
@@ -58,17 +62,112 @@ async def get_fear_greed() -> dict:
     return _fg_cache
 
 
-# ── Massive.com S3 price momentum ─────────────────────────────────────────────
-# Replaces CryptoPanic: derives bullish/bearish sentiment from price momentum
-# (7-day close vs. 30-day average) using Massive crypto day aggregates.
-# Data is available ~11:00 AM ET the day after each trading day.
-# Cached 6 hours — the file only updates once per day anyway.
+# ── Mediastack news sentiment ──────────────────────────────────────────────────
+# Primary news feed. Single request covers all coins; cached 24h to stay within
+# the 100 req/month free tier (~30 req/month at 24h TTL).
+
+_mediastack_cache: dict[str, Any] = {}
+_mediastack_cache_ts: float = 0.0
+_MEDIASTACK_TTL = 24 * 3600.0  # 24 hours
+
+_COIN_KEYWORDS: dict[str, list[str]] = {
+    "BTC":  ["bitcoin", "btc"],
+    "ETH":  ["ethereum", "eth"],
+    "SOL":  ["solana", "sol"],
+    "XRP":  ["xrp", "ripple"],
+    "DOGE": ["dogecoin", "doge"],
+}
+
+_POS_WORDS = frozenset({
+    "rally", "surge", "gain", "gains", "rise", "rises", "soars", "high", "higher",
+    "bullish", "adoption", "approval", "record", "soar", "jump", "boost", "growth",
+    "upside", "outperform", "breakout", "rebound",
+})
+_NEG_WORDS = frozenset({
+    "crash", "crashes", "fall", "falls", "drop", "drops", "plunge", "plunges",
+    "bear", "bearish", "ban", "hack", "loss", "losses", "collapse", "decline",
+    "fear", "selloff", "sell-off", "correction", "trouble", "warning", "risk",
+})
+
+
+def _score_headlines(titles: list[str]) -> tuple[str, float]:
+    """Keyword-based sentiment score from article titles. Returns (sentiment, score -1..+1)."""
+    pos = neg = 0
+    for title in titles:
+        words = set(title.lower().split())
+        pos += len(words & _POS_WORDS)
+        neg += len(words & _NEG_WORDS)
+    total = pos + neg
+    if total == 0:
+        return "neutral", 0.0
+    score = (pos - neg) / total  # -1..+1
+    sentiment = "positive" if score > 0.15 else ("negative" if score < -0.15 else "neutral")
+    return sentiment, round(score, 3)
+
+
+async def _fetch_mediastack(coins: list[str]) -> dict:
+    """One Mediastack API call covering all coins. Returns per-coin sentiment dict or {}."""
+    api_key = (
+        os.environ.get("MEDIASTACK_API_KEY")
+        or CONFIG.get("oracle", {}).get("feeds", {}).get("mediastack_api_key", "")
+    )
+    if not api_key:
+        return {}
+
+    # Build a single comma-separated keyword string for all coins
+    all_kw: list[str] = []
+    for coin in coins:
+        all_kw.extend(_COIN_KEYWORDS.get(coin, [coin.lower()]))
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            resp = await client.get(
+                "http://api.mediastack.com/v1/news",
+                params={
+                    "access_key": api_key,
+                    "keywords": ",".join(all_kw[:10]),
+                    "languages": "en",
+                    "limit": 25,
+                    "sort": "published_desc",
+                },
+            )
+            resp.raise_for_status()
+            articles = resp.json().get("data", [])
+    except Exception as exc:
+        log.warning("mediastack_fetch_failed", error=str(exc))
+        return {}
+
+    result: dict[str, dict] = {}
+    for coin in coins:
+        kws = _COIN_KEYWORDS.get(coin, [coin.lower()])
+        titles = [
+            a["title"] for a in articles
+            if a.get("title") and any(kw in a["title"].lower() for kw in kws)
+        ]
+        if not titles:
+            result[coin] = {"sentiment": "neutral", "weighted_score": 0.0, "top_headline": None}
+        else:
+            sentiment, score = _score_headlines(titles)
+            result[coin] = {
+                "sentiment": sentiment,
+                "weighted_score": score,
+                "top_headline": titles[0],
+            }
+        log.debug("mediastack_sentiment", coin=coin, sentiment=result[coin]["sentiment"],
+                  n_articles=len(titles))
+
+    return result
+
+
+# ── Massive.com S3 price momentum (fallback) ──────────────────────────────────
+# Derives bullish/bearish sentiment from price momentum (7-day close vs 30-day avg).
+# Data available ~11:00 AM ET the day after each trading day. Cached 6 hours.
+# Used as fallback when Mediastack is unavailable.
 
 _massive_cache: dict[str, Any] = {}
 _massive_cache_ts: float = 0.0
 _MASSIVE_TTL = 6 * 3600.0  # 6 hours
 
-# Coin → list of ticker prefixes to match in the CSV
 _COIN_TICKERS: dict[str, list[str]] = {
     "BTC":  ["BTC-USD", "BTC/USD", "BTCUSD", "XBT-USD"],
     "ETH":  ["ETH-USD", "ETH/USD", "ETHUSD"],
@@ -79,7 +178,6 @@ _COIN_TICKERS: dict[str, list[str]] = {
 
 
 def _get_massive_credentials() -> tuple[str, str]:
-    """Returns (access_key_id, secret_access_key) from env or config."""
     key = (
         os.environ.get("MASSIVE_ACCESS_KEY_ID")
         or CONFIG.get("oracle", {}).get("feeds", {}).get("massive_access_key_id", "")
@@ -92,12 +190,11 @@ def _get_massive_credentials() -> tuple[str, str]:
 
 
 def _s3_day_agg_key(date: datetime) -> str:
-    """S3 object key for a given date: global_crypto/day_aggs_v1/YYYY/MM/YYYY-MM-DD.csv.gz"""
     return f"global_crypto/day_aggs_v1/{date:%Y}/{date:%m}/{date:%Y-%m-%d}.csv.gz"
 
 
 def _download_day_agg_sync(key_id: str, secret: str, s3_key: str) -> bytes | None:
-    """Download a single day-agg CSV.gz from Massive S3. Returns raw bytes or None."""
+    """Download a single day-agg CSV.gz via get_object (avoids HeadObject 403)."""
     try:
         import boto3
         from botocore.config import Config as BotoConfig
@@ -111,30 +208,23 @@ def _download_day_agg_sync(key_id: str, secret: str, s3_key: str) -> bytes | Non
             endpoint_url="https://files.massive.com",
             config=BotoConfig(signature_version="s3v4"),
         )
-        buf = io.BytesIO()
-        s3.download_fileobj("flatfiles", s3_key, buf)
-        return buf.getvalue()
+        resp = s3.get_object(Bucket="flatfiles", Key=s3_key)
+        return resp["Body"].read()
     except Exception as exc:
         log.debug("massive_s3_download_failed", key=s3_key, error=str(exc))
         return None
 
 
 def _parse_day_agg(raw: bytes) -> list[dict]:
-    """Parse a gzip-compressed CSV day-agg file into a list of row dicts."""
     try:
         with gzip.open(io.BytesIO(raw), "rt") as f:
-            reader = csv.DictReader(f)
-            return list(reader)
+            return list(csv.DictReader(f))
     except Exception:
         return []
 
 
 def _compute_momentum(rows: list[dict], coin: str) -> float | None:
-    """Return price momentum score -1..+1 for a coin from a list of daily rows.
-
-    Positive = recent closes above longer-term average (bullish).
-    Negative = recent closes below longer-term average (bearish).
-    """
+    """Price momentum score -1..+1: positive = recent above long-term avg (bullish)."""
     tickers = _COIN_TICKERS.get(coin, [f"{coin}-USD", f"{coin}/USD"])
     closes: list[float] = []
     for row in rows:
@@ -149,29 +239,18 @@ def _compute_momentum(rows: list[dict], coin: str) -> float | None:
     if len(closes) < 4:
         return None
 
-    # Most recent 3 days vs. the rest
     recent_avg = sum(closes[:3]) / 3
     baseline_avg = sum(closes) / len(closes)
     if baseline_avg == 0:
         return None
 
-    raw_momentum = (recent_avg - baseline_avg) / baseline_avg  # e.g. +0.04 = +4%
-    return max(-1.0, min(1.0, raw_momentum * 10))  # scale: 10% move → ±1.0
+    raw_momentum = (recent_avg - baseline_avg) / baseline_avg
+    return max(-1.0, min(1.0, raw_momentum * 10))
 
 
-async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
-    """Derive price-momentum-based sentiment from Massive.com day aggregates.
-
-    Returns {coin: {"sentiment": "positive"|"negative"|"neutral"|"unknown",
-                     "weighted_score": float,  # -1..+1
-                     "top_headline": str|None}}
-
-    Same interface as the former CryptoPanic feed — Oracle code is unchanged.
-    Falls back to "unknown" when credentials are missing or S3 is unavailable.
-    """
+async def _get_massive_momentum(coins: list[str]) -> dict:
+    """Derive sentiment from Massive price momentum. Returns same interface as Mediastack."""
     global _massive_cache, _massive_cache_ts
-
-    coins = coins or list(CONFIG.get("coins", {}).keys())
 
     key_id, secret = _get_massive_credentials()
     if not key_id or not secret:
@@ -181,9 +260,7 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
     if time.monotonic() - _massive_cache_ts < _MASSIVE_TTL and _massive_cache:
         return _massive_cache
 
-    # Download up to 7 recent trading days (skip today — data only available next day)
     now_utc = datetime.now(timezone.utc)
-    all_rows: list[dict] = []
 
     def _fetch_days() -> list[dict]:
         rows: list[dict] = []
@@ -194,11 +271,10 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
             if raw:
                 rows.extend(_parse_day_agg(raw))
             if len({r.get("ticker") for r in rows}) > 5:
-                break  # enough data
+                break
         return rows
 
     try:
-        # Run blocking S3 downloads in a thread so we don't block the event loop
         all_rows = await asyncio.get_event_loop().run_in_executor(None, _fetch_days)
     except Exception as exc:
         log.warning("massive_fetch_failed", error=str(exc))
@@ -211,19 +287,10 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
         if score is None:
             result[coin] = {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
             continue
-
-        if score > 0.15:
-            sentiment = "positive"
-        elif score < -0.15:
-            sentiment = "negative"
-        else:
-            sentiment = "neutral"
-
-        # "top_headline" repurposed as a human-readable summary
-        pct = score * 10  # reverse the ×10 scaling for display
+        sentiment = "positive" if score > 0.15 else ("negative" if score < -0.15 else "neutral")
+        pct = score * 10
         direction = "+" if pct >= 0 else ""
-        headline = f"7d momentum: {direction}{pct:.1f}% vs 30d gemiddelde (Massive)"
-
+        headline = f"7d momentum: {direction}{pct:.1f}% vs 30d avg (Massive)"
         result[coin] = {
             "sentiment": sentiment,
             "weighted_score": round(score, 3),
@@ -234,6 +301,35 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
     _massive_cache = result
     _massive_cache_ts = time.monotonic()
     return result
+
+
+# ── Combined news sentiment (public interface) ─────────────────────────────────
+
+async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
+    """Per-coin news sentiment. Mediastack headlines primary; Massive momentum fallback.
+
+    Returns {coin: {"sentiment": "positive"|"negative"|"neutral"|"unknown",
+                     "weighted_score": float,  # -1..+1
+                     "top_headline": str|None}}
+    """
+    global _mediastack_cache, _mediastack_cache_ts
+
+    coins = coins or list(CONFIG.get("coins", {}).keys())
+
+    # Serve from Mediastack cache if fresh
+    if time.monotonic() - _mediastack_cache_ts < _MEDIASTACK_TTL and _mediastack_cache:
+        return _mediastack_cache
+
+    # Try Mediastack (real headlines)
+    result = await _fetch_mediastack(coins)
+    if result:
+        _mediastack_cache = result
+        _mediastack_cache_ts = time.monotonic()
+        return result
+
+    # Fallback: Massive price momentum
+    log.debug("news_fallback_massive", reason="mediastack_unavailable_or_no_key")
+    return await _get_massive_momentum(coins)
 
 
 # ── Polymarket aggregate sentiment ────────────────────────────────────────────
