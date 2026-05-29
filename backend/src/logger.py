@@ -349,6 +349,34 @@ async def write_oracle_verdict(
         await db.commit()
 
 
+async def write_oracle_analysis(
+    outlook: str,
+    risk_level: str,
+    coin_sentiments: dict,
+    pattern_insights: str,
+    suggested_adjustments: dict,
+    reasoning: str,
+    discord_summary: str,
+    fear_greed_at_time: int,
+) -> None:
+    import json as _json
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO oracle_analyses
+               (outlook, risk_level, coin_sentiments, pattern_insights,
+                suggested_adjustments, reasoning, discord_summary, fear_greed_at_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                outlook, risk_level,
+                _json.dumps(coin_sentiments),
+                pattern_insights,
+                _json.dumps(suggested_adjustments),
+                reasoning, discord_summary, fear_greed_at_time,
+            ),
+        )
+        await db.commit()
+
+
 async def write_trade(trade: dict) -> None:
     """Insert or fully replace a trade record.
 

@@ -437,22 +437,19 @@ async def run_daily_analysis() -> dict | None:
     except Exception as exc:
         log.warning("run_daily_analysis_set_outlook_error", error=str(exc))
 
-    # Persist to DB (non-blocking, graceful if function not yet available)
+    # Persist to DB
     try:
         from .logger import write_oracle_analysis as _write_analysis
         asyncio.create_task(_write_analysis(
-            market_outlook=result.get("market_outlook", "NEUTRAL"),
+            outlook=result.get("market_outlook", "NEUTRAL"),
             risk_level=result.get("risk_level", "MEDIUM"),
             coin_sentiments=result.get("coin_sentiments", {}),
             pattern_insights=result.get("pattern_insights", ""),
-            suggested_adjustments=result.get("suggested_adjustments", ""),
+            suggested_adjustments=result.get("suggested_adjustments", {}),
             reasoning=result.get("reasoning", ""),
             discord_summary=result.get("discord_summary", ""),
-            fear_greed_value=fg_value,
-            track_record=track_record,
+            fear_greed_at_time=fg_value,
         ))
-    except (ImportError, AttributeError):
-        pass  # write_oracle_analysis not yet implemented — skip silently
     except Exception as exc:
         log.warning("run_daily_analysis_db_write_error", error=str(exc))
 
