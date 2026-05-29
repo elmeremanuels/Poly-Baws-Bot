@@ -43,7 +43,7 @@ from coin_protection_tab import coin_protection_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader"]
+MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router"]
 
 st.set_page_config(
     page_title="Poly-Baws-Bot",
