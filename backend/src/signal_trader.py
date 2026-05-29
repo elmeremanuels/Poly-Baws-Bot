@@ -290,6 +290,20 @@ async def _check_and_trade(coin: str) -> None:
     side = "YES" if direction == "UP" else "NO"
     buy_token = market["yes_token"] if side == "YES" else market["no_token"]
 
+    # Correlated position check — max N open trades in dezelfde richting
+    max_corr = CONFIG.get("signal_trader", {}).get("max_correlated_positions",
+               CONFIG.get("router", {}).get("max_correlated_positions", 2))
+    from .logger import get_active_trades as _get_active
+    same_dir = sum(
+        1 for t in _get_active().values()
+        if t.get("conviction_at_entry") == direction
+        and t.get("triggered_by", "").startswith("signal")
+    )
+    if same_dir >= max_corr:
+        log.info("signal_trader_skip", coin=coin, reason="correlated_risk",
+                 direction=direction, open_same_dir=same_dir, max=max_corr)
+        return
+
     # Entry prijs check
     best_ask = ws_client.get_best_ask(buy_token)
     max_price = cfg.get("entry_price_max", 0.55)

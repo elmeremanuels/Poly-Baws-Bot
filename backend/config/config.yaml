@@ -190,6 +190,7 @@ signal_trader:
   entry_price_max: 0.58         # nooit meer dan 58ct per share betalen (was 0.55, te restrictief)
   paper_mode: true              # true = gesimuleerde orders (start altijd paper!)
   max_concurrent_positions: 10  # max gelijktijdige open posities (alle coins samen)
+  max_correlated_positions: 2   # max gelijktijdige posities in DEZELFDE richting (anti macro-bet)
   max_daily_loss_eur: 50.00     # dagelijks verlies limiet
   max_trades_per_day: 200       # max trades per dag
   respect_trading_hours: false  # false = negeert skip_utc_hours (conviction-gate is genoeg)
