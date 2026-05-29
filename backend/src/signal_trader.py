@@ -199,6 +199,18 @@ async def _check_and_trade(coin: str) -> None:
         log.debug("signal_trader_skip", coin=coin, reason="no_tradeable_market")
         return
 
+    # OFI is een 60s-rolling signal — alleen geldig voor de naaste toekomst.
+    # Entreer pas als de window binnen signal_entry_window_minutes start, anders
+    # voorspelt een OFI van nu niets over een window die 30+ minuten later opent.
+    entry_window_max = cfg.get("entry_start_minutes_before_window", 7)
+    ws = market.get("window_start")
+    if ws:
+        mins_to_start = (ws - datetime.now(timezone.utc)).total_seconds() / 60
+        if mins_to_start > entry_window_max:
+            log.debug("signal_trader_skip", coin=coin, reason="window_too_far",
+                      mins_to_start=round(mins_to_start, 1), max=entry_window_max)
+            return
+
     # Skip uren check
     if _in_skip_hours(market.get("window_start")):
         log.debug("signal_trader_skip", coin=coin, reason="skip_hour")
