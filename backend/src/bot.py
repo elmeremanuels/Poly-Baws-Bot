@@ -568,6 +568,37 @@ async def _learning_tick_loop() -> None:
         await asyncio.sleep(10)
 
 
+async def _oracle_discord_task() -> None:
+    """Start Oracle Discord bot (no-op if token not configured)."""
+    if not CONFIG.get("oracle", {}).get("discord_bot_token", ""):
+        return
+    try:
+        from .oracle_discord import start_discord_bot
+        await start_discord_bot()
+    except Exception as exc:
+        log.error("oracle_discord_start_error", error=str(exc))
+
+
+async def _oracle_analysis_loop() -> None:
+    """Run Oracle daily analysis at configured UTC hours (default 07:00 + 19:00)."""
+    last_hour = -1
+    while True:
+        try:
+            if CONFIG.get("oracle", {}).get("enabled", False):
+                now = datetime.now(timezone.utc)
+                target_hours = [
+                    int(t.split(":")[0])
+                    for t in CONFIG.get("oracle", {}).get("daily_analysis_times_utc", ["07:00", "19:00"])
+                ]
+                if now.hour in target_hours and now.hour != last_hour:
+                    last_hour = now.hour
+                    from . import oracle as _ora
+                    await _ora.run_daily_analysis()
+        except Exception as exc:
+            log.error("oracle_analysis_loop_error", error=str(exc))
+        await asyncio.sleep(60)
+
+
 async def run_bot() -> None:
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
@@ -601,6 +632,8 @@ async def run_bot() -> None:
         asyncio.create_task(asset_price_feed.run()),
         asyncio.create_task(_signals.run_trade_poll_loop()),
         asyncio.create_task(_signals.funding_rate_loop()),
+        asyncio.create_task(_oracle_discord_task()),
+        asyncio.create_task(_oracle_analysis_loop()),
     ]
 
     # Per-coin straddle loops (self-gate op signal_trader mode)

@@ -441,6 +441,18 @@ async def _execute_entry(
         _wait_resolution(trade_id, buy_token, side, market, fill_price, size, fees)
     )
 
+    # Start Oracle active monitor in background (no-op if oracle disabled)
+    window_end = market.get("window_end")
+    if window_end and CONFIG.get("oracle", {}).get("enabled", False):
+        from . import oracle as _oracle_mod
+        asyncio.create_task(
+            _oracle_mod.watch_trade_oracle(
+                trade_id=trade_id, coin=coin,
+                conviction_score=score, regime=all_sigs.get("regime", "UNKNOWN"),
+                window_end=window_end,
+            )
+        )
+
 
 async def _wait_resolution(
     trade_id: str,

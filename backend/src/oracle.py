@@ -286,6 +286,343 @@ async def get_oracle_verdict(
     return verdict
 
 
+# ── Dagelijkse Claude-analyse (2× per dag) ────────────────────────────────────
+
+async def run_daily_analysis() -> dict | None:
+    """Run 2x daily deep analysis via Claude API. Returns analysis dict or None on failure.
+
+    Collects: last 24h trade stats per coin/regime, oracle track record, Fear&Greed,
+    top headlines, current regime per coin, pattern stats.
+    Sends prompt to Claude (claude-haiku-4-5-20251001 for speed/cost).
+    Saves to oracle_analyses DB table.
+    Sends to Discord via oracle_discord.send_daily_analysis().
+    """
+    import os
+    import httpx
+    from .db_sync import get_analytics_trades
+    from .oracle_feeds import get_fear_greed, get_crypto_news_sentiment
+    from .oracle_patterns import get_pattern_stats
+
+    cfg = CONFIG.get("oracle", {})
+    if not cfg.get("enabled", False):
+        log.info("run_daily_analysis_skipped", reason="oracle_disabled")
+        return None
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        log.warning("run_daily_analysis_skipped", reason="no_anthropic_api_key")
+        return None
+
+    # ── Gather data ───────────────────────────────────────────────────────────
+    trades_24h: list[dict] = []
+    try:
+        trades_24h = get_analytics_trades(days=1)
+    except Exception as exc:
+        log.warning("run_daily_analysis_trades_error", error=str(exc))
+
+    fg_data: dict = {}
+    news_data: dict = {}
+    try:
+        fg_data, news_data = await asyncio.gather(
+            get_fear_greed(),
+            get_crypto_news_sentiment(None),
+            return_exceptions=False,
+        )
+    except Exception as exc:
+        log.warning("run_daily_analysis_feeds_error", error=str(exc))
+
+    pattern_data: list[dict] = []
+    try:
+        pattern_data = get_pattern_stats(days=7)
+    except Exception as exc:
+        log.warning("run_daily_analysis_patterns_error", error=str(exc))
+
+    # ── Summarise trades per coin ─────────────────────────────────────────────
+    coin_stats: dict[str, dict] = {}
+    for t in trades_24h:
+        c = t.get("coin", "UNKNOWN")
+        if c not in coin_stats:
+            coin_stats[c] = {"wins": 0, "losses": 0, "pnl": 0.0, "regime": t.get("regime", "UNKNOWN")}
+        pnl = float(t.get("pnl", 0) or 0)
+        coin_stats[c]["pnl"] = round(coin_stats[c]["pnl"] + pnl, 4)
+        if pnl > 0:
+            coin_stats[c]["wins"] += 1
+        else:
+            coin_stats[c]["losses"] += 1
+
+    fg_value = int((fg_data or {}).get("value", 50))
+    fg_label = str((fg_data or {}).get("label", "Neutral"))
+    track_record = _compute_track_record()
+
+    # Top headlines (max 3, across all coins in news_data)
+    headlines: list[str] = []
+    if isinstance(news_data, dict):
+        for coin_news in news_data.values():
+            hl = (coin_news or {}).get("top_headline")
+            if hl and hl not in headlines:
+                headlines.append(hl)
+            if len(headlines) >= 3:
+                break
+
+    # Pattern summary (top 3 by win_rate desc)
+    sorted_patterns = sorted(
+        [p for p in (pattern_data or []) if isinstance(p, dict)],
+        key=lambda p: float(p.get("win_rate", 0)),
+        reverse=True,
+    )[:3]
+    pattern_summary = [
+        f"{p.get('coin','?')} {p.get('pattern','?')}: {p.get('win_rate',0):.0%} wr ({p.get('count',0)} trades)"
+        for p in sorted_patterns
+    ]
+
+    # ── Build compact prompt (~800 tokens) ───────────────────────────────────
+    coin_lines = "\n".join(
+        f"  {c}: {s['wins']}W/{s['losses']}L  pnl={s['pnl']:+.2f}  regime={s['regime']}"
+        for c, s in coin_stats.items()
+    ) or "  (no trades in last 24h)"
+
+    headline_lines = "\n".join(f"  - {h}" for h in headlines) or "  (none)"
+    pattern_lines = "\n".join(f"  {p}" for p in pattern_summary) or "  (no pattern data)"
+
+    prompt = (
+        "You are a crypto trading analyst. Analyse the following snapshot and respond "
+        "with a single valid JSON object — no markdown, no extra text.\n\n"
+        f"Fear & Greed: {fg_value} ({fg_label})\n"
+        f"Oracle track record (last 50): {track_record:.1%}\n\n"
+        "24h trade results per coin:\n"
+        f"{coin_lines}\n\n"
+        "Top headlines:\n"
+        f"{headline_lines}\n\n"
+        "Pattern stats (top 3 by win rate, last 7d):\n"
+        f"{pattern_lines}\n\n"
+        "Respond with JSON matching exactly this schema:\n"
+        "{\n"
+        '  "market_outlook": "<BULLISH|NEUTRAL|BEARISH>",\n'
+        '  "risk_level": "<LOW|MEDIUM|HIGH>",\n'
+        '  "coin_sentiments": {"<COIN>": "<BULLISH|NEUTRAL|BEARISH>"},\n'
+        '  "pattern_insights": "<1-2 sentences>",\n'
+        '  "suggested_adjustments": "<1-2 sentences>",\n'
+        '  "reasoning": "<2-3 sentences>",\n'
+        '  "discord_summary": "<max 280 chars for Discord>"\n'
+        "}"
+    )
+
+    # ── Call Claude API ────────────────────────────────────────────────────────
+    result: dict | None = None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 512,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            raw_text = resp.json()["content"][0]["text"]
+            result = json.loads(raw_text)
+    except Exception as exc:
+        log.error("run_daily_analysis_claude_error", error=str(exc))
+        return None
+
+    # ── Post-process ──────────────────────────────────────────────────────────
+    try:
+        set_daily_outlook(result.get("market_outlook", "NEUTRAL"))
+    except Exception as exc:
+        log.warning("run_daily_analysis_set_outlook_error", error=str(exc))
+
+    # Persist to DB (non-blocking, graceful if function not yet available)
+    try:
+        from .logger import write_oracle_analysis as _write_analysis
+        asyncio.create_task(_write_analysis(
+            market_outlook=result.get("market_outlook", "NEUTRAL"),
+            risk_level=result.get("risk_level", "MEDIUM"),
+            coin_sentiments=result.get("coin_sentiments", {}),
+            pattern_insights=result.get("pattern_insights", ""),
+            suggested_adjustments=result.get("suggested_adjustments", ""),
+            reasoning=result.get("reasoning", ""),
+            discord_summary=result.get("discord_summary", ""),
+            fear_greed_value=fg_value,
+            track_record=track_record,
+        ))
+    except (ImportError, AttributeError):
+        pass  # write_oracle_analysis not yet implemented — skip silently
+    except Exception as exc:
+        log.warning("run_daily_analysis_db_write_error", error=str(exc))
+
+    # Send to Discord
+    try:
+        from .oracle_discord import send_daily_analysis as _send_daily
+        asyncio.create_task(_send_daily(result))
+    except (ImportError, AttributeError):
+        pass  # oracle_discord not yet wired up
+    except Exception as exc:
+        log.warning("run_daily_analysis_discord_error", error=str(exc))
+
+    log.info(
+        "run_daily_analysis_complete",
+        market_outlook=result.get("market_outlook"),
+        risk_level=result.get("risk_level"),
+        fear_greed=fg_value,
+        track_record=track_record,
+    )
+    return result
+
+
+# ── Active Oracle-bewaking tijdens een live trade ─────────────────────────────
+
+async def watch_trade_oracle(
+    trade_id: str,
+    coin: str,
+    conviction_score: float,
+    regime: str,
+    window_end: "datetime",
+) -> None:
+    """Active Oracle monitoring during a live/paper trade.
+
+    Runs every 30s until window_end. On each tick:
+    - Recomputes temperature
+    - If temp drops > 20 points from entry temp: sends Discord warning
+    - If temp drops below temperature_hard_block: sends urgent Discord alert
+      + optionally kills the trade (if hard_gate enabled)
+    """
+    from datetime import datetime, timezone
+
+    cfg = CONFIG.get("oracle", {})
+    if not cfg.get("enabled", False):
+        log.debug("watch_trade_oracle_skipped", trade_id=trade_id, reason="oracle_disabled")
+        return
+
+    temp_hard = int(cfg.get("temperature_hard_block", 30))
+    hard_gate = cfg.get("hard_gate", False)
+    poll_interval = 30  # seconds
+
+    # ── Baseline temperature at trade entry ───────────────────────────────────
+    try:
+        entry_snapshot = await get_temperature_snapshot(coin, conviction_score, regime)
+        entry_temp: int = int(entry_snapshot.get("temperature", 50))
+    except Exception as exc:
+        log.warning("watch_trade_oracle_entry_error", trade_id=trade_id, error=str(exc))
+        entry_temp = 50
+
+    log.info(
+        "watch_trade_oracle_start",
+        trade_id=trade_id,
+        coin=coin,
+        entry_temp=entry_temp,
+        window_end=str(window_end),
+    )
+
+    drop_alerted = False      # avoid repeat temperature_drop alerts
+    hard_block_alerted = False  # avoid repeat hard_block alerts
+
+    # ── Poll loop ─────────────────────────────────────────────────────────────
+    while True:
+        now = datetime.now(timezone.utc)
+        # Normalise window_end to UTC-aware if naive
+        _window_end = window_end
+        if hasattr(window_end, "tzinfo") and window_end.tzinfo is None:
+            _window_end = window_end.replace(tzinfo=timezone.utc)
+
+        if now >= _window_end:
+            log.debug("watch_trade_oracle_window_expired", trade_id=trade_id)
+            break
+
+        await asyncio.sleep(poll_interval)
+
+        # Re-check after sleep in case window expired during wait
+        now = datetime.now(timezone.utc)
+        if now >= _window_end:
+            break
+
+        try:
+            snapshot = await get_temperature_snapshot(coin, conviction_score, regime)
+            current_temp: int = int(snapshot.get("temperature", entry_temp))
+        except Exception as exc:
+            log.warning("watch_trade_oracle_tick_error", trade_id=trade_id, error=str(exc))
+            continue
+
+        temp_drop = entry_temp - current_temp
+        log.debug(
+            "watch_trade_oracle_tick",
+            trade_id=trade_id,
+            coin=coin,
+            entry_temp=entry_temp,
+            current_temp=current_temp,
+            temp_drop=temp_drop,
+        )
+
+        # ── Temperature drop >= 20 warning ───────────────────────────────────
+        if temp_drop >= 20 and not drop_alerted:
+            drop_alerted = True
+            log.warning(
+                "watch_trade_oracle_temp_drop",
+                trade_id=trade_id,
+                coin=coin,
+                entry_temp=entry_temp,
+                current_temp=current_temp,
+                temp_drop=temp_drop,
+            )
+            try:
+                from .oracle_discord import send_mid_trade_alert as _alert
+                asyncio.create_task(_alert(
+                    trade_id=trade_id,
+                    coin=coin,
+                    alert_type="temperature_drop",
+                    entry_temp=entry_temp,
+                    current_temp=current_temp,
+                    temp_drop=temp_drop,
+                    snapshot=snapshot,
+                ))
+            except (ImportError, AttributeError):
+                pass
+            except Exception as exc:
+                log.warning("watch_trade_oracle_discord_drop_error", trade_id=trade_id, error=str(exc))
+
+        # ── Hard block threshold breach ───────────────────────────────────────
+        if current_temp < temp_hard and not hard_block_alerted:
+            hard_block_alerted = True
+            log.warning(
+                "watch_trade_oracle_hard_block",
+                trade_id=trade_id,
+                coin=coin,
+                current_temp=current_temp,
+                temp_hard=temp_hard,
+                hard_gate=hard_gate,
+            )
+            try:
+                from .oracle_discord import send_mid_trade_alert as _alert
+                asyncio.create_task(_alert(
+                    trade_id=trade_id,
+                    coin=coin,
+                    alert_type="hard_block_breach",
+                    entry_temp=entry_temp,
+                    current_temp=current_temp,
+                    temp_drop=temp_drop,
+                    snapshot=snapshot,
+                    hard_gate=hard_gate,
+                    # Discord message will include a manual close prompt — bot does NOT
+                    # auto-abort the trade; operator decision required via Discord.
+                ))
+            except (ImportError, AttributeError):
+                pass
+            except Exception as exc:
+                log.warning("watch_trade_oracle_discord_hard_block_error", trade_id=trade_id, error=str(exc))
+
+    log.info(
+        "watch_trade_oracle_done",
+        trade_id=trade_id,
+        coin=coin,
+        entry_temp=entry_temp,
+    )
+
+
 # ── Snapshot voor dashboard ───────────────────────────────────────────────────
 
 async def get_temperature_snapshot(coin: str, conviction_score: float, regime: str) -> dict:

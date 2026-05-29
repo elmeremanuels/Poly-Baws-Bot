@@ -44,6 +44,29 @@ async def start_monitoring(trade_id: str, on_trigger_callback) -> None:
     _monitoring_tasks[trade_id] = task
     log.info("monitor_started", trade_id=trade_id)
 
+    # Oracle active monitor — watches temperature during straddle trade
+    from .config_loader import CONFIG as _CFG
+    if _CFG.get("oracle", {}).get("enabled", False):
+        from .state import get_active_trades as _gat
+        trade = _gat().get(trade_id, {})
+        window_end = trade.get("window_end_ts")
+        if window_end:
+            from datetime import datetime, timezone
+            try:
+                we = datetime.fromisoformat(str(window_end))
+                if we.tzinfo is None:
+                    we = we.replace(tzinfo=timezone.utc)
+                from . import oracle as _oracle_mod
+                asyncio.create_task(_oracle_mod.watch_trade_oracle(
+                    trade_id=trade_id,
+                    coin=trade.get("coin", "UNKNOWN"),
+                    conviction_score=float(trade.get("conviction_score_at_entry") or 0.5),
+                    regime=str(trade.get("regime") or "UNKNOWN"),
+                    window_end=we,
+                ))
+            except Exception:
+                pass
+
 
 async def stop_monitoring(trade_id: str) -> None:
     task = _monitoring_tasks.pop(trade_id, None)

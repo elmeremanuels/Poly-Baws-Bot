@@ -277,21 +277,23 @@ regime_profiles:
 
 oracle:
   enabled: true
-  hard_gate: false
-  per_coin_temp_paper_threshold: 35  # coins with temperature below this are forced to paper
-  discord_bot_token: ""
-  discord_channel_id: ""
-  discord_confirm_channel_id: ""
-  discord_confirm_enabled: false
-  discord_confirm_timeout_secs: 90
+  hard_gate: false                   # zet op true na ~50 verdicts met track record >= 0.55
+  per_coin_temp_paper_threshold: 35
+  # Discord — vul in via .env of hier direct
+  discord_bot_token: ""              # DISCORD_BOT_TOKEN in .env heeft voorrang
+  discord_channel_id: ""             # kanaal voor trade alerts + dagelijkse analyse
+  discord_confirm_channel_id: ""     # kanaal voor interactieve ja/nee vragen
+  discord_confirm_enabled: true      # soft-blocks vragen via Discord-knop
+  discord_confirm_timeout_secs: 90   # seconden wachten op antwoord (dan auto-approve)
   track_record_min_trades: 10
-  temperature_hard_block: 30
-  temperature_soft_block: 50
+  temperature_hard_block: 30         # temp < 30 → hard reject (alleen als hard_gate: true)
+  temperature_soft_block: 50         # temp < 50 → Discord confirm
   extreme_fear_threshold: 15
   extreme_greed_threshold: 92
   daily_analysis_times_utc: ["07:00", "19:00"]
   paper_continues_on_kill: true
+  mid_trade_watch_enabled: true      # Oracle bewaakt actieve trades (temp-drop alerts)
   feeds:
-    cryptopanic_token: ""
+    cryptopanic_token: ""            # CRYPTOPANIC_TOKEN in .env heeft voorrang
     fear_greed_enabled: true
     polymarket_aggregate: true
