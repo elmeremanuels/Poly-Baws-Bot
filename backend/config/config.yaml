@@ -185,7 +185,7 @@ signal_trader:
   # Break-even bij ~52ct inkoop: 52.0% accuracy vereist.
   # DATA handoff 27-05: 73.8% signaal accuracy → +€356 netto op 80 trades.
   conviction_threshold: 0.50    # DATA: score 0.40-0.55 → -€0.25 avg_pnl (direction right, exits hurt); 0.55-0.70 → +€0.24
-  entry_start_minutes_before_window: 7  # OFI is 60s-signal — alleen relevant binnen 7 min van window
+  entry_min_window_mins_remaining: 2.0  # minimaal N minuten resterend in window om in te stappen
   trade_size_eur: 10.00         # inleg per trade in EUR
   entry_price_max: 0.58         # nooit meer dan 58ct per share betalen (was 0.55, te restrictief)
   paper_mode: true              # true = gesimuleerde orders (start altijd paper!)

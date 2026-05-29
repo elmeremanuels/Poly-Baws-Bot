@@ -199,16 +199,24 @@ async def _check_and_trade(coin: str) -> None:
         log.debug("signal_trader_skip", coin=coin, reason="no_tradeable_market")
         return
 
-    # OFI is een 60s-rolling signal — alleen geldig voor de naaste toekomst.
-    # Entreer pas als de window binnen signal_entry_window_minutes start, anders
-    # voorspelt een OFI van nu niets over een window die 30+ minuten later opent.
-    entry_window_max = cfg.get("entry_start_minutes_before_window", 7)
+    # Alleen entreren binnen een LOPENDE window: OFI gemeten tijdens de window
+    # voorspelt intra-window richting direct. Pre-window OFI mist de reset van
+    # de baseline bij window-open en was empirisch niet predictief.
+    now_ts = datetime.now(timezone.utc)
     ws = market.get("window_start")
+    we = market.get("window_end")
     if ws:
-        mins_to_start = (ws - datetime.now(timezone.utc)).total_seconds() / 60
-        if mins_to_start > entry_window_max:
-            log.debug("signal_trader_skip", coin=coin, reason="window_too_far",
-                      mins_to_start=round(mins_to_start, 1), max=entry_window_max)
+        mins_to_start = (ws - now_ts).total_seconds() / 60
+        if mins_to_start > 0:
+            log.debug("signal_trader_skip", coin=coin, reason="window_not_started",
+                      mins_to_start=round(mins_to_start, 2))
+            return
+    if we:
+        mins_to_end = (we - now_ts).total_seconds() / 60
+        min_remaining = cfg.get("entry_min_window_mins_remaining", 2.0)
+        if mins_to_end < min_remaining:
+            log.debug("signal_trader_skip", coin=coin, reason="window_too_late",
+                      mins_to_end=round(mins_to_end, 2), min_required=min_remaining)
             return
 
     # Skip uren check
