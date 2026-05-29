@@ -146,8 +146,9 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
       Liquidation proxy > 2.0 → amplify direction signal (+0.1 bonus)
       price_position < 0.20 → price at 30-min range bottom → mean-revert UP (+0.15)
       price_position > 0.80 → price at 30-min range top → mean-revert DOWN (+0.15)
-      TRENDING/BREAKOUT regime → amplify score ×1.20/×1.15
-      CHOPPY regime → dampen score ×0.80
+      RANGING regime → amplify score ×1.15 (best P&L regime empirically)
+      TRENDING/BREAKOUT → dampen score ×0.85/×0.90 (high win% but peg_cross losses dominate)
+      CHOPPY regime → dampen score ×0.75
     """
     ofi = get_order_flow_imbalance(coin)
     fr = get_funding_rate(coin)
@@ -189,13 +190,14 @@ def get_conviction(coin: str) -> tuple[str | None, float]:
             elif pp > 0.80:
                 bear_score += 0.15 * (pp - 0.80) / 0.20
 
-    # Regime multiplier — amplify strong trends, dampen choppy noise
+    # Regime multiplier — backtest shows TRENDING has worst P&L despite highest win rate
+    # (fast peg_cross losses dominate in trending markets). RANGING is the best regime.
     current_regime = _regime.get_current_regime(coin)
     multiplier = {
-        "TRENDING": 1.20,
-        "BREAKOUT": 1.15,
-        "CHOPPY": 0.80,
-        "RANGING": 1.0,
+        "TRENDING": 0.85,   # was 1.20 — amplified wrong-side peg_cross losses
+        "BREAKOUT": 0.90,   # was 1.15 — same issue as TRENDING
+        "CHOPPY": 0.75,     # was 0.80 — correct direction, minor tightening
+        "RANGING": 1.15,    # was 1.00 — best P&L regime, reward it
         "NORMAL": 1.0,
     }.get(current_regime, 1.0)
     bull_score *= multiplier
