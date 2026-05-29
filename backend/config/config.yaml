@@ -32,13 +32,15 @@ exit:
   # Early loser sell: market-sell the declining side during monitoring (before trigger fires).
   # Data shows bid ~0.316 at 0.45 mid vs ~0.165 at trigger — nearly double the exit price.
   # Override per regime in regime_profiles (use null to disable for a specific regime).
-  # DATA 1287 trades: early_loser_was_winner = 13 trades, -€27.23 (avg -€2.09).
-  # Verlaging drempel (0.47→0.42): verkoop loser alleen als hij duidelijker verliest.
-  # Verhoging winner_min (0.57→0.63): eis sterkere bevestiging van de winnende kant.
-  early_loser_threshold: 0.42       # verlaagd 0.47→0.42: wacht op duidelijker verlies voor verkoop
-  early_loser_winner_min: 0.63      # verhoogd 0.57→0.63: winnende kant moet overtuigend boven staan
-  early_loser_rebuy_threshold: 0.55 # rebuy if sold side recovers above this (null = disabled)
-  early_loser_cooldown_secs: 90     # wait at least this long after entry fill before selling early
+  # DATA: early_loser_was_winner = 28 trades, -€67.78 (avg -€2.42) — main loss driver.
+  # Root cause: winner_min 0.63 is too close to trigger (0.65-0.85), reversal easy.
+  # Fix: raise winner_min→0.72, lower sell threshold→0.36, add 3 new safety gates.
+  early_loser_threshold: 0.36         # was 0.42 — sell only when loser is at 36% (not 42%)
+  early_loser_winner_min: 0.72        # was 0.63 — winner must be genuinely leading (72%)
+  early_loser_rebuy_threshold: 0.55   # rebuy if sold side recovers above this (null = disabled)
+  early_loser_cooldown_secs: 90       # wait at least this long after entry fill before selling early
+  early_loser_min_secs_below: 45      # NEW: loser must be below threshold for 45s straight (no spikes)
+  early_loser_velocity_gate: true     # NEW: only sell if loser price still falling (not stabilizing)
   # Loss-control knobs — cap the magnitude of peg_cross / force-exit losses.
   # DATA 27-05: winner_stop_loss veroorzaakte -€40.95 over 35 trades (25 correcte richtingen afgekapt).
   # Uitgeschakeld: peg_cross en force_exit handelen de exit — stop snijdt te vroeg in winnende trades.
@@ -235,8 +237,8 @@ regime_profiles:
     initial_offset: 0.04
     ratchet_buffer: 0.02
     trigger_threshold_delta: 0.04   # raise bar — reduce false triggers
-    early_loser_threshold: 0.44     # more conservative — wait for more confirmation
-    early_loser_rebuy_threshold: 0.54  # rebuy if wrong side recovers (choppy = reversals)
+    early_loser_threshold: null     # disabled — reversals define choppy; early sell = wrong side too often
+    early_loser_rebuy_threshold: null
   RANGING:
     cross_threshold: 0.65
     initial_offset: 0.05
@@ -258,7 +260,7 @@ regime_profiles:
     initial_offset: 0.07
     ratchet_buffer: 0.03
     trigger_threshold_delta: 0.00
-    early_loser_threshold: 0.45
+    early_loser_threshold: 0.38    # was 0.45 — slightly more conservative than global default
     early_loser_rebuy_threshold: 0.55
     winner_velocity_stop: null      # disabled — 7/7 velocity-stop exits were direction-correct, cut winners for ~€1.7
 

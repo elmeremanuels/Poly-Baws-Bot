@@ -13,6 +13,9 @@ _early_sell_in_progress: set[str] = set()   # trade_ids with an early sell task 
 _rebuy_in_progress: set[str] = set()        # trade_ids with a rebuy task running
 _save_it_state: dict[str, dict] = {}        # trade_id -> {peak_yes, peak_no, executed}
 _save_it_in_progress: set[str] = set()      # trade_ids with a save_it task running
+# Duration tracking for early loser: loop.time() when loser first fell below threshold.
+# Reset when price recovers. Used to prevent selling on temporary dips.
+_loser_below_ts: dict[str, float] = {}      # trade_id → loop.time()
 
 
 def _get_early_thresholds(regime: str) -> tuple[float | None, float | None]:
@@ -50,6 +53,8 @@ async def stop_monitoring(trade_id: str) -> None:
             await task
         except asyncio.CancelledError:
             pass
+    _loser_below_ts.pop(trade_id, None)
+    _save_it_state.pop(trade_id, None)
     log.info("monitor_stopped", trade_id=trade_id)
 
 
@@ -307,6 +312,52 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
                         presume_loser = "YES"
                     elif no_mid < early_thr and yes_mid >= winner_min:
                         presume_loser = "NO"
+
+                    # Duration tracking: record when loser first fell below threshold.
+                    # Reset immediately if it recovers above threshold.
+                    if presume_loser:
+                        if trade_id not in _loser_below_ts:
+                            _loser_below_ts[trade_id] = now_ts
+                    else:
+                        _loser_below_ts.pop(trade_id, None)
+
+                    # Gate 1 — Duration: loser must be below threshold continuously for
+                    # early_loser_min_secs_below seconds before we sell. Eliminates
+                    # temporary dips that recover within a few seconds.
+                    min_secs_below = float(exit_cfg.get("early_loser_min_secs_below", 0))
+                    if presume_loser and min_secs_below > 0:
+                        secs_below = now_ts - _loser_below_ts.get(trade_id, now_ts)
+                        if secs_below < min_secs_below:
+                            log.debug("early_loser_duration_gate",
+                                      trade_id=trade_id, side=presume_loser,
+                                      secs_below=round(secs_below, 1), required=min_secs_below)
+                            presume_loser = None
+
+                    # Gate 2 — Velocity: only sell if loser price is still falling.
+                    # If price has stabilized or started recovering, skip — reversal risk.
+                    if presume_loser and exit_cfg.get("early_loser_velocity_gate", False):
+                        from . import volatility as _vol_el
+                        loser_tok_tmp = yes_token if presume_loser == "YES" else no_token
+                        loser_vel = _vol_el.get_price_velocity(loser_tok_tmp)
+                        if loser_vel is not None and loser_vel > 0:
+                            log.info("early_loser_velocity_gate_blocked",
+                                     trade_id=trade_id, side=presume_loser,
+                                     velocity=round(loser_vel, 4))
+                            presume_loser = None
+
+                    # Gate 3 — Conviction: if our Binance OFI signals say this side
+                    # should WIN, do not sell it early. The market and signals disagree;
+                    # trust signals over a temporary price dip on the CLOB.
+                    if presume_loser:
+                        from . import signals as _sig_el
+                        conv_dir, _ = _sig_el.get_conviction(coin)
+                        if (conv_dir == "UP" and presume_loser == "YES") or \
+                                (conv_dir == "DOWN" and presume_loser == "NO"):
+                            log.info("early_loser_conviction_gate",
+                                     trade_id=trade_id, side=presume_loser,
+                                     conviction=conv_dir)
+                            presume_loser = None
+
                     if presume_loser:
                         _early_sell_in_progress.add(trade_id)
                         base_sz = float(trade.get("entry_size") or 2.0)
