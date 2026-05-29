@@ -661,11 +661,35 @@ def _trade_history_inner(df: pd.DataFrame) -> None:
     ]
     available = [c for c in display_cols if c in df.columns]
     show = df[available].copy().sort_values("created_at", ascending=False).head(200)
+
+    # Resultaat kolom — ✅/❌/⚠️ — gebaseerd op winner_exit_reason + status
+    def _fmt_result(row) -> str:
+        reason = row.get("winner_exit_reason", "") or ""
+        status = row.get("status", "") or ""
+        if reason == "resolution_won":
+            return "✅ Won"
+        if reason == "resolution_lost":
+            return "❌ Lost"
+        if "abort" in reason.lower() or status == "aborted":
+            return "⚠️ Afgebr."
+        if status in ("closed", "resolved"):
+            return "⚠️ Afgebr."
+        return "⏳ Open"
+
+    if "winner_exit_reason" in show.columns or "status" in show.columns:
+        show.insert(2, "Resultaat", show.apply(lambda r: _fmt_result(r.to_dict()), axis=1))
+
+    if "net_pnl" in show.columns:
+        show["net_pnl"] = show["net_pnl"].apply(
+            lambda x: f"€{x:+.2f}" if pd.notna(x) else "—"
+        )
+
     if "created_at" in show.columns:
         show["created_at"] = (
             pd.to_datetime(show["created_at"], format="mixed", utc=True)
             .dt.strftime("%m-%d %H:%M")
         )
+
     st.dataframe(show, use_container_width=True, hide_index=True)
     if len(df) > 200:
         st.caption(f"Toont 200 van de {len(df)} trades. Download via de CSV-knop voor het volledige overzicht.")
