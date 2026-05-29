@@ -41,6 +41,21 @@ def get_recent_trades(limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_router_trades(hours: int = 24, limit: int = 60) -> list[dict]:
+    """Trades van de afgelopen N uur gerouteerd via auto_router (open + recent gesloten)."""
+    if not _db_path.exists():
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM trades
+               WHERE (router_bucket IS NOT NULL OR mode = 'auto_router')
+                 AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT ?""",
+            (f"-{hours} hours", limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_open_trades() -> list[dict]:
     if not _db_path.exists():
         return []

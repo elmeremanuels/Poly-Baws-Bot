@@ -244,6 +244,9 @@ async def init_db() -> None:
             ("take_it_executed", "INTEGER DEFAULT 0"),
             ("save_it_executed", "INTEGER DEFAULT 0"),
             ("save_it_side", "TEXT"),
+            # Auto Router routing decision
+            ("router_bucket", "TEXT"),
+            ("router_conviction_score", "REAL"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

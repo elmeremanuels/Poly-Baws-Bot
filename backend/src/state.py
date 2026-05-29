@@ -129,6 +129,9 @@ def create_trade_state(
         "liq_proxy_at_trigger": None,
         "conviction_at_trigger": None,
         "conviction_score_at_trigger": None,
+        # Auto Router routing decision
+        "router_bucket": market.get("_router_bucket"),
+        "router_conviction_score": market.get("_router_conviction_score"),
         # Early loser sell (monitoring phase)
         "early_loser_side": None,       # "YES"/"NO" once early sell fills
         "early_loser_price": None,      # fill price of the early sell

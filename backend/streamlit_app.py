@@ -33,6 +33,7 @@ from src.db_sync import (
     get_scanner_state,
     get_state,
     get_today_trade_count,
+    get_router_trades,
 )
 from src.commands import write_command, delete_hybrid_pending
 from src.db_sync import delete_signal_trades
@@ -1459,6 +1460,92 @@ def _auto_router_panel() -> None:
             st.success("Instellingen opgeslagen en doorgevoerd.")
             st.rerun()
 
+    st.divider()
+    _router_trade_cards()
+
+
+_BUCKET_META = {
+    "signal":        {"emoji": "🎯", "label": "Signal",        "color": "#10b981"},
+    "straddle_asym": {"emoji": "↕️",  "label": "Straddle asym", "color": "#3b82f6"},
+    "straddle_sym":  {"emoji": "⚖️",  "label": "Straddle sym",  "color": "#8b5cf6"},
+}
+
+
+def _router_trade_cards() -> None:
+    """Kaartjes met alle auto_router trades van de afgelopen 24 uur."""
+    st.markdown("#### Trades (afgelopen 24u)")
+    trades = get_router_trades(hours=24, limit=60)
+    if not trades:
+        st.caption("Nog geen trades gerouteerd in de afgelopen 24 uur.")
+        return
+
+    open_statuses = {"pending", "waiting", "entry_placed", "monitoring", "signal_holding"}
+
+    for t in trades:
+        trade_id   = t.get("trade_id", "")
+        coin       = t.get("coin", "")
+        bucket     = t.get("router_bucket") or t.get("triggered_by") or "?"
+        conviction = t.get("router_conviction_score")
+        regime     = t.get("regime_at_entry") or "—"
+        status     = t.get("status", "")
+        net_pnl    = t.get("net_pnl")
+        winner_side = t.get("winner_side")
+        exit_reason = t.get("winner_exit_reason") or ""
+        created_at  = t.get("created_at", "")[:16]
+
+        meta = _BUCKET_META.get(bucket, {"emoji": "🔀", "label": bucket, "color": "#6b7280"})
+        is_open = status in open_statuses
+
+        # P&L badge
+        if net_pnl is not None:
+            pnl_str   = f"{'+' if net_pnl >= 0 else ''}€{net_pnl:.2f}"
+            pnl_color = "#10b981" if net_pnl >= 0 else "#ef4444"
+        else:
+            pnl_str   = "open" if is_open else "—"
+            pnl_color = "#f59e0b" if is_open else "#6b7280"
+
+        with st.container(border=True):
+            col_icon, col_main, col_pnl, col_btn = st.columns([0.5, 4, 1.5, 0.8])
+
+            with col_icon:
+                st.markdown(
+                    f'<div style="font-size:1.6rem;line-height:1;padding-top:4px">'
+                    f'{meta["emoji"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_main:
+                st.markdown(
+                    f'<b style="font-size:1rem">{COIN_EMOJI.get(coin,"")} {coin}</b>'
+                    f' &nbsp;<span style="background:{meta["color"]}22;color:{meta["color"]};'
+                    f'border-radius:4px;padding:1px 6px;font-size:0.75rem">'
+                    f'{meta["label"]}</span>',
+                    unsafe_allow_html=True,
+                )
+                detail_parts = []
+                if conviction is not None:
+                    detail_parts.append(f"conviction {conviction:.2f}")
+                detail_parts.append(f"regime {regime}")
+                if winner_side:
+                    detail_parts.append(f"winner {winner_side}")
+                if exit_reason:
+                    detail_parts.append(exit_reason.replace("_", " "))
+                st.caption(f"{created_at}  ·  {status}  ·  " + "  ·  ".join(detail_parts))
+
+            with col_pnl:
+                st.markdown(
+                    f'<div style="color:{pnl_color};font-weight:bold;'
+                    f'font-size:1rem;text-align:right;padding-top:6px">'
+                    f'{pnl_str}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with col_btn:
+                if st.button("ℹ️", key=f"ar_card_{trade_id}", help="Details bekijken"):
+                    st.session_state["_detail_trade_id"] = trade_id
+                    st.session_state["_detail_allow_closed"] = True
+                    st.rerun(scope="app")
+
 
 @st.fragment(run_every=15)
 def _signal_trader_panel() -> None:
@@ -1982,9 +2069,13 @@ if not _tabs_ready:
 # Trade detail dialog — rendered outside all fragments/tabs so it is not
 # affected by the dashboard fragment's 5-second auto-refresh.
 _detail_id = st.session_state.pop("_detail_trade_id", None)
+_detail_allow_closed = st.session_state.pop("_detail_allow_closed", False)
 if _detail_id:
     _all_open = get_open_trades()
     _detail_trade = next((t for t in _all_open if t.get("trade_id") == _detail_id), None)
+    if _detail_trade is None and _detail_allow_closed:
+        _router = get_router_trades(hours=48, limit=200)
+        _detail_trade = next((t for t in _router if t.get("trade_id") == _detail_id), None)
     if _detail_trade:
         _trade_detail_dialog(_detail_trade)
 
