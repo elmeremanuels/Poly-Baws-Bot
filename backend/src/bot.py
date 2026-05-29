@@ -200,6 +200,22 @@ async def _process_coin_window(coin: str, market: dict, force_paper: bool = Fals
             remove_active_trade(trade_id)
             return
 
+    # auto_router final re-validation at T-2min: abort if signals changed
+    if get_mode() == "auto_router" and market.get("window_start"):
+        now = datetime.now(timezone.utc)
+        mins_to_start = (market["window_start"] - now).total_seconds() / 60
+        if mins_to_start <= 2.5:
+            from .trade_router import route_trade
+            final_decision = route_trade(coin, market)
+            if final_decision.bucket == "skip":
+                log.info(
+                    "trade_aborted_final_check",
+                    coin=coin, trade_id=trade_id, reason=final_decision.skip_reason,
+                )
+                from .state import remove_active_trade
+                remove_active_trade(trade_id)
+                return
+
     await write_event(trade_id, "entry_initiated", coin, {"mode": mode})
     success = await execute_entry(trade_id)
     if not success:
@@ -230,6 +246,16 @@ async def _coin_loop(coin: str) -> None:
                     log.error("bg_paper_loop_error", coin=coin, error=str(e))
             await asyncio.sleep(10)
             continue
+
+        if get_mode() == "auto_router":
+            if not risk.is_killed():
+                try:
+                    await _auto_router_coin_tick(coin)
+                except Exception as e:
+                    log.error("auto_router_loop_error", coin=coin, error=str(e))
+            await asyncio.sleep(10)
+            continue
+
         if risk.is_killed():
             await asyncio.sleep(5)
             continue
@@ -240,6 +266,45 @@ async def _coin_loop(coin: str) -> None:
         except Exception as e:
             log.error("coin_loop_error", coin=coin, error=str(e))
         await asyncio.sleep(10)
+
+
+async def _auto_router_coin_tick(coin: str) -> None:
+    """One scan tick for auto_router mode: route → execute in the matching bucket."""
+    from .trade_router import route_trade
+
+    market = scanner.get_tradeable_market(coin)
+    if not market:
+        return
+
+    window_ts = market["window_start"].isoformat() if market.get("window_start") else ""
+    if has_traded_window(coin, window_ts):
+        return
+
+    decision = route_trade(coin, market)
+    log.info(
+        "route_decision",
+        coin=coin,
+        bucket=decision.bucket,
+        conviction=decision.conviction_score,
+        regime=decision.regime,
+        skip_reason=decision.skip_reason or None,
+    )
+
+    if decision.bucket == "skip":
+        return
+
+    if decision.bucket == "signal":
+        # Delegate to signal_trader's own check — it re-validates internally
+        from . import signal_trader as _st
+        await _st._check_and_trade(coin)
+        return
+
+    # straddle_asym or straddle_sym — route through standard process_coin_window
+    # Stamp the routing decision so _process_coin_window can use the sized stakes
+    market["_router_yes_size"] = decision.yes_size
+    market["_router_no_size"] = decision.no_size
+    market["_router_bucket"] = decision.bucket
+    await _process_coin_window(coin, market)
 
 
 async def _heartbeat_loop() -> None:
@@ -333,6 +398,11 @@ async def _portfolio_sync_loop() -> None:
             await save_dashboard_state("portfolio_positions", _json.dumps(enriched))
             await save_dashboard_state("portfolio_value", str(round(portfolio_value, 4)))
             await save_dashboard_state("portfolio_updated_at", datetime.now(timezone.utc).isoformat())
+
+            # Portfolio protection: three-layer safety check
+            if balance is not None:
+                from . import risk as _risk
+                await _risk.check_portfolio_protection(balance)
         except Exception as e:
             log.warning("portfolio_sync_failed", error=str(e))
         await asyncio.sleep(30)

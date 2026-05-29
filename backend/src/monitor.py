@@ -11,6 +11,8 @@ _DEFAULT_TRIGGER_THRESHOLD = CONFIG["trading"]["trigger_threshold"]
 _monitoring_tasks: dict[str, asyncio.Task] = {}
 _early_sell_in_progress: set[str] = set()   # trade_ids with an early sell task running
 _rebuy_in_progress: set[str] = set()        # trade_ids with a rebuy task running
+_save_it_state: dict[str, dict] = {}        # trade_id -> {peak_yes, peak_no, executed}
+_save_it_in_progress: set[str] = set()      # trade_ids with a save_it task running
 
 
 def _get_early_thresholds(regime: str) -> tuple[float | None, float | None]:
@@ -122,6 +124,59 @@ async def _rebuy_early_sold_task(
         log.error("early_loser_rebuy_error", trade_id=trade_id, error=str(exc))
     finally:
         _rebuy_in_progress.discard(trade_id)
+
+
+async def _save_it_task(
+    trade_id: str, side_to_buy: str, token_id: str, save_shares: float,
+    is_paper: bool, coin: str,
+) -> None:
+    """Buy the reversing side to hedge a potential reversal before trigger fires."""
+    try:
+        if is_paper:
+            result = await paper_trader.simulate_market_buy(token_id, save_shares)
+        else:
+            resp = await orders.place_market_order(token_id, "BUY", save_shares)
+            if resp and resp.get("order_id"):
+                f = await _poll_live_fill_for_save_it(resp["order_id"], fallback=0.50, size=save_shares)
+                result = {"filled": True, "fill_price": f["fill_price"], "fees": f["fees"]}
+            else:
+                result = None
+
+        if result and result.get("filled"):
+            fill_price = result.get("fill_price") or 0.50
+            update_trade_field(trade_id, "save_it_executed", 1)
+            update_trade_field(trade_id, "save_it_side", side_to_buy)
+            log.info("save_it_executed", trade_id=trade_id, coin=coin,
+                     side=side_to_buy, fill_price=round(fill_price, 4),
+                     save_shares=save_shares, paper=is_paper)
+            await write_event(trade_id, "save_it_executed", coin, {
+                "side": side_to_buy, "fill_price": round(fill_price, 4),
+                "save_shares": save_shares,
+            })
+        else:
+            log.warning("save_it_fill_failed", trade_id=trade_id, side=side_to_buy)
+    except Exception as e:
+        log.error("save_it_task_error", trade_id=trade_id, error=str(e))
+    finally:
+        _save_it_in_progress.discard(trade_id)
+
+
+async def _poll_live_fill_for_save_it(order_id: str, fallback: float, size: float) -> dict:
+    """Wait briefly for a live market buy fill (for save_it orders)."""
+    for _ in range(8):
+        await asyncio.sleep(1.0)
+        try:
+            order = await orders.get_order(order_id)
+            if order:
+                status = order.get("status")
+                if status in ("MATCHED", "FILLED"):
+                    avg = float(order.get("average_price") or fallback)
+                    return {"fill_price": avg, "fees": avg * size * 0.018}
+                if status in ("CANCELED", "UNMATCHED"):
+                    break
+        except Exception:
+            pass
+    return {"fill_price": fallback, "fees": fallback * size * 0.018}
 
 
 async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
@@ -290,6 +345,65 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
                     log.info("early_loser_rebuy_triggered",
                              trade_id=trade_id, coin=coin, side=early_sold,
                              sold_mid=round(sold_mid, 4), rebuy_thr=rebuy_thr)
+
+        # ── Save it: hedge reversal by buying the new leading side ─────────────
+        if (trade
+                and trade.get("save_it_executed") != 1
+                and trade_id not in _save_it_in_progress
+                and CONFIG.get("router", {}).get("save_it_enabled", True)):
+            _si = _save_it_state.setdefault(trade_id, {"peak_yes": 0.0, "peak_no": 0.0})
+            y_mid = ws_client.get_mid_price(yes_token) if yes_token else None
+            n_mid = ws_client.get_mid_price(no_token) if no_token else None
+            if y_mid is not None and n_mid is not None:
+                if y_mid > _si["peak_yes"]:
+                    _si["peak_yes"] = y_mid
+                if n_mid > _si["peak_no"]:
+                    _si["peak_no"] = n_mid
+                # Time remaining check
+                if window_end_dt:
+                    secs_left = (window_end_dt - datetime.now(timezone.utc)).total_seconds()
+                else:
+                    secs_left = 999.0
+                # YES reversed: YES dropped ≥0.20 from peak, NO is now leading
+                if (secs_left >= 120
+                        and _si["peak_yes"] - y_mid >= 0.20
+                        and n_mid >= 0.52):
+                    vel_no = None
+                    from . import volatility as _vol
+                    if no_token:
+                        vel_no = _vol.get_price_velocity(no_token) or 0.0
+                    if vel_no is None or vel_no >= 0:
+                        save_eur = float(CONFIG.get("router", {}).get("save_it_size_eur", 3.0))
+                        save_shares = round(save_eur / max(n_mid, 0.01), 2)
+                        trade_mode = trade.get("mode", "paper_hybrid")
+                        is_paper = trade_mode.startswith("paper")
+                        _save_it_in_progress.add(trade_id)
+                        log.info("save_it_triggered", trade_id=trade_id, coin=coin,
+                                 side="NO", y_mid=round(y_mid, 4), n_mid=round(n_mid, 4),
+                                 peak_yes=round(_si["peak_yes"], 4), secs_left=round(secs_left, 1))
+                        asyncio.create_task(_save_it_task(
+                            trade_id, "NO", no_token, save_shares, is_paper, coin
+                        ))
+                # NO reversed: NO dropped ≥0.20 from peak, YES is now leading
+                elif (secs_left >= 120
+                        and _si["peak_no"] - n_mid >= 0.20
+                        and y_mid >= 0.52):
+                    vel_yes = None
+                    from . import volatility as _vol
+                    if yes_token:
+                        vel_yes = _vol.get_price_velocity(yes_token) or 0.0
+                    if vel_yes is None or vel_yes >= 0:
+                        save_eur = float(CONFIG.get("router", {}).get("save_it_size_eur", 3.0))
+                        save_shares = round(save_eur / max(y_mid, 0.01), 2)
+                        trade_mode = trade.get("mode", "paper_hybrid")
+                        is_paper = trade_mode.startswith("paper")
+                        _save_it_in_progress.add(trade_id)
+                        log.info("save_it_triggered", trade_id=trade_id, coin=coin,
+                                 side="YES", y_mid=round(y_mid, 4), n_mid=round(n_mid, 4),
+                                 peak_no=round(_si["peak_no"], 4), secs_left=round(secs_left, 1))
+                        asyncio.create_task(_save_it_task(
+                            trade_id, "YES", yes_token, save_shares, is_paper, coin
+                        ))
 
         # Periodic snapshot
         if now_ts - last_snapshot >= snapshot_interval:

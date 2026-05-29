@@ -11,7 +11,7 @@ from .config_loader import CONFIG
 _active_trades: dict[str, dict] = {}   # trade_id -> trade state
 _window_registry: set[tuple[str, str]] = set()  # (coin, window_start_ts) already traded
 
-_mode = "paper_hybrid"   # paper_hybrid / paper_auto / live_hybrid / live_auto / live_learning / signal_trader
+_mode = "paper_hybrid"   # paper_hybrid / paper_auto / live_hybrid / live_auto / live_learning / signal_trader / auto_router
 
 
 def get_mode() -> str:
@@ -20,7 +20,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str) -> None:
     global _mode
-    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader"}
+    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router"}
     if mode not in valid:
         raise ValueError(f"Invalid mode: {mode}. Must be one of {valid}")
     _mode = mode

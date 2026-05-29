@@ -20,6 +20,8 @@ _SCALEIN_TRANCHES = 5            # split the scale-in budget into this many buys
 _SCALEIN_MIN_EUR = 5.0           # minimum total scale-in budget when enabled
 _scalein_state: dict[str, dict] = {}  # trade_id -> {count, ref_high, cycle_low}
 
+_take_it_executed: set[str] = set()  # trade_ids where Take it already fired
+
 
 def _get_trigger_threshold(coin: str) -> float:
     from . import regime as _regime
@@ -861,6 +863,79 @@ def get_phase_params(phase: str, cfg: dict) -> dict:
     return {"cross_threshold": 0.0, "check_interval": 0.2, "ratchet_buffer": 0.0}
 
 
+async def _check_and_execute_take_it(
+    trade_id: str,
+    winner_token: str,
+    mid: float,
+    seconds_left: float,
+    size: float,
+    break_even_price: float | None,
+    paper: bool,
+    coin: str,
+) -> float:
+    """Buy extra winner tokens when the market is clearly heading for a $1 resolution.
+
+    Returns the updated position size (original + extra shares bought, or original if not triggered).
+    Max 1x per trade. Triggers when: mid ≥ 0.82, seconds_left ≤ 240,
+    theoretical_price ≥ 0.85, and take_it is enabled.
+    """
+    cfg = CONFIG.get("router", {})
+    if not cfg.get("take_it_enabled", True):
+        return size
+    if trade_id in _take_it_executed:
+        return size
+    if mid < 0.82 or seconds_left > 240:
+        return size
+
+    # Black-Scholes confirmation
+    from .signals import theoretical_price as _theo
+    theo = _theo("YES", coin, seconds_left)  # side doesn't matter; YES/NO tokens are symmetric
+    if theo is None or theo < 0.85:
+        return size
+
+    take_size_eur = float(cfg.get("take_it_size_eur", 3.0))
+    extra_shares = round(take_size_eur / mid, 2)
+    if extra_shares < 0.10:
+        return size
+
+    _take_it_executed.add(trade_id)
+
+    if paper:
+        result = await paper_trader.simulate_market_buy(winner_token, extra_shares)
+    else:
+        result = await orders.place_market_order(winner_token, "BUY", extra_shares)
+        if result and result.get("order_id"):
+            f = await _fetch_market_fill(result["order_id"], fallback=mid, size=extra_shares)
+            result = {"filled": True, "fill_price": f["fill_price"], "fees": f["fees"],
+                      "filled_size": extra_shares}
+
+    if not (result and result.get("filled")):
+        _take_it_executed.discard(trade_id)
+        return size
+
+    fill_price = result.get("fill_price") or mid
+    filled_sz = result.get("filled_size") or extra_shares
+    si_cost = fill_price * filled_sz + result.get("fees", 0.0)
+    new_size = round(size + filled_sz, 4)
+
+    if break_even_price is not None and break_even_price > 0:
+        new_be = round((break_even_price * size + si_cost) / new_size, 4)
+    else:
+        new_be = break_even_price
+
+    update_trade_field(trade_id, "take_it_executed", 1)
+    _add_winner_fees(trade_id, result.get("fees", 0.0))
+    log.info("take_it_executed", trade_id=trade_id, coin=coin, mid=round(mid, 4),
+             extra_shares=filled_sz, fill_price=round(fill_price, 4),
+             new_size=new_size, seconds_left=round(seconds_left, 1),
+             theo=round(theo, 3), paper=paper)
+    await write_event(trade_id, "take_it_executed", coin, {
+        "mid": round(mid, 4), "extra_shares": filled_sz, "fill_price": round(fill_price, 4),
+        "new_size": new_size, "new_break_even": new_be, "theo": round(theo, 3),
+    })
+    return new_size
+
+
 async def _winner_exit_paper(
     trade_id: str,
     winner_token: str,
@@ -1025,6 +1100,12 @@ async def _winner_exit_paper(
                         "tranche": _sc["count"], "new_size": size,
                         "new_break_even": break_even_price,
                     })
+
+            # Take it: buy extra winner when market is clearly locking in
+            size = await _check_and_execute_take_it(
+                trade_id, winner_token, mid, seconds_left,
+                size, break_even_price, True, coin,
+            )
 
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
@@ -1260,6 +1341,19 @@ async def _winner_exit_live(
                     "new_break_even": break_even_price,
                 })
 
+            # Take it: buy extra winner when market is clearly locking in (live mode)
+            prev_size = size
+            size = await _check_and_execute_take_it(
+                trade_id, winner_token, mid, seconds_left,
+                size, break_even_price, False, coin,
+            )
+            if size != prev_size:
+                # Re-issue limit order for updated total size
+                await orders.cancel_order(current_order_id)
+                new_resp = await orders.place_limit_order(winner_token, "SELL", current_limit, size)
+                if new_resp and new_resp.get("order_id"):
+                    current_order_id = new_resp["order_id"]
+
             score, reason = compute_cross_score(
                 mid, peak_mid, current_limit, best_bid, best_ask, seconds_left, es,
                 size=size, velocity=vel, effective_bid=eff_bid,
@@ -1387,6 +1481,13 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
                 )
         except Exception:
             pass  # never block trade close on adaptive errors
+
+    # Global consecutive loss tracker
+    try:
+        from . import risk as _risk
+        _risk.record_global_result(net_pnl > 0)
+    except Exception:
+        pass
 
     # Coin guard: track result, handle watch/disable state changes
     try:
@@ -1538,6 +1639,11 @@ def _directional_coin_guard(trade_id, coin, net_pnl, trade, broadcast_fn) -> Non
 
 async def _run_directional_guard(coin, net_pnl, daily_pnl, paper, broadcast_fn) -> None:
     try:
+        from . import risk as _risk
+        _risk.record_global_result(net_pnl > 0)
+    except Exception:
+        pass
+    try:
         from . import coin_guard as _cg
         _new_state = await _cg.record_result(coin, net_pnl, daily_pnl, paper=paper)
         if _new_state == "disabled":
@@ -1609,9 +1715,11 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
     try:
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
+        from . import risk as _risk
         _paper = trade.get("mode", "").startswith("paper")
         coin = trade.get("coin", "")
         if coin:
+            _risk.record_global_result(net_pnl > 0)
             _daily = _sync_daily_pnl(coin)
             _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
             if _new_state == "disabled":

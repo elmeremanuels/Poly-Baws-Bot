@@ -307,6 +307,12 @@ async def _run_command(command: str, payload: dict) -> None:
             await save_dashboard_state("portfolio_start_usdc", current)
             log.info("portfolio_start_reset", value=current)
 
+    elif command == "reset_portfolio_peak":
+        from . import risk as _risk
+        _risk.reset_portfolio_peak()
+        await save_dashboard_state("portfolio_peak_usdc", "0")
+        log.info("portfolio_peak_reset")
+
     elif command == "set_conviction_weighting":
         enabled = bool(payload.get("enabled", False))
         CONFIG.setdefault("conviction_weighting", {})["enabled"] = enabled

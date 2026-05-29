@@ -98,6 +98,25 @@ risk:
   daily_coin_loss_limit_eur: 25.00  # per-coin dag-cap; verhoogd 5→25 (signal_trader tradeert €10/trade — €5 was te krap)
   max_trades_per_day_total: 8000
   global_max_positions: 25
+  max_consecutive_losses: 7          # hard kill after N losses in a row (0 = disabled)
+  min_capital_eur: 30.00             # hard stop if USDC drops below this absolute floor
+  max_drawdown_from_peak_pct: 25     # hard stop if portfolio drops >25% from its peak
+  max_drawdown_from_start_pct: 40    # hard stop if portfolio drops >40% from start capital
+
+router:
+  enabled: true
+  signal_trader_priority: true       # signal bucket always wins when conviction qualifies
+  signal_min_conviction: 0.55        # lower bound for signal bucket
+  straddle_min_conviction: 0.70      # lower bound for straddle bucket
+  straddle_asym_regime: ["RANGING"]  # regimes that get asymmetric straddle sizing
+  max_correlated_positions: 3        # block new trade if ≥N open trades share same direction
+  take_it_size_eur: 3.00             # extra EUR per "Take it" buy
+  save_it_size_eur: 3.00             # extra EUR per "Save it" buy
+  take_it_enabled: true
+  save_it_enabled: true
+
+ab_test:
+  conviction_threshold: 0.0          # set to 0.55 to activate B-group filtering
 
 polymarket:
   clob_rest_url: "https://clob.polymarket.com"

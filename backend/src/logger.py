@@ -240,6 +240,10 @@ async def init_db() -> None:
             ("edge_at_entry", "REAL"),
             # Signal trader: market title for Polymarket lookup
             ("question", "TEXT"),
+            # Dynamic Position Manager: Take it / Save it
+            ("take_it_executed", "INTEGER DEFAULT 0"),
+            ("save_it_executed", "INTEGER DEFAULT 0"),
+            ("save_it_side", "TEXT"),
         ]:
             if col_name not in existing:
                 await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")

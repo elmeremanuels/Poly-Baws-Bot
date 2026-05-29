@@ -11,6 +11,12 @@ KILL_FLAG_PATH = Path(__file__).parent.parent.parent / "KILL.flag"
 _killed = False
 _kill_reason = ""
 
+# Global consecutive loss tracker (Component 3)
+_global_consecutive_losses: int = 0
+
+# Portfolio high-water mark (Component 5)
+_portfolio_peak: float = 0.0
+
 
 def is_killed() -> bool:
     return _killed or KILL_FLAG_PATH.exists()
@@ -115,6 +121,79 @@ async def pre_trade_checks(coin: str, active_positions: dict[str, int],
         return False, f"coin_guard_{state}: {coin}"
 
     return True, ""
+
+
+# ── Component 3: Global Consecutive Loss Tracker ──────────────────────────────
+
+def record_global_result(won: bool) -> None:
+    """Call after every trade closes. Hard-kills the bot after N consecutive losses."""
+    global _global_consecutive_losses
+    if won:
+        _global_consecutive_losses = 0
+    else:
+        _global_consecutive_losses += 1
+        limit = CONFIG.get("risk", {}).get("max_consecutive_losses", 0)
+        if limit > 0 and _global_consecutive_losses >= limit:
+            kill(f"consecutive_loss_hard_stop:{_global_consecutive_losses}")
+
+
+def get_consecutive_losses() -> int:
+    return _global_consecutive_losses
+
+
+# ── Component 5: Portfolio Protection ─────────────────────────────────────────
+
+async def _get_or_update_portfolio_peak(current: float) -> float:
+    global _portfolio_peak
+    if current > _portfolio_peak:
+        _portfolio_peak = current
+        try:
+            from .logger import save_dashboard_state
+            await save_dashboard_state("portfolio_peak_usdc", str(round(current, 4)))
+        except Exception:
+            pass
+    return _portfolio_peak
+
+
+async def check_portfolio_protection(current_usdc: float) -> None:
+    """Three-layer portfolio protection. Call from portfolio_sync_loop."""
+    if current_usdc is None:
+        return
+    cfg = CONFIG.get("risk", {})
+
+    # Layer 1: absolute capital floor
+    min_capital = cfg.get("min_capital_eur", 0.0)
+    if min_capital > 0 and current_usdc < min_capital:
+        kill(f"min_capital_floor:{current_usdc:.2f}<{min_capital:.2f}")
+        return
+
+    # Layer 2: drawdown from high-water mark
+    max_dd_peak = cfg.get("max_drawdown_from_peak_pct", 0.0)
+    if max_dd_peak > 0:
+        peak = await _get_or_update_portfolio_peak(current_usdc)
+        floor = peak * (1 - max_dd_peak / 100)
+        if current_usdc < floor:
+            kill(f"max_drawdown_from_peak:{current_usdc:.2f}<{floor:.2f}")
+            return
+
+    # Layer 3: drawdown from start capital
+    max_dd_start = cfg.get("max_drawdown_from_start_pct", 0.0)
+    if max_dd_start > 0:
+        try:
+            from .logger import load_dashboard_state
+            start_raw = await load_dashboard_state("portfolio_start_usdc")
+            start = float(start_raw) if start_raw else 0.0
+        except Exception:
+            start = 0.0
+        if start > 0:
+            floor_start = start * (1 - max_dd_start / 100)
+            if current_usdc < floor_start:
+                kill(f"max_drawdown_from_start:{current_usdc:.2f}<{floor_start:.2f}")
+
+
+def reset_portfolio_peak() -> None:
+    global _portfolio_peak
+    _portfolio_peak = 0.0
 
 
 async def risk_monitor_loop(get_active_count_fn, interval: float = 5.0) -> None:
