@@ -2106,13 +2106,16 @@ def _signal_trader_panel() -> None:
                     step=0.05,
                     help="Minimum signaalsterkte om een trade te plaatsen. Lager = meer trades, hogere drempel = strengere selectie.",
                 )
+                _entry_max_val = float(cfg.get("entry_price_max", 0.58))
                 entry_max = st.slider(
                     "Max entry prijs (ct per share)",
-                    min_value=0.50, max_value=0.65,
-                    value=float(cfg.get("entry_price_max", 0.58)),
+                    min_value=0.50, max_value=0.75,
+                    value=_entry_max_val,
                     step=0.01, format="%.2f",
-                    help="Nooit meer dan dit betalen per share bij entry.",
+                    help="Nooit meer dan dit betalen per share bij entry. Bij in-window trading liggen prijzen vaak al op 0.55–0.70.",
                 )
+                _be = round(entry_max / 1.0 * 100, 1)
+                st.caption(f"Break-even bij deze prijs: **{_be:.0f}% win rate** vereist")
             with col_r:
                 trade_size = st.number_input(
                     "Inleg per trade (€)",
