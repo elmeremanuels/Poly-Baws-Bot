@@ -1225,6 +1225,120 @@ def _save_signal_trader_to_yaml(global_params: dict, coin_params: dict) -> str:
         return str(exc2)
 
 
+def _read_router_cfg_from_yaml() -> dict:
+    """Lees router config direct uit config.yaml (bypassed module-cache)."""
+    try:
+        import yaml
+        with open(_ST_CONFIG_PATH) as f:
+            data = yaml.safe_load(f)
+        return (data or {}).get("router", {}) or {}
+    except Exception:
+        return CONFIG.get("router", {})
+
+
+def _save_router_to_yaml(params: dict) -> str:
+    """Schrijf router config naar config.yaml. Geeft '' bij succes, fout-string bij fout."""
+    try:
+        from ruamel.yaml import YAML
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        with open(_ST_CONFIG_PATH) as f:
+            cfg = ryaml.load(f)
+        if "router" not in cfg or cfg["router"] is None:
+            cfg["router"] = {}
+        for k, v in params.items():
+            cfg["router"][k] = v
+        with open(_ST_CONFIG_PATH, "w") as f:
+            ryaml.dump(cfg, f)
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
+@st.fragment(run_every=15)
+def _auto_router_panel() -> None:
+    """Dashboard panel voor de auto_router modus."""
+    mode      = current_mode()
+    cfg       = _read_router_cfg_from_yaml()
+    st_cfg    = _read_st_cfg_from_yaml()
+    is_active = (mode == "auto_router")
+    straddle_paper = cfg.get("paper_mode", True)
+    signal_paper   = st_cfg.get("paper_mode", True)
+
+    # ── Status banner ────────────────────────────────────────────────────────
+    if is_active:
+        straddle_label = "📄 Paper" if straddle_paper else "💸 Live"
+        signal_label   = "📄 Paper" if signal_paper   else "💸 Live"
+        st.markdown(
+            f'<div style="background:rgba(139,92,246,0.15);border:1px solid #8b5cf6;'
+            f'border-radius:8px;padding:10px 16px;margin-bottom:12px">'
+            f'🤖 <b>Auto Router is ACTIEF</b> &nbsp;·&nbsp; '
+            f'Straddle: {straddle_label} &nbsp;|&nbsp; Signal: {signal_label}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="background:rgba(55,65,81,0.2);border:1px solid #374151;'
+            'border-radius:8px;padding:10px 16px;margin-bottom:12px">'
+            '⏸ Auto Router is <b>inactief</b> — activeer via de knop hieronder'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Activeer / Deactiveer ────────────────────────────────────────────────
+    col_act, col_deact = st.columns(2)
+    with col_act:
+        if st.button("▶ Activeer", type="primary", disabled=is_active, key="ar_activate"):
+            write_command("set_mode", {"mode": "auto_router"})
+            st.rerun()
+    with col_deact:
+        if st.button("⏹ Deactiveer", disabled=not is_active, key="ar_deactivate"):
+            write_command("set_mode", {"mode": "paper_auto"})
+            st.rerun()
+
+    st.divider()
+
+    # ── Straddle bucket: Paper / Live ────────────────────────────────────────
+    st.markdown("**Straddle bucket** (straddle_asym / straddle_sym)")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📄 Paper", disabled=straddle_paper, key="ar_straddle_paper"):
+            _save_router_to_yaml({"paper_mode": True})
+            write_command("set_router_paper", {"paper_mode": True})
+            st.rerun()
+    with c2:
+        if st.button("💸 Live", disabled=not straddle_paper, type="secondary", key="ar_straddle_live"):
+            _save_router_to_yaml({"paper_mode": False})
+            write_command("set_router_paper", {"paper_mode": False})
+            st.rerun()
+
+    st.caption(
+        "📄 Paper = simulatie, geen echte orders. "
+        "💸 Live = echte USDC uitgaven. Zet alleen op Live als paper resultaten stabiel zijn."
+    )
+
+    st.divider()
+
+    # ── Signal bucket: verwijst naar Signal Trader tab ───────────────────────
+    st.markdown("**Signal bucket** (single-side richting-trade)")
+    signal_label_full = "📄 Paper (simulatie)" if signal_paper else "💸 Live (echte orders)"
+    st.info(
+        f"Signal bucket staat op **{signal_label_full}**. "
+        "Pas dit aan via de **🎯 Signal Trader** tab → Paper / Live knop."
+    )
+
+    st.divider()
+
+    # ── Routing drempelwaarden ────────────────────────────────────────────────
+    st.markdown("**Routing drempels** (alleen ter info — wijzig in config.yaml)")
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Signal min. conviction", cfg.get("signal_min_conviction", 0.55))
+    col_b.metric("Straddle min. conviction", cfg.get("straddle_min_conviction", 0.70))
+    col_c.metric("Max gecorr. posities", cfg.get("max_correlated_positions", 3))
+
+
 @st.fragment(run_every=15)
 def _signal_trader_panel() -> None:
     """Dashboard panel voor de signal_trader modus."""
@@ -1691,8 +1805,8 @@ if not st.session_state.get("_page_loaded"):
 # Render 3+ (_tabs_ready=True): alles normaal.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-tab_live, tab_st, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
-    ["🔴 Live", "🎯 Signal Trader", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
+tab_live, tab_st, tab_ar, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
+    ["🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
 )
 with tab_live:
     if _tabs_ready:
@@ -1706,6 +1820,12 @@ with tab_st:
         _signal_trader_panel()
     else:
         _tab_loading("🎯 Signal Trader", "Signal Trader data wordt geladen…")
+
+with tab_ar:
+    if _tabs_ready:
+        _auto_router_panel()
+    else:
+        _tab_loading("🤖 Auto Router", "Router configuratie wordt geladen…")
 
 with tab_analytics:
     if _tabs_ready:
