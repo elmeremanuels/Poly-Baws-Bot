@@ -1506,6 +1506,13 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     except Exception:
         pass  # never block trade close on guard errors
 
+    # Oracle: record outcome for track record scoring
+    try:
+        from . import oracle as _oracle
+        _oracle.record_outcome(trade_id, net_pnl > 0)
+    except Exception:
+        pass
+
     await persist_trade(trade_id)
     await write_event(trade_id, "trade_closed", trade["coin"], {
         "reason": reason, "net_pnl": net_pnl, "fill_price": fill_price
@@ -1726,6 +1733,13 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
                 # In-memory disable only — see comment in close_straddle_trade for rationale.
                 CONFIG["coins"][coin]["enabled"] = False
                 asyncio.create_task(_cancel_coin_pending_entries(coin, broadcast_fn))
+    except Exception:
+        pass
+
+    # Oracle: record outcome for track record scoring
+    try:
+        from . import oracle as _oracle
+        _oracle.record_outcome(trade_id, net_pnl > 0)
     except Exception:
         pass
 

@@ -257,8 +257,20 @@ async def _coin_loop(coin: str) -> None:
             continue
 
         if risk.is_killed():
-            await asyncio.sleep(5)
-            continue
+            # Oracle paper_continues_on_kill: switch to paper so Oracle keeps learning
+            if CONFIG.get("oracle", {}).get("paper_continues_on_kill", True):
+                mode = get_mode()
+                if not mode.startswith("paper"):
+                    try:
+                        from .state import set_mode
+                        set_mode("paper_auto")
+                        log.info("kill_active_paper_continues", previous_mode=mode)
+                    except Exception:
+                        pass
+                # Fall through — paper trades continue
+            else:
+                await asyncio.sleep(5)
+                continue
         try:
             market = scanner.get_tradeable_market(coin)
             if market:
@@ -308,6 +320,43 @@ async def _auto_router_coin_tick(coin: str) -> None:
     # Respect router.paper_mode flag — default True so auto_router starts safe
     _router_paper = CONFIG.get("router", {}).get("paper_mode", True)
     await _process_coin_window(coin, market, force_paper=_router_paper)
+
+
+async def _oracle_temperature_loop() -> None:
+    """Update Oracle trading temperature in dashboard_state every 60s.
+
+    Uses the first enabled coin's regime/conviction as representative context.
+    Runs even when oracle.enabled=False so the widget shows a warming-up state.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if not CONFIG.get("oracle", {}).get("enabled", False):
+                continue
+            from . import oracle as _oracle
+            from . import regime as _regime
+            from . import signals as _sig
+            # Pick first enabled coin as representative context
+            first_coin = next(
+                (c for c in COINS if CONFIG["coins"].get(c, {}).get("enabled", True)),
+                COINS[0] if COINS else None,
+            )
+            if not first_coin:
+                continue
+            _conv_dir, _conv_score = _sig.get_conviction(first_coin)
+            _regime_label = _regime.get_current_regime(first_coin) or "UNKNOWN"
+            snap = await _oracle.get_temperature_snapshot(
+                first_coin, _conv_score or 0.0, _regime_label
+            )
+            await save_dashboard_state("oracle_trading_temperature", str(snap.get("temperature", 50)))
+            await save_dashboard_state("oracle_fear_greed_value", str(snap.get("fear_greed_value", "")))
+            await save_dashboard_state("oracle_fear_greed_label", str(snap.get("fear_greed_label", "")))
+            await save_dashboard_state("oracle_news_sentiment", str(snap.get("news_sentiment", "")))
+            await save_dashboard_state("oracle_polymarket_dir", str(snap.get("polymarket_dir", "")))
+            await save_dashboard_state("oracle_track_record", str(snap.get("track_record", "")))
+            await save_dashboard_state("oracle_pattern_win_prob", str(snap.get("pattern_win_prob", "")))
+        except Exception as exc:
+            log.debug("oracle_temperature_loop_error", error=str(exc))
 
 
 async def _heartbeat_loop() -> None:
@@ -460,6 +509,7 @@ async def run_bot() -> None:
         asyncio.create_task(_heartbeat_loop()),
         asyncio.create_task(_portfolio_sync_loop()),
         asyncio.create_task(_regime_sync_loop()),
+        asyncio.create_task(_oracle_temperature_loop()),
         asyncio.create_task(asset_price_feed.run()),
         asyncio.create_task(_signals.run_trade_poll_loop()),
         asyncio.create_task(_signals.funding_rate_loop()),

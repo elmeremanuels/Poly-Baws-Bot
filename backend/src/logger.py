@@ -291,7 +291,62 @@ async def init_db() -> None:
             "UPDATE trades SET regime_at_entry = 'UNKNOWN' WHERE regime_at_entry IS NULL"
         )
         await db.commit()
+        # Migration: Oracle verdicts and analyses tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS oracle_verdicts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT,
+                coin TEXT,
+                approved INTEGER,
+                confidence REAL,
+                reason TEXT,
+                trading_temperature INTEGER,
+                macro_context TEXT,
+                discord_confirmed INTEGER,
+                actual_won INTEGER,
+                correct INTEGER,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS oracle_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                outlook TEXT,
+                risk_level TEXT,
+                coin_sentiments TEXT,
+                pattern_insights TEXT,
+                suggested_adjustments TEXT,
+                reasoning TEXT,
+                discord_summary TEXT,
+                fear_greed_at_time INTEGER,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.commit()
     log.info("database_initialized", path=str(_db_path))
+
+
+async def write_oracle_verdict(
+    trade_id: str | None,
+    coin: str,
+    approved: bool,
+    confidence: float,
+    reason: str,
+    trading_temperature: int,
+    macro_context: dict,
+) -> None:
+    import json as _json
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO oracle_verdicts
+               (trade_id, coin, approved, confidence, reason, trading_temperature, macro_context)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                trade_id, coin, int(approved), round(confidence, 3),
+                reason, trading_temperature, _json.dumps(macro_context),
+            ),
+        )
+        await db.commit()
 
 
 async def write_trade(trade: dict) -> None:

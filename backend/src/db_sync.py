@@ -1228,3 +1228,39 @@ def get_cycle_trades(cycle_id: int, limit: int = 50) -> list[dict]:
             (cycle_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Oracle pattern stats ───────────────────────────────────────────────────────
+
+def get_oracle_pattern_stats(coin: str | None = None, days: int = 30) -> list[dict]:
+    """Win% per regime × conviction_bucket × bucket. Delegates to oracle_patterns."""
+    try:
+        from .oracle_patterns import get_pattern_stats
+        return get_pattern_stats(coin=coin, days=days)
+    except Exception:
+        return []
+
+
+def get_oracle_signal_patterns(coin: str | None = None, days: int = 30) -> list[dict]:
+    """Win% per OFI_bucket × funding_rate_bucket × regime. Delegates to oracle_patterns."""
+    try:
+        from .oracle_patterns import get_signal_patterns
+        return get_signal_patterns(coin=coin, days=days)
+    except Exception:
+        return []
+
+
+def get_oracle_verdicts(limit: int = 50) -> list[dict]:
+    """Recent oracle verdicts from DB."""
+    if not _db_path.exists():
+        return []
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM oracle_verdicts ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+

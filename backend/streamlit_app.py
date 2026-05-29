@@ -34,6 +34,9 @@ from src.db_sync import (
     get_state,
     get_today_trade_count,
     get_router_trades,
+    get_oracle_pattern_stats,
+    get_oracle_signal_patterns,
+    get_oracle_verdicts,
 )
 from src.commands import write_command, delete_hybrid_pending
 from src.db_sync import delete_signal_trades
@@ -1288,6 +1291,139 @@ def _save_multi_section_to_yaml(sections: dict) -> str:
 
 
 @st.fragment(run_every=15)
+def _oracle_temperature_widget() -> None:
+    """Handels Temperatuur widget: composiet 0–100 gauge met kleur en context."""
+    st.markdown("#### 🌡️ Handels Temperatuur")
+
+    # Read cached value from dashboard_state (updated every 60s by oracle background task)
+    temp_raw = get_state("oracle_trading_temperature")
+    fg_val   = get_state("oracle_fear_greed_value")
+    fg_label = get_state("oracle_fear_greed_label") or "Onbekend"
+    news_s   = get_state("oracle_news_sentiment") or "onbekend"
+    pm_dir   = get_state("oracle_polymarket_dir") or "NEUTRAL"
+    track_r  = get_state("oracle_track_record")
+    pat_win  = get_state("oracle_pattern_win_prob")
+
+    try:
+        temp = int(float(temp_raw)) if temp_raw else None
+    except (ValueError, TypeError):
+        temp = None
+
+    if temp is None:
+        st.caption("Temperatuur nog niet beschikbaar — Oracle draait of nog niet gestart.")
+        oracle_enabled = CONFIG.get("oracle", {}).get("enabled", False)
+        if not oracle_enabled:
+            st.info("Oracle is uitgeschakeld (`oracle.enabled: false` in config.yaml). "
+                    "Zet `enabled: true` en herstart de bot om temperatuurdata te zien.")
+        return
+
+    # Colour + label based on temperature
+    if temp < 30:
+        color, label = "#3b82f6", "🔵 IJskoud"
+    elif temp < 50:
+        color, label = "#eab308", "🟡 Koud"
+    elif temp < 70:
+        color, label = "#f97316", "🟠 Lauw"
+    elif temp < 85:
+        color, label = "#22c55e", "🟢 Warm"
+    else:
+        color, label = "#10b981", "✅ Heet"
+
+    # Big gauge bar
+    bar_pct = temp
+    st.markdown(
+        f'<div style="margin-bottom:4px">'
+        f'<span style="font-size:2rem;font-weight:bold;color:{color}">{temp}/100</span>'
+        f'&nbsp;&nbsp;<span style="color:{color};font-size:1rem">{label}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.progress(bar_pct / 100)
+
+    # Context row
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        fg_str = f"{int(float(fg_val))}" if fg_val else "—"
+        st.metric("Fear & Greed", f"{fg_str} ({fg_label})" if fg_val else "—")
+    with c2:
+        st.metric("Nieuws", news_s.capitalize())
+    with c3:
+        st.metric("Polymarket dir.", pm_dir)
+    with c4:
+        tr_str = f"{float(track_r)*100:.0f}%" if track_r else "—"
+        st.metric("Track record", tr_str)
+
+    oracle_cfg = CONFIG.get("oracle", {})
+    gate_on  = oracle_cfg.get("hard_gate", False)
+    hard_thr = oracle_cfg.get("temperature_hard_block", 30)
+    soft_thr = oracle_cfg.get("temperature_soft_block", 50)
+    if not gate_on:
+        st.caption("ℹ️ Hard gate uitgeschakeld (`oracle.hard_gate: false`) — Orakel logt alleen, blokkeert niet.")
+    elif temp < hard_thr:
+        st.warning(f"🚫 Hard gate ACTIEF — temperatuur {temp} < {hard_thr}. Trades geblokkeerd.")
+    elif temp < soft_thr:
+        st.warning(f"⚠️ Zachte drempel — temperatuur {temp} < {soft_thr}. Discord confirm vereist (indien ingeschakeld).")
+    else:
+        st.success("✅ Orakel keurt trades goed.")
+
+
+def _oracle_pattern_table() -> None:
+    """Patroon-statistieken uit de DB: regime × conviction × bucket → win%."""
+    st.markdown("#### 📊 Handelspatronen uit DB")
+
+    coins = list(CONFIG.get("coins", {}).keys())
+    coin_options = ["Alle coins"] + coins
+    sel = st.selectbox("Coin filter", coin_options, key="oracle_pattern_coin", index=0)
+    coin_filter = None if sel == "Alle coins" else sel
+
+    days_sel = st.selectbox("Periode", [7, 14, 30, 60], index=2,
+                             format_func=lambda d: f"Afgelopen {d} dagen",
+                             key="oracle_pattern_days")
+
+    tab_regime, tab_signal = st.tabs(["Regime × Conviction", "OFI × Funding × Regime"])
+
+    with tab_regime:
+        rows = get_oracle_pattern_stats(coin=coin_filter, days=days_sel)
+        if not rows:
+            st.caption("Nog niet genoeg data (minimaal 5 trades per combinatie).")
+        else:
+            df = pd.DataFrame(rows)
+            # Colour-code win_pct column
+            def _color_win(val):
+                if val >= 60:
+                    return "background-color:#16a34a33;color:#16a34a"
+                if val <= 40:
+                    return "background-color:#dc262633;color:#dc2626"
+                return ""
+            st.dataframe(
+                df.rename(columns={
+                    "regime": "Regime", "conv_bucket": "Conviction",
+                    "bucket": "Bucket", "n": "n",
+                    "win_pct": "Win %", "avg_pnl": "Gem P&L", "total_pnl": "Totaal P&L",
+                }).style.applymap(_color_win, subset=["Win %"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(f"{len(rows)} combinaties getoond (min 5 trades)")
+
+    with tab_signal:
+        rows2 = get_oracle_signal_patterns(coin=coin_filter, days=days_sel)
+        if not rows2:
+            st.caption("Nog niet genoeg data (minimaal 5 trades per combinatie).")
+        else:
+            df2 = pd.DataFrame(rows2)
+            st.dataframe(
+                df2.rename(columns={
+                    "ofi_bucket": "OFI", "fr_bucket": "Funding rate",
+                    "regime": "Regime", "n": "n",
+                    "win_pct": "Win %", "avg_pnl": "Gem P&L",
+                }),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(f"{len(rows2)} combinaties getoond (min 5 trades)")
+
+
 def _auto_router_panel() -> None:
     """Dashboard panel voor de auto_router modus — alle instellingen op één plek."""
     mode      = current_mode()
@@ -1466,6 +1602,10 @@ def _auto_router_panel() -> None:
             st.success("Instellingen opgeslagen en doorgevoerd.")
             st.rerun()
 
+    st.divider()
+    _oracle_temperature_widget()
+    st.divider()
+    _oracle_pattern_table()
     st.divider()
     _router_trade_cards()
 
