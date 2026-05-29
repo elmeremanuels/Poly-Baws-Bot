@@ -185,7 +185,6 @@ def get_yes_twap(yes_token: str, window_secs: float = 600.0) -> float | None:
 def get_multi_coin_ofi_alignment(direction: str) -> int:
     """Count how many active coins have OFI aligned with direction ('UP' or 'DOWN').
 
-    Used as a macro confirmation: 4+ coins aligned = broad market move.
     Does NOT encourage trading all coins simultaneously.
     """
     from .config_loader import CONFIG as _cfg
@@ -200,6 +199,33 @@ def get_multi_coin_ofi_alignment(direction: str) -> int:
         elif direction == "DOWN" and ofi < 0.45:
             count += 1
     return count
+
+
+def get_multi_coin_ofi_consensus(direction: str) -> tuple[int, int]:
+    """Return (aligned, total_with_ofi) for coins with a valid OFI reading.
+
+    Distinguishes unanimous confirmation from common correlated moves:
+    - aligned == total → all measured coins agree → genuine macro signal
+    - aligned < total/2 → majority of coins diverge → lower confidence
+
+    Crypto coins are highly correlated (r>0.80), so 4/5 aligned is the
+    normal state and not a meaningful boost. Only unanimity (5/5 or all
+    coins with data) is an unusual enough event to warrant a score bump.
+    """
+    from .config_loader import CONFIG as _cfg
+    coins = list(_cfg.get("coins", {}).keys())
+    total = 0
+    aligned = 0
+    for coin in coins:
+        ofi = get_order_flow_imbalance(coin)
+        if ofi is None:
+            continue
+        total += 1
+        if direction == "UP" and ofi > 0.55:
+            aligned += 1
+        elif direction == "DOWN" and ofi < 0.45:
+            aligned += 1
+    return aligned, total
 
 
 def get_liquidation_proxy(coin: str, spike_window_secs: float = 30.0) -> float | None:
@@ -318,15 +344,16 @@ def get_conviction(
             elif pp > 0.80:
                 bear_score += 0.15 * (pp - 0.80) / 0.20
 
-    # Recent price drift (last 5 min) — actual observed direction, not inferred
-    # Threshold 0.0005/min ≈ 0.25% over 5 min; capped contribution at 0.20
+    # Recent price drift (last 5 min) — actual observed direction, not inferred.
+    # Capped at 0.10 (was 0.20): the Black-Scholes edge multiplier in signal_trader
+    # also uses drift via theoretical_price() — halved here to avoid double-counting.
     drift = get_recent_drift_1m(coin)
     if drift is not None:
         _drift_threshold = 0.0005
         if drift > _drift_threshold:
-            bull_score += min(0.20, (drift - _drift_threshold) / 0.004)
+            bull_score += min(0.10, (drift - _drift_threshold) / 0.004)
         elif drift < -_drift_threshold:
-            bear_score += min(0.20, (-drift - _drift_threshold) / 0.004)
+            bear_score += min(0.10, (-drift - _drift_threshold) / 0.004)
 
     # Polymarket CLOB depth imbalance — YES bids vs NO bids shows which side the
     # market is accumulating, independent of OFI on Binance spot
@@ -344,14 +371,15 @@ def get_conviction(
 
     # YES token price velocity — rising YES = smart money buying this outcome.
     # Confirmation only: needs ≥5 history points (requires ws data for this token).
-    # Max contribution ±0.15 at 5%+ move; scaled linearly from 2% threshold.
+    # Capped at 0.07 (was 0.15): velocity correlates with Binance OFI via price
+    # (OFI bullish → BTC rises → YES rises) so it is NOT independent confirmation.
     if yes_token:
         velocity = get_yes_velocity(yes_token)
         if velocity is not None:
             if velocity > 0.02:
-                bull_score += min(0.15, (velocity - 0.02) / 0.06 * 0.15)
+                bull_score += min(0.07, (velocity - 0.02) / 0.06 * 0.07)
             elif velocity < -0.02:
-                bear_score += min(0.15, (-velocity - 0.02) / 0.06 * 0.15)
+                bear_score += min(0.07, (-velocity - 0.02) / 0.06 * 0.07)
 
     # Market activity filter — thin market = signals are less reliable.
     # Dampens both scores by 10% when fewer than 5 updates in the last 5 min.
@@ -376,7 +404,10 @@ def get_conviction(
     bear_score *= multiplier
 
     max_score = max(bull_score, bear_score)
-    if max_score < 0.05:
+    # Raised from 0.05 to 0.15: with 9 signals a 0.05 threshold can be reached by
+    # a single trivially weak signal. Require at least one moderately strong signal
+    # (or two weak independent ones) before reporting a direction.
+    if max_score < 0.15:
         return None, 0.0
 
     direction = "UP" if bull_score >= bear_score else "DOWN"
@@ -435,7 +466,11 @@ async def run_trade_poll_loop() -> None:
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
     log.info("trade_poll_loop_starting", coins=coins)
 
-    async with httpx.AsyncClient(timeout=10) as client:
+    # Both clients created once and kept alive for the lifetime of this loop.
+    # Previously perp_client was created inside the while-loop — a new TCP
+    # connection every 10s per coin, exhausting sockets under sustained load.
+    async with httpx.AsyncClient(timeout=10) as client, \
+               httpx.AsyncClient(timeout=10) as perp_client:
         # Seed: fetch last 500 trades per coin to pre-fill the OFI buffer
         for coin in coins:
             symbol = _COIN_TO_PERP[coin]
@@ -454,24 +489,23 @@ async def run_trade_poll_loop() -> None:
             except Exception as e:
                 log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
 
-        # Seed perp aggTrades buffer
-        async with httpx.AsyncClient(timeout=10) as perp_client:
-            for coin in coins:
-                symbol = _COIN_TO_PERP[coin]
-                try:
-                    resp = await perp_client.get(
-                        f"{_FAPI_BASE}/fapi/v1/aggTrades",
-                        params={"symbol": symbol, "limit": 500},
-                    )
-                    resp.raise_for_status()
-                    trades = resp.json()
-                    for t in trades:
-                        record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
-                    if trades:
-                        _perp_last_trade_id[coin] = int(trades[-1]["a"])
-                    log.info("perp_trade_poll_seeded", coin=coin, n=len(trades))
-                except Exception as e:
-                    log.warning("perp_trade_poll_seed_failed", coin=coin, error=str(e))
+        # Seed perp aggTrades buffer (reuse perp_client created above)
+        for coin in coins:
+            symbol = _COIN_TO_PERP[coin]
+            try:
+                resp = await perp_client.get(
+                    f"{_FAPI_BASE}/fapi/v1/aggTrades",
+                    params={"symbol": symbol, "limit": 500},
+                )
+                resp.raise_for_status()
+                trades = resp.json()
+                for t in trades:
+                    record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
+                if trades:
+                    _perp_last_trade_id[coin] = int(trades[-1]["a"])
+                log.info("perp_trade_poll_seeded", coin=coin, n=len(trades))
+            except Exception as e:
+                log.warning("perp_trade_poll_seed_failed", coin=coin, error=str(e))
 
         # Background polling loop — keeps rolling buffer current between on-demand refreshes
         while True:
@@ -494,27 +528,26 @@ async def run_trade_poll_loop() -> None:
                 except Exception as e:
                     log.warning("trade_poll_failed", coin=coin, error=str(e))
 
-            # Poll perp aggTrades alongside spot
-            async with httpx.AsyncClient(timeout=10) as perp_client:
-                for coin in coins:
-                    symbol = _COIN_TO_PERP[coin]
-                    try:
-                        params: dict = {"symbol": symbol, "limit": 500}
-                        last = _perp_last_trade_id.get(coin)
-                        if last:
-                            params["fromId"] = last + 1
-                        resp = await perp_client.get(
-                            f"{_FAPI_BASE}/fapi/v1/aggTrades", params=params
-                        )
-                        resp.raise_for_status()
-                        trades = resp.json()
-                        if not trades:
-                            continue
-                        for t in trades:
-                            record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
-                        _perp_last_trade_id[coin] = int(trades[-1]["a"])
-                    except Exception as e:
-                        log.warning("perp_trade_poll_failed", coin=coin, error=str(e))
+            # Poll perp aggTrades — reuse long-lived perp_client (no new client!)
+            for coin in coins:
+                symbol = _COIN_TO_PERP[coin]
+                try:
+                    params: dict = {"symbol": symbol, "limit": 500}
+                    last = _perp_last_trade_id.get(coin)
+                    if last:
+                        params["fromId"] = last + 1
+                    resp = await perp_client.get(
+                        f"{_FAPI_BASE}/fapi/v1/aggTrades", params=params
+                    )
+                    resp.raise_for_status()
+                    trades = resp.json()
+                    if not trades:
+                        continue
+                    for t in trades:
+                        record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
+                    _perp_last_trade_id[coin] = int(trades[-1]["a"])
+                except Exception as e:
+                    log.warning("perp_trade_poll_failed", coin=coin, error=str(e))
 
 
 # ── Funding rate background poller ─────────────────────────────────────────────
@@ -561,11 +594,16 @@ async def seed_funding_rates() -> None:
 
 
 async def funding_rate_loop() -> None:
-    """Poll Binance futures funding rates every 5 minutes."""
+    """Poll Binance futures funding rates every 30 minutes.
+
+    Funding rates are set at 8-hour intervals (00:00/08:00/16:00 UTC) and barely
+    change between intervals. Polling every 5 min added API load with zero
+    information gain — 30 min is more than sufficient.
+    """
     await seed_funding_rates()
     coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(1800)
         async with httpx.AsyncClient(timeout=10) as client:
             for coin in coins:
                 symbol = _COIN_TO_PERP[coin]

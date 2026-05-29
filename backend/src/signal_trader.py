@@ -251,12 +251,16 @@ async def _check_and_trade(coin: str) -> None:
                 elif edge < -0.03:
                     score = score * 0.80
 
-    # Multi-coin OFI alignment: breed macro-signaal wanneer 4+ coins dezelfde richting hebben.
-    # Versterkt de score met ×1.10 — moedigt NIET aan om alle coins tegelijk te traden.
+    # Multi-coin OFI consensus: unanimiteit = echte macro-bevestiging; divergentie = penalty.
+    # De vorige ×1.10 bij 4/5 coins was bijna altijd actief (hoge crypto-correlatie).
+    # Nu: boost alleen bij unanimiteit (alle coins met OFI zijn aligned); penalty bij divergentie.
     if direction is not None:
-        aligned = _signals.get_multi_coin_ofi_alignment(direction)
-        if aligned >= 4:
-            score = min(1.0, score * 1.10)
+        aligned, total = _signals.get_multi_coin_ofi_consensus(direction)
+        if total >= 3:
+            if aligned == total:
+                score = min(1.0, score * 1.10)   # alle gemeten coins bevestigen
+            elif aligned < total / 2:
+                score = score * 0.85              # meerderheid divergeert → minder betrouwbaar
 
     # TWAP check: betalen we significant boven het tijdsgewogen gemiddelde?
     # Als ja = we stappen in een micropump → verlaag de score met 10%.
