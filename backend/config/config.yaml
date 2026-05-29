@@ -174,9 +174,6 @@ logging:
   level: "INFO"
   db_path: "data/trades.db"
 
-ab_test:
-  conviction_threshold: 0.0   # set to e.g. 0.55 to activate conviction-gated trading
-
 signal_trader:
   # Single-side modus: koopt ALLEEN de voorspelde winnende kant.
   # Geen stop loss, geen trailing exit, geen peg-cross. Houdt tot resolution.

@@ -298,52 +298,58 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("**Trade size (EUR per leg)**")
-    saved_eur = get_state("trade_size_eur")
-    db_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
-    # Keep a pending value in session_state while the bot processes the command.
-    # Clear it once the DB reflects the change.
-    _ts_key = "_pending_trade_size_eur"
-    pending = st.session_state.get(_ts_key)
-    if pending is not None and abs(pending - db_eur) < 0.001:
-        del st.session_state[_ts_key]
-    display_eur = st.session_state.get(_ts_key, db_eur)
-    new_eur = st.number_input(
-        "trade_size_input",
-        min_value=0.50,
-        max_value=100.0,
-        value=display_eur,
-        step=0.10,
-        format="%.2f",
-        label_visibility="collapsed",
-    )
-    if abs(new_eur - display_eur) > 0.001:
-        write_command("set_trade_size", {"trade_size_eur": new_eur})
-        st.session_state[_ts_key] = new_eur
-        st.rerun()
+    if mode == "auto_router":
+        saved_eur = get_state("trade_size_eur")
+        db_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
+        st_size = CONFIG.get("signal_trader", {}).get("trade_size_eur", 10.0)
+        st.markdown("**Trade groottes**")
+        st.caption(f"Straddle: **€{db_eur:.2f}** · Signal: **€{st_size:.2f}**")
+        st.info("Pas aan via het **🤖 Auto Router** tabblad.", icon="ℹ️")
+    else:
+        st.markdown("**Trade size (EUR per leg)**")
+        saved_eur = get_state("trade_size_eur")
+        db_eur = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
+        _ts_key = "_pending_trade_size_eur"
+        pending = st.session_state.get(_ts_key)
+        if pending is not None and abs(pending - db_eur) < 0.001:
+            del st.session_state[_ts_key]
+        display_eur = st.session_state.get(_ts_key, db_eur)
+        new_eur = st.number_input(
+            "trade_size_input",
+            min_value=0.50,
+            max_value=100.0,
+            value=display_eur,
+            step=0.10,
+            format="%.2f",
+            label_visibility="collapsed",
+        )
+        if abs(new_eur - display_eur) > 0.001:
+            write_command("set_trade_size", {"trade_size_eur": new_eur})
+            st.session_state[_ts_key] = new_eur
+            st.rerun()
 
-    st.markdown("**Max bijkoop per positie (EUR)**")
-    st.caption("Totaal bijkoop-budget, gespreid over 5 tranches op bevestigd herstel (TRENDING/NORMAL). 0 = uit, anders minimaal €5.")
-    saved_scalein = get_state("max_scalein_eur")
-    db_scalein = float(saved_scalein) if saved_scalein else CONFIG["trading"].get("max_scalein_eur", 0.0)
-    _sc_key = "_pending_max_scalein_eur"
-    pending_sc = st.session_state.get(_sc_key)
-    if pending_sc is not None and abs(pending_sc - db_scalein) < 0.001:
-        del st.session_state[_sc_key]
-    display_scalein = st.session_state.get(_sc_key, db_scalein)
-    new_scalein = st.number_input(
-        "max_scalein_input",
-        min_value=0.0,
-        max_value=100.0,
-        value=display_scalein,
-        step=0.10,
-        format="%.2f",
-        label_visibility="collapsed",
-    )
-    if abs(new_scalein - display_scalein) > 0.001:
-        write_command("set_max_scalein", {"max_scalein_eur": new_scalein})
-        st.session_state[_sc_key] = new_scalein
-        st.rerun()
+        st.markdown("**Max bijkoop per positie (EUR)**")
+        st.caption("Totaal bijkoop-budget, gespreid over 5 tranches op bevestigd herstel (TRENDING/NORMAL). 0 = uit, anders minimaal €5.")
+        saved_scalein = get_state("max_scalein_eur")
+        db_scalein = float(saved_scalein) if saved_scalein else CONFIG["trading"].get("max_scalein_eur", 0.0)
+        _sc_key = "_pending_max_scalein_eur"
+        pending_sc = st.session_state.get(_sc_key)
+        if pending_sc is not None and abs(pending_sc - db_scalein) < 0.001:
+            del st.session_state[_sc_key]
+        display_scalein = st.session_state.get(_sc_key, db_scalein)
+        new_scalein = st.number_input(
+            "max_scalein_input",
+            min_value=0.0,
+            max_value=100.0,
+            value=display_scalein,
+            step=0.10,
+            format="%.2f",
+            label_visibility="collapsed",
+        )
+        if abs(new_scalein - display_scalein) > 0.001:
+            write_command("set_max_scalein", {"max_scalein_eur": new_scalein})
+            st.session_state[_sc_key] = new_scalein
+            st.rerun()
 
     st.divider()
 
