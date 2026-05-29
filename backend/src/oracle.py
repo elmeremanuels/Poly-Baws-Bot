@@ -267,6 +267,22 @@ async def get_oracle_verdict(
     if trade_id:
         _stored_verdicts[trade_id] = verdict
 
+    # Persist to DB (non-blocking — don't fail the trade if write fails)
+    try:
+        from .logger import write_oracle_verdict as _write_verdict
+        import asyncio as _asyncio
+        _asyncio.create_task(_write_verdict(
+            trade_id=trade_id,
+            coin=coin,
+            approved=verdict.approved,
+            confidence=verdict.confidence,
+            reason=verdict.reason,
+            trading_temperature=temp,
+            macro_context=verdict.macro_context,
+        ))
+    except Exception:
+        pass
+
     return verdict
 
 

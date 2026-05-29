@@ -1404,6 +1404,83 @@ def _oracle_temperature_widget() -> None:
                               delta_color="off" if delta else "normal")
 
 
+def _oracle_verdicts_panel() -> None:
+    """Recente Oracle verdicts — per-trade approve/reject beslissingen."""
+    import json as _json
+
+    st.markdown("#### 🔮 Oracle Verdicts")
+    verdicts = get_oracle_verdicts(limit=30)
+    if not verdicts:
+        oracle_enabled = CONFIG.get("oracle", {}).get("enabled", False)
+        if oracle_enabled:
+            st.caption("Nog geen verdicts — Oracle logt zodra de eerste trade langs de gate gaat.")
+        else:
+            st.caption("Oracle uitgeschakeld.")
+        return
+
+    hard_gate = CONFIG.get("oracle", {}).get("hard_gate", False)
+    if not hard_gate:
+        st.caption("ℹ️ `hard_gate: false` — Orakel logt verdicts maar blokkeert geen trades.")
+
+    for v in verdicts[:15]:
+        approved = bool(v.get("approved"))
+        reason   = v.get("reason", "—")
+        temp     = v.get("trading_temperature")
+        coin     = v.get("coin", "—")
+        ts       = (v.get("created_at") or "")[:16]
+        correct  = v.get("correct")
+
+        # Macro context
+        try:
+            ctx = _json.loads(v.get("macro_context") or "{}")
+        except Exception:
+            ctx = {}
+
+        fg    = ctx.get("fear_greed", "—")
+        news  = ctx.get("news_sentiment", "—")
+        conf  = ctx.get("conviction", "—")
+
+        if approved:
+            icon, bg = "✅", "rgba(16,185,129,0.1)"
+            border = "#10b981"
+        else:
+            icon, bg = "🚫", "rgba(239,68,68,0.1)"
+            border = "#ef4444"
+
+        if correct is True:
+            outcome_badge = '<span style="color:#10b981;font-size:0.75rem">✓ correct</span>'
+        elif correct is False:
+            outcome_badge = '<span style="color:#ef4444;font-size:0.75rem">✗ incorrect</span>'
+        else:
+            outcome_badge = '<span style="color:#6b7280;font-size:0.75rem">⏳ lopend</span>'
+
+        temp_str = f"{temp}/100" if temp is not None else "—"
+        reason_clean = reason.replace("_", " ")
+
+        st.markdown(
+            f'<div style="background:{bg};border:1px solid {border};border-radius:6px;'
+            f'padding:8px 12px;margin-bottom:6px;font-size:0.875rem">'
+            f'{icon} <b>{coin}</b> &nbsp;·&nbsp; 🌡️ {temp_str} &nbsp;·&nbsp; {reason_clean}'
+            f'&nbsp;&nbsp;<span style="color:#6b7280">{ts}</span>'
+            f'&nbsp;&nbsp;{outcome_badge}'
+            f'<br><span style="color:#9ca3af;font-size:0.75rem">'
+            f'F&G: {fg} &nbsp;·&nbsp; Nieuws: {news} &nbsp;·&nbsp; Conviction: {conf}'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    # Track record summary
+    total = len(verdicts)
+    with_outcome = [v for v in verdicts if v.get("correct") is not None]
+    if with_outcome:
+        n_correct = sum(1 for v in with_outcome if v.get("correct"))
+        acc = n_correct / len(with_outcome) * 100
+        st.caption(
+            f"Track record: **{acc:.0f}%** correct over {len(with_outcome)} afgeronde verdicts "
+            f"(van {total} totaal)"
+        )
+
+
 def _oracle_pattern_table() -> None:
     """Patroon-statistieken uit de DB: regime × conviction × bucket → win%."""
     st.markdown("#### 📊 Handelspatronen uit DB")
@@ -1641,6 +1718,8 @@ def _auto_router_panel() -> None:
 
     st.divider()
     _oracle_temperature_widget()
+    st.divider()
+    _oracle_verdicts_panel()
     st.divider()
     _oracle_pattern_table()
     st.divider()

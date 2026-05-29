@@ -305,6 +305,30 @@ async def _auto_router_coin_tick(coin: str) -> None:
     if decision.bucket == "skip":
         return
 
+    # ── Oracle gate (Fase 2) ───────────────────────────────────────────────────
+    import uuid as _uuid
+    from . import oracle as _oracle_mod
+    pre_trade_id = str(_uuid.uuid4())
+    try:
+        verdict = await _oracle_mod.get_oracle_verdict(
+            coin=coin,
+            conviction_score=decision.conviction_score,
+            regime=decision.regime,
+            trade_id=pre_trade_id,
+        )
+        if not verdict.approved:
+            log.info(
+                "oracle_blocked_trade",
+                coin=coin,
+                reason=verdict.reason,
+                temperature=verdict.trading_temperature,
+                trade_id=pre_trade_id,
+            )
+            return
+    except Exception as _exc:
+        log.warning("oracle_gate_error", coin=coin, error=str(_exc))
+        # Never block a trade on Oracle errors — fail open
+
     if decision.bucket == "signal":
         # Delegate to signal_trader's own check — it re-validates internally
         from . import signal_trader as _st
@@ -317,6 +341,7 @@ async def _auto_router_coin_tick(coin: str) -> None:
     market["_router_no_size"] = decision.no_size
     market["_router_bucket"] = decision.bucket
     market["_router_conviction_score"] = decision.conviction_score
+    market["_pre_trade_id"] = pre_trade_id   # links trade to oracle verdict
     # Respect router.paper_mode flag — default True so auto_router starts safe
     _router_paper = CONFIG.get("router", {}).get("paper_mode", True)
     # coin_guard paper_only state always forces paper regardless of global setting

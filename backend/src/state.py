@@ -62,7 +62,8 @@ def create_trade_state(
     mode: str,
     triggered_by: str = "bot",
 ) -> dict:
-    trade_id = str(uuid.uuid4())
+    # Use pre-generated ID from Oracle verdict linkage if provided
+    trade_id = market.get("_pre_trade_id") or str(uuid.uuid4())
     window_start = market["window_start"]
     window_end = market["window_end"]
 
