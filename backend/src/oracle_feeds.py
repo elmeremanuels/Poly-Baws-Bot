@@ -68,7 +68,12 @@ async def get_crypto_news_sentiment(coins: list[str] | None = None) -> dict:
                      "top_headline": str|None}}
     """
     global _news_cache, _news_cache_ts
-    token = CONFIG.get("oracle", {}).get("feeds", {}).get("cryptopanic_token", "")
+    # Env var takes precedence so the token survives deploy overwrites of config.yaml
+    import os as _os
+    token = (
+        _os.environ.get("CRYPTOPANIC_TOKEN")
+        or CONFIG.get("oracle", {}).get("feeds", {}).get("cryptopanic_token", "")
+    )
     if not token:
         return {c: {"sentiment": "unknown", "weighted_score": 0.0, "top_headline": None}
                 for c in (coins or [])}
