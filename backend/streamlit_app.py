@@ -248,11 +248,15 @@ with st.sidebar:
 
     st.markdown("**Mode**")
     mode = current_mode()
-    mode_idx = MODES.index(mode) if mode in MODES else 0
-    new_mode = st.radio("mode", MODES, index=mode_idx, label_visibility="collapsed")
-    if new_mode != mode:
-        write_command("set_mode", {"mode": new_mode})
-        st.rerun()
+    if mode in ("bggdsb_paper", "bggdsb_live"):
+        label = "🟡 Paper" if mode == "bggdsb_paper" else "💸 Live"
+        st.info(f"🧠 BGGDSB actief — {label}", icon="🧠")
+    else:
+        mode_idx = MODES.index(mode) if mode in MODES else 0
+        new_mode = st.radio("mode", MODES, index=mode_idx, label_visibility="collapsed")
+        if new_mode != mode:
+            write_command("set_mode", {"mode": new_mode})
+            st.rerun()
 
     if mode == "live_auto":
         completed = get_latest_completed_cycle()
