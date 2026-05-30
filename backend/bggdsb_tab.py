@@ -112,8 +112,8 @@ def bggdsb_panel() -> None:
 
     st.divider()
 
-    # ── Controls rij 1: budget / is5 / paper ─────────────────────────────────
-    col_a, col_b, col_c = st.columns([2, 2, 2])
+    # ── Controls rij 1: budget / tranches / is5 / paper ──────────────────────
+    col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 1])
 
     with col_a:
         budget = st.slider(
@@ -125,6 +125,19 @@ def bggdsb_panel() -> None:
         )
 
     with col_b:
+        tranches = st.slider(
+            "🔁 Tranches per window",
+            min_value=1, max_value=20, step=1,
+            value=int(get_state("bggdsb_tranches") or 5),
+            key="bggdsb_tranches",
+            help=(
+                "is5minfixedyet koopt meerdere keren per window (~elke 14s). "
+                "1 = één keer kopen. 5 = 5× €budget/5, elke 14s. "
+                "Meer tranches = betere prijsgemiddeling."
+            ),
+        )
+
+    with col_c:
         is5_weight = st.slider(
             "📡 is5 signaalgewicht (%)",
             min_value=0, max_value=100, step=10,
@@ -137,7 +150,7 @@ def bggdsb_panel() -> None:
             ),
         )
 
-    with col_c:
+    with col_d:
         paper_mode = st.toggle(
             "Paper mode",
             value=bool(int(get_state("bggdsb_paper_mode") or 1)),
@@ -168,15 +181,17 @@ def bggdsb_panel() -> None:
     # ── Save button ───────────────────────────────────────────────────────────
     if st.button("💾 Instellingen opslaan", key="bggdsb_save", disabled=not selected_coins):
         set_dashboard_state("bggdsb_window_budget", str(budget))
+        set_dashboard_state("bggdsb_tranches", str(tranches))
         set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
         set_dashboard_state("bggdsb_paper_mode", "1" if paper_mode else "0")
         set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
         mode_to_set = "bggdsb_paper" if paper_mode else "bggdsb_live"
         write_command("set_mode", {"mode": mode_to_set})
         coins_str = ", ".join(selected_coins)
+        tranche_eur = round(budget / tranches, 2)
         st.success(
-            f"Opgeslagen — budget €{budget} · coins: {coins_str} · "
-            f"is5 {is5_weight}% · modus {'paper' if paper_mode else 'LIVE'}"
+            f"Opgeslagen — budget €{budget} · {tranches}× €{tranche_eur}/tranche · "
+            f"coins: {coins_str} · is5 {is5_weight}% · modus {'paper' if paper_mode else 'LIVE'}"
         )
         _q_is5_live.clear()
         _q_stats.clear()
@@ -184,43 +199,44 @@ def bggdsb_panel() -> None:
     st.divider()
 
     # ── Rekenvoorbeeld: schaling ten opzichte van is5 ─────────────────────────
-    with st.expander("📐 Rekenvoorbeeld — hoe schaalt €30 t.o.v. is5minfixedyet?"):
-        dom_eur  = round(budget * 0.875, 2)
-        hed_eur  = round(budget * 0.125, 2)
-
-        # Voorbeeld met DOM prijs 0.52, HED prijs 0.49
+    with st.expander("📐 Rekenvoorbeeld — tranches + schaling t.o.v. is5minfixedyet"):
+        saved_tranches = int(get_state("bggdsb_tranches") or 5)
+        tranche_budget = round(budget / saved_tranches, 2)
         dom_price, hed_price = 0.52, 0.49
-        dom_shares = round(dom_eur / dom_price, 1)
-        hed_shares = round(hed_eur / hed_price, 1)
 
-        win_payout  = round(dom_shares * 1.00, 2)
-        win_gross   = round(win_payout - budget, 2)
-        win_roi     = round(win_gross / budget * 100, 1)
+        rows_md = ""
+        total_dom_shares, total_hed_shares = 0.0, 0.0
+        for i in range(1, saved_tranches + 1):
+            t_dom = round(tranche_budget * 0.875, 2)
+            t_hed = round(tranche_budget * 0.125, 2)
+            ds = round(t_dom / dom_price, 1)
+            hs = round(t_hed / hed_price, 1)
+            total_dom_shares += ds
+            total_hed_shares += hs
+            rows_md += f"| T{i} (+{(i-1)*14}s) | €{tranche_budget} | €{t_dom} → {ds} shares | €{t_hed} → {hs} shares |\n"
 
-        lose_payout = round(hed_shares * 1.00, 2)
-        lose_gross  = round(lose_payout - budget, 2)
-        lose_roi    = round(lose_gross / budget * 100, 1)
+        win_gross  = round(total_dom_shares * 1.0 - budget, 2)
+        lose_gross = round(total_hed_shares * 1.0 - budget, 2)
+        ev = round(0.754 * win_gross + 0.246 * lose_gross, 2)
 
         st.markdown(f"""
-**Aanname:** dominant prijs = 0.52 · hedge prijs = 0.49
+**{saved_tranches} tranches · €{budget} totaal · €{tranche_budget}/tranche · prijzen: dom=0.52 · hedge=0.49**
 
-| | is5minfixedyet (€500) | Jouw bot (€{budget}) |
-|---|---|---|
-| Dominant (87.5%) | €437.50 → {round(437.5/dom_price,0):.0f} shares | **€{dom_eur}** → {dom_shares} shares |
-| Hedge (12.5%) | €62.50 → {round(62.5/hed_price,0):.0f} shares | **€{hed_eur}** → {hed_shares} shares |
-| Als dominant wint | +€{round(437.5/dom_price*1 - 500, 2):+.2f} (**+75.0%**) | **€{win_gross:+.2f} ({win_roi:+.1f}%)** |
-| Als dominant verliest | −€{round(500 - 62.5/hed_price*1, 2):.2f} (**−87.5%**) | **€{lose_gross:+.2f} ({lose_roi:+.1f}%)** |
+| Tranche | Budget | Dominant (87.5%) | Hedge (12.5%) |
+|---|---|---|---|
+{rows_md}
+| **Totaal** | **€{budget}** | **{round(total_dom_shares,1)} shares** | **{round(total_hed_shares,1)} shares** |
 
-> **Het ROI-percentage is identiek.** is5 verdient meer in absolute €€ omdat hun budget groter is.
-> Met €{budget} doe je precies hetzelfde — alleen de getallen zijn kleiner.
-> Bij 75% win-rate: verwachte waarde per window = **€{round(0.75*win_gross + 0.25*lose_gross, 2):+.2f}**
-        """)
-
+| Scenario | Payout | P&L | ROI |
+|---|---|---|---|
+| Dominant wint | €{round(total_dom_shares,1)} | **€{win_gross:+.2f}** | **{round(win_gross/budget*100,1):+.1f}%** |
+| Dominant verliest | €{round(total_hed_shares,1)} | **€{lose_gross:+.2f}** | **{round(lose_gross/budget*100,1):+.1f}%** |
+| Verwachte waarde (75.4% WR) | | **€{ev:+.2f}/window** | |
+""")
         st.caption(
-            "is5minfixedyet koopt meerdere keren per window (elke ~14s). "
-            "Dat is een averaging-in tactiek. Het effect: als de prijs beweegt vóór expiry, "
-            "middelen ze hun kostprijs. Met €30 doe je één keer hetzelfde op kleinere schaal. "
-            "Als de backtest een hogere verwachte waarde toont, kun je het budget verhogen."
+            "Het aantal tranches schaalt NIET mee met het budget — dat is de strategie zelf. "
+            "is5 koopt ook 5–20× per window, niet omdat ze meer geld hebben, "
+            "maar om hun gemiddelde entry-prijs te verbeteren als de markt beweegt."
         )
 
     st.divider()

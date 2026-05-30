@@ -145,8 +145,10 @@ def create_trade_state(
     return state
 
 
-def add_active_trade(state: dict) -> None:
+def add_active_trade(state: dict, skip_window_register: bool = False) -> None:
     _active_trades[state["trade_id"]] = state
+    if skip_window_register:
+        return
     win = state.get("window_start_ts", "")
     if win:
         register_window_trade(state["coin"], win)
