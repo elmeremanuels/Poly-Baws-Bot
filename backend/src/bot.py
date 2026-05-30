@@ -662,15 +662,16 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if has_traded_window(coin, window_ts):
         return
 
-    # Timing — wacht op entry_delay zodat prijzen gezet zijn, enter dan met meest recente data
-    entry_window_secs = bggdsb_cfg.get("entry_window_secs", 90)
-    entry_delay_secs  = bggdsb_cfg.get("entry_delay_secs", 45)
-    secs_since_start  = (now - market["window_start"]).total_seconds()
+    # Timing: genoeg tijd resterend én niet te vroeg (scanner vindt window pas na ~120s)
+    secs_since_start   = (now - market["window_start"]).total_seconds()
+    secs_until_end     = (market["window_end"] - now).total_seconds()
+    min_secs_remaining = float(bggdsb_cfg.get("min_secs_remaining", 150))
+    entry_delay_secs   = float(bggdsb_cfg.get("entry_delay_secs", 10))
     if secs_since_start < entry_delay_secs:
-        log.debug("bggdsb_too_early", coin=coin, secs=round(secs_since_start, 1), delay=entry_delay_secs)
-        return  # te vroeg — wacht op meer prijsdata
-    if secs_since_start > entry_window_secs or secs_since_start < -300:
-        log.debug("bggdsb_outside_entry_window", coin=coin, secs=round(secs_since_start, 1))
+        log.debug("bggdsb_too_early", coin=coin, secs=round(secs_since_start, 1))
+        return
+    if secs_until_end < min_secs_remaining:
+        log.debug("bggdsb_too_late", coin=coin, secs_left=round(secs_until_end, 1))
         return
 
     paper_raw   = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
