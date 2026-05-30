@@ -37,6 +37,10 @@ from src.db_sync import (
     get_oracle_pattern_stats,
     get_oracle_signal_patterns,
     get_oracle_verdicts,
+    get_whale_meta,
+    get_whale_activity,
+    get_whale_positions,
+    get_whale_bot_overlap,
 )
 from src.commands import write_command, delete_hybrid_pending
 from src.db_sync import delete_signal_trades
@@ -2273,13 +2277,143 @@ if not st.session_state.get("_page_loaded"):
     st.rerun()             # → render 2: Beveiliging + Learning direct, rest skeleton
 
 # ── Tab rendering — fase-gebaseerd ─────────────────────────────────────────────
+# ── Whale Tracker panel ───────────────────────────────────────────────────────
+
+@st.cache_data(ttl=60)
+def _q_whale_meta():
+    return get_whale_meta()
+
+@st.cache_data(ttl=60)
+def _q_whale_activity(address, coin, days):
+    return get_whale_activity(address=address or None, coin=coin or None, days=days)
+
+@st.cache_data(ttl=60)
+def _q_whale_positions(address, coin, active_only):
+    return get_whale_positions(address=address or None, coin=coin or None, active_only=active_only)
+
+@st.cache_data(ttl=120)
+def _q_whale_overlap(days):
+    return get_whale_bot_overlap(days=days)
+
+
+@st.fragment
+def _whale_panel() -> None:
+    st.subheader("🐋 Whale Tracker")
+
+    meta = _q_whale_meta()
+    if not meta:
+        st.info("Geen whale-adressen geconfigureerd of nog niet gesynct. Voeg adressen toe in `config.yaml → whale_tracker.addresses`.")
+        return
+
+    # ── Status bar ──────────────────────────────────────────────────────────
+    for m in meta:
+        sync_ago = ""
+        if m.get("last_synced_at"):
+            sync_ago = f" · gesynchroniseerd {m['last_synced_at'][:16]}"
+        st.caption(f"**{m['name']}** `{m['address'][:10]}…{m['address'][-6:]}` — {m['activity_count']} transacties · {m['positions_count']} posities{sync_ago}")
+
+    st.divider()
+
+    # ── Filters ─────────────────────────────────────────────────────────────
+    col_addr, col_coin, col_days = st.columns([2, 1.5, 1.5])
+    addr_options = ["Alle"] + [m["name"] for m in meta]
+    with col_addr:
+        sel_addr_label = st.selectbox("Account", addr_options, key="wh_addr")
+    with col_coin:
+        sel_coin = st.selectbox("Coin", ["Alle", "BTC", "ETH", "SOL", "DOGE", "XRP"], key="wh_coin")
+    with col_days:
+        sel_days_label = st.selectbox("Periode", ["7 dagen", "30 dagen", "Alle"], key="wh_days")
+
+    sel_addr = next((m["address"] for m in meta if m["name"] == sel_addr_label), None) if sel_addr_label != "Alle" else None
+    sel_coin_val = None if sel_coin == "Alle" else sel_coin
+    sel_days = {"7 dagen": 7, "30 dagen": 30, "Alle": None}[sel_days_label]
+
+    # ── Tabs ────────────────────────────────────────────────────────────────
+    tab_act, tab_pos, tab_overlap = st.tabs(["📋 Activiteit", "💼 Posities", "🔀 Overlap met bot"])
+
+    with tab_act:
+        rows = _q_whale_activity(sel_addr, sel_coin_val, sel_days)
+        if not rows:
+            st.caption("Geen activiteit gevonden.")
+        else:
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            show_cols = [c for c in ["name", "coin", "outcome_side", "trade_type", "price", "usdc_size", "question", "event_ts"] if c in df.columns]
+            df_show = df[show_cols].copy()
+            df_show.columns = [{"name": "Account", "coin": "Coin", "outcome_side": "YES/NO", "trade_type": "Type",
+                                 "price": "Prijs", "usdc_size": "USDC", "question": "Markt", "event_ts": "Tijd"}.get(c, c) for c in show_cols]
+            if "Prijs" in df_show.columns:
+                df_show["Prijs"] = df_show["Prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+            if "USDC" in df_show.columns:
+                df_show["USDC"] = df_show["USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+            st.dataframe(df_show, hide_index=True, use_container_width=True)
+            st.caption(f"{len(rows)} transacties")
+
+    with tab_pos:
+        rows = _q_whale_positions(sel_addr, sel_coin_val, False)
+        if not rows:
+            st.caption("Geen posities gevonden.")
+        else:
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            # Split actief / expired
+            if "is_redeemable" in df.columns:
+                active = df[df["is_redeemable"] == 0]
+                expired = df[df["is_redeemable"] == 1]
+            else:
+                active = df
+                expired = pd.DataFrame()
+
+            show_cols = [c for c in ["name", "coin", "side", "size", "avg_price", "cur_price", "cash_pnl", "pct_pnl", "question"] if c in df.columns]
+
+            if not active.empty:
+                st.markdown("**Actieve posities**")
+                df_a = active[show_cols].copy()
+                df_a.columns = [{"name": "Account", "coin": "Coin", "side": "Kant", "size": "Shares",
+                                  "avg_price": "Gem.prijs", "cur_price": "Nu", "cash_pnl": "P&L €",
+                                  "pct_pnl": "P&L %", "question": "Markt"}.get(c, c) for c in show_cols]
+                if "P&L %" in df_a.columns:
+                    df_a["P&L %"] = df_a["P&L %"].apply(lambda x: f"{x:+.1f}%" if x else "")
+                if "P&L €" in df_a.columns:
+                    df_a["P&L €"] = df_a["P&L €"].apply(lambda x: f"${x:+.2f}" if x else "")
+                st.dataframe(df_a, hide_index=True, use_container_width=True)
+
+            if not expired.empty:
+                with st.expander(f"Verlopen posities ({len(expired)}) — redeemable"):
+                    df_e = expired[show_cols].copy()
+                    st.dataframe(df_e, hide_index=True, use_container_width=True)
+
+    with tab_overlap:
+        st.caption("Markten waar de whale handelde terwijl jouw bot ook actief was (±30 min).")
+        overlap = _q_whale_overlap(sel_days or 30)
+        if not overlap:
+            st.caption("Geen overlap gevonden in geselecteerde periode.")
+        else:
+            import pandas as pd
+            df = pd.DataFrame(overlap)
+            show_cols = [c for c in ["coin", "bot_ts", "whale_name", "whale_side", "whale_price", "whale_usdc",
+                                      "winner_side", "net_pnl"] if c in df.columns]
+            df_show = df[show_cols].copy()
+            df_show.columns = [{"coin": "Coin", "bot_ts": "Bot tijd", "whale_name": "Whale",
+                                  "whale_side": "Whale kant", "whale_price": "Whale prijs",
+                                  "whale_usdc": "Whale USDC", "winner_side": "Winnaar", "net_pnl": "Bot P&L"}.get(c, c) for c in show_cols]
+            if "Bot P&L" in df_show.columns:
+                df_show["Bot P&L"] = df_show["Bot P&L"].apply(lambda x: f"€{x:+.3f}" if x is not None else "")
+            if "Whale prijs" in df_show.columns:
+                df_show["Whale prijs"] = df_show["Whale prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+            if "Whale USDC" in df_show.columns:
+                df_show["Whale USDC"] = df_show["Whale USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+            st.dataframe(df_show, hide_index=True, use_container_width=True)
+            st.caption(f"{len(overlap)} overlappende trades")
+
+
 # Render 2 (_tabs_ready=False): Learning + Beveiliging direct, andere tabs tonen
 #   een laadindicator. Aan het einde st.rerun() → render 3 volledig dashboard.
 # Render 3+ (_tabs_ready=True): alles normaal.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-tab_live, tab_st, tab_ar, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard = st.tabs(
-    ["🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging"]
+tab_live, tab_st, tab_ar, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard, tab_whale = st.tabs(
+    ["🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging", "🐋 Whales"]
 )
 with tab_live:
     if _tabs_ready:
@@ -2323,6 +2457,12 @@ with tab_portfolio:
 
 with tab_guard:
     coin_protection_panel()  # ← direct beschikbaar na startup
+
+with tab_whale:
+    if _tabs_ready:
+        _whale_panel()
+    else:
+        _tab_loading("🐋 Whales", "Whale data wordt geladen…")
 
 # ── Auto-advance naar volledig dashboard ───────────────────────────────────────
 # Na render 2 (skeleton pass) → trigger render 3 (volledig).

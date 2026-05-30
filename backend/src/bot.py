@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from . import scanner, ws_client, risk, asset_price_feed, signals as _signals, weighting_guard as _wg
+from . import whale_tracker as _whale_tracker
 from .config_loader import CONFIG
 from .logger import log, write_event, save_dashboard_state
 from .state import (
@@ -639,6 +640,7 @@ async def run_bot() -> None:
         asyncio.create_task(_signals.funding_rate_loop()),
         asyncio.create_task(_oracle_discord_task()),
         asyncio.create_task(_oracle_analysis_loop()),
+        asyncio.create_task(_whale_tracker.whale_sync_loop()),
     ]
 
     # Per-coin straddle loops (self-gate op signal_trader mode)

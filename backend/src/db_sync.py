@@ -1331,3 +1331,119 @@ def get_oracle_verdicts(limit: int = 50) -> list[dict]:
     except Exception:
         return []
 
+
+
+# ── Whale Tracker reads ────────────────────────────────────────────────────────
+
+def get_whale_meta() -> list[dict]:
+    """Tracked addresses with last sync time and counts."""
+    if not _db_path.exists():
+        return []
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT address, name, last_synced_at, activity_count, positions_count "
+                "FROM whale_meta ORDER BY name"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def get_whale_activity(
+    address: str | None = None,
+    coin: str | None = None,
+    limit: int = 200,
+    days: int | None = None,
+) -> list[dict]:
+    """Recent whale activity, optionally filtered by address/coin/days."""
+    if not _db_path.exists():
+        return []
+    conditions: list[str] = []
+    params: list = []
+    if address:
+        conditions.append("address = ?")
+        params.append(address)
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if days:
+        conditions.append("event_ts >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM whale_activity {where} ORDER BY event_ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def get_whale_positions(
+    address: str | None = None,
+    coin: str | None = None,
+    active_only: bool = False,
+) -> list[dict]:
+    """Whale open positions, optionally filtered."""
+    if not _db_path.exists():
+        return []
+    conditions: list[str] = []
+    params: list = []
+    if address:
+        conditions.append("address = ?")
+        params.append(address)
+    if coin:
+        conditions.append("coin = ?")
+        params.append(coin)
+    if active_only:
+        conditions.append("is_redeemable = 0 AND cur_price > 0.01")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM whale_positions {where} ORDER BY ABS(cash_pnl) DESC",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def get_whale_bot_overlap(days: int = 7) -> list[dict]:
+    """Markets where whale traded AND our bot had a trade in same window."""
+    if not _db_path.exists():
+        return []
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    t.coin,
+                    t.question AS bot_question,
+                    t.winner_side,
+                    t.net_pnl,
+                    t.created_at AS bot_ts,
+                    wa.name AS whale_name,
+                    wa.outcome_side AS whale_side,
+                    wa.price AS whale_price,
+                    wa.usdc_size AS whale_usdc,
+                    wa.trade_type,
+                    wa.event_ts AS whale_ts
+                FROM trades t
+                JOIN whale_activity wa
+                  ON t.coin = wa.coin
+                  AND ABS(julianday(t.created_at) - julianday(wa.event_ts)) < 0.02  -- within ~30 min
+                WHERE t.status IN ('closed','resolved')
+                  AND t.created_at >= datetime('now', ?)
+                ORDER BY t.created_at DESC
+                LIMIT 100
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []

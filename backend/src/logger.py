@@ -323,6 +323,57 @@ async def init_db() -> None:
             )
         """)
         await db.commit()
+        # Migration: Whale Tracker tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS whale_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                name TEXT,
+                transaction_hash TEXT,
+                market_id TEXT,
+                question TEXT,
+                outcome_side TEXT,
+                trade_type TEXT,
+                price REAL,
+                size REAL,
+                usdc_size REAL,
+                coin TEXT,
+                event_ts TEXT,
+                synced_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(transaction_hash)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS whale_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                name TEXT,
+                condition_id TEXT,
+                question TEXT,
+                side TEXT,
+                size REAL,
+                avg_price REAL,
+                cur_price REAL,
+                cash_pnl REAL,
+                pct_pnl REAL,
+                is_redeemable INTEGER DEFAULT 0,
+                coin TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS whale_meta (
+                address TEXT PRIMARY KEY,
+                name TEXT,
+                last_synced_at TEXT,
+                activity_count INTEGER DEFAULT 0,
+                positions_count INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_whale_activity_address ON whale_activity(address, event_ts)"
+        )
+        await db.commit()
     log.info("database_initialized", path=str(_db_path))
 
 

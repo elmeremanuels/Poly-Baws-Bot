@@ -297,3 +297,11 @@ oracle:
     cryptopanic_token: ""            # CRYPTOPANIC_TOKEN in .env heeft voorrang
     fear_greed_enabled: true
     polymarket_aggregate: true
+
+whale_tracker:
+  enabled: true
+  sync_interval_secs: 300          # elke 5 minuten synchen
+  addresses:
+    adelgranadol: "0xb305d384400e3d7a15780216a55368ea677eca4e"
+    # voeg meer toe:
+    # naam: "0x..."
