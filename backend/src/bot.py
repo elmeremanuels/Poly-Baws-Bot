@@ -258,7 +258,9 @@ async def _coin_loop(coin: str) -> None:
             continue
 
         if get_mode() in ("bggdsb_paper", "bggdsb_live"):
-            if not risk.is_killed():
+            # Paper mode nooit blokkeren door kill switch — kost geen echt geld
+            is_bggdsb_paper = get_mode() == "bggdsb_paper"
+            if not risk.is_killed() or is_bggdsb_paper:
                 try:
                     await _bggdsb_coin_tick(coin)
                 except Exception as e:
