@@ -684,9 +684,31 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     no_token  = market.get("no_token", "")
     yes_ask   = ws_client.get_best_ask(yes_token)
     no_ask    = ws_client.get_best_ask(no_token)
+
+    # REST-fallback als WS orderbook nog leeg is
+    if yes_ask is None or no_ask is None:
+        try:
+            import httpx as _httpx
+            from .orders import CLOB_REST as _CLOB_REST
+            async with _httpx.AsyncClient(timeout=4.0) as _hc:
+                if yes_ask is None:
+                    r = await _hc.get(f"{_CLOB_REST}/price",
+                                      params={"token_id": yes_token, "side": "buy"})
+                    if r.status_code == 200:
+                        yes_ask = float(r.json().get("price", 0) or 0) or None
+                if no_ask is None:
+                    r = await _hc.get(f"{_CLOB_REST}/price",
+                                      params={"token_id": no_token, "side": "buy"})
+                    if r.status_code == 200:
+                        no_ask = float(r.json().get("price", 0) or 0) or None
+        except Exception as _e:
+            log.debug("bggdsb_rest_price_fallback_error", error=str(_e))
+
     if yes_ask is None or no_ask is None:
         log.info("bggdsb_no_ask_price", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
         return
+
+    log.debug("bggdsb_prices", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
 
     # Market competitive gate
     comp_min = bggdsb_cfg.get("entry_price_min", 0.10)
