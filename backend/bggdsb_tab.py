@@ -1,12 +1,13 @@
 """BGGDSB Tab — Beter Goed Gejat Dan Slecht Bedacht
 
 Strategie 1:1 gebaseerd op is5minfixedyet (data-analyse 2026-05-30):
-  1. Entry prijs: dominante kant 0.40–0.65 (nooit boven 0.65)
-  2. Budget split: 87.5% dominant / 12.5% hedge
-  3. Totaal budget: €20–50 per window (instelbaar)
-  4. Richting: conviction signal (OFI + funding rate)
-  5. Exit: hold to expiry — geen vroegtijdige exit
-  6. Optioneel: is5 live activiteit als extra bevestigingssignaal
+  1. Market competitive gate: beide kanten 0.10–0.90 (anders al bijna resolved)
+  2. Richting: conviction signal (OFI + funding rate) → dominant kant
+  3. Dominant kant: mediaan 8 tranches (~elke 14s), geen prijsgate na eerste entry
+  4. Hedge: koop tegenovergestelde kant LAAT zodra prijs ≤ 0.15 (mediaan 0.11)
+  5. Totaal budget: €20–50 per window (instelbaar)
+  6. Exit: hold to expiry (€1.00) — geen vroegtijdige exit
+  7. Optioneel: is5 live activiteit als extra bevestigingssignaal
 """
 from __future__ import annotations
 
@@ -121,18 +122,18 @@ def bggdsb_panel() -> None:
             min_value=20, max_value=50, step=5,
             value=int(get_state("bggdsb_window_budget") or 30),
             key="bggdsb_budget",
-            help="Totaal per 5-min window: 87.5% dominant + 12.5% hedge",
+            help="Totaal per 5-min window: ~89% dominant (tranches) + ~11% late hedge (bij ≤0.15)",
         )
 
     with col_b:
         tranches = st.slider(
             "🔁 Tranches per window",
             min_value=1, max_value=20, step=1,
-            value=int(get_state("bggdsb_tranches") or 5),
+            value=int(get_state("bggdsb_tranches") or 8),
             key="bggdsb_tranches",
             help=(
-                "is5minfixedyet koopt meerdere keren per window (~elke 14s). "
-                "1 = één keer kopen. 5 = 5× €budget/5, elke 14s. "
+                "is5minfixedyet koopt mediaan 8× per window (~elke 14s), max 37+. "
+                "Alleen de dominant kant. Hedge wordt apart gekocht zodra ≤0.15. "
                 "Meer tranches = betere prijsgemiddeling."
             ),
         )
@@ -199,44 +200,48 @@ def bggdsb_panel() -> None:
     st.divider()
 
     # ── Rekenvoorbeeld: schaling ten opzichte van is5 ─────────────────────────
-    with st.expander("📐 Rekenvoorbeeld — tranches + schaling t.o.v. is5minfixedyet"):
-        saved_tranches = int(get_state("bggdsb_tranches") or 5)
+    with st.expander("📐 Rekenvoorbeeld — tranches + late hedge (is5minfixedyet patroon)"):
+        saved_tranches = int(get_state("bggdsb_tranches") or 8)
         tranche_budget = round(budget / saved_tranches, 2)
-        dom_price, hed_price = 0.52, 0.49
+        dom_price = 0.495  # mediaan eerste entry is5
 
         rows_md = ""
-        total_dom_shares, total_hed_shares = 0.0, 0.0
+        total_dom_shares = 0.0
         for i in range(1, saved_tranches + 1):
-            t_dom = round(tranche_budget * 0.875, 2)
-            t_hed = round(tranche_budget * 0.125, 2)
-            ds = round(t_dom / dom_price, 1)
-            hs = round(t_hed / hed_price, 1)
+            ds = round(tranche_budget / dom_price, 1)
             total_dom_shares += ds
-            total_hed_shares += hs
-            rows_md += f"| T{i} (+{(i-1)*14}s) | €{tranche_budget} | €{t_dom} → {ds} shares | €{t_hed} → {hs} shares |\n"
+            rows_md += f"| T{i} (+{(i-1)*14}s) | €{tranche_budget} | {ds} shares @ ~{dom_price:.2f} |\n"
+
+        # Hedge: 11% van budget, gekocht LAAT bij ~0.11
+        hedge_eur = round(budget * 0.11, 2)
+        hedge_price = 0.11  # mediaan is5 hedge prijs
+        hedge_shares = round(hedge_eur / hedge_price, 1)
 
         win_gross  = round(total_dom_shares * 1.0 - budget, 2)
-        lose_gross = round(total_hed_shares * 1.0 - budget, 2)
+        lose_gross = round(hedge_shares * 1.0 - budget, 2)
         ev = round(0.754 * win_gross + 0.246 * lose_gross, 2)
 
         st.markdown(f"""
-**{saved_tranches} tranches · €{budget} totaal · €{tranche_budget}/tranche · prijzen: dom=0.52 · hedge=0.49**
+**{saved_tranches} tranches · €{budget} totaal · €{tranche_budget}/tranche · dom entry ~{dom_price:.2f}**
 
-| Tranche | Budget | Dominant (87.5%) | Hedge (12.5%) |
-|---|---|---|---|
+| Tranche | Inleg | Dominant kant |
+|---|---|---|
 {rows_md}
-| **Totaal** | **€{budget}** | **{round(total_dom_shares,1)} shares** | **{round(total_hed_shares,1)} shares** |
+| **Totaal dom** | **€{budget - hedge_eur:.2f}** | **{round(total_dom_shares,1)} shares** |
+
+**Late hedge** (zodra tegengestelde kant ≤ 0.15):
+€{hedge_eur} · ~{hedge_price:.2f}/share → {hedge_shares} shares
 
 | Scenario | Payout | P&L | ROI |
 |---|---|---|---|
 | Dominant wint | €{round(total_dom_shares,1)} | **€{win_gross:+.2f}** | **{round(win_gross/budget*100,1):+.1f}%** |
-| Dominant verliest | €{round(total_hed_shares,1)} | **€{lose_gross:+.2f}** | **{round(lose_gross/budget*100,1):+.1f}%** |
+| Dominant verliest | €{round(hedge_shares,1)} | **€{lose_gross:+.2f}** | **{round(lose_gross/budget*100,1):+.1f}%** |
 | Verwachte waarde (75.4% WR) | | **€{ev:+.2f}/window** | |
 """)
         st.caption(
             "Het aantal tranches schaalt NIET mee met het budget — dat is de strategie zelf. "
-            "is5 koopt ook 5–20× per window, niet omdat ze meer geld hebben, "
-            "maar om hun gemiddelde entry-prijs te verbeteren als de markt beweegt."
+            "is5 koopt mediaan 8× dominant, dan LAAT een kleine hedge zodra de tegengestelde kant "
+            "≤0.15 is (betekent: markt denkt bijna zeker dat dominant wint)."
         )
 
     st.divider()
@@ -245,16 +250,18 @@ def bggdsb_panel() -> None:
     rule_col, perf_col = st.columns(2)
 
     with rule_col:
-        st.markdown("**Strategie regels (is5minfixedyet)**")
+        st.markdown("**Strategie regels (is5minfixedyet — exact)**")
         st.markdown("""
 | Regel | Waarde |
 |---|---|
-| Entry prijs | 0.40 – 0.65 dominant |
-| Hedge prijs | < 0.35 andere kant |
-| Split | 87.5% / 12.5% |
-| Richting | OFI + funding rate |
+| Market gate | Beide kanten 0.10 – 0.90 |
+| Richting | OFI + funding rate (conviction) |
+| Dominant tranches | Mediaan **8×** (~elke 14s) |
+| Geen prijsgate hercheck | Koopt door ongeacht beweging |
+| Hedge timing | **LAAT** — zodra andere kant ≤ 0.15 |
+| Hedge budget | ~11% van window budget |
+| Hedge mediaan prijs | **0.11** (mediaan is5 data) |
 | Exit | Hold to expiry (€1.00) |
-| Timing | Eerste 90s van window |
 | Win-rate (is5 data) | **75.4%** initieel |
 | ROI (is5 data) | **+26.6%** over 3 dagen |
 """)
@@ -276,15 +283,16 @@ def bggdsb_panel() -> None:
 
     st.divider()
 
-    # ── Entry price gate indicator ─────────────────────────────────────────────
-    st.markdown("**Actieve price gate**")
+    # ── Market gate indicator ──────────────────────────────────────────────────
+    st.markdown("**Actieve market gate**")
     saved_budget = int(get_state("bggdsb_window_budget") or 30)
-    dominant_eur = round(saved_budget * 0.875, 2)
-    hedge_eur = round(saved_budget * 0.125, 2)
+    saved_tranches_n = int(get_state("bggdsb_tranches") or 8)
+    dominant_eur = round(saved_budget * 0.89, 2)
+    hedge_eur = round(saved_budget * 0.11, 2)
     gate_col1, gate_col2, gate_col3, gate_col4 = st.columns(4)
-    gate_col1.metric("Entry zone", "0.40 – 0.65", help="Buiten deze zone = skip")
-    gate_col2.metric("Dominant", f"€{dominant_eur}", delta=f"{dominant_eur/saved_budget*100:.0f}%")
-    gate_col3.metric("Hedge", f"€{hedge_eur}", delta=f"-{hedge_eur/saved_budget*100:.0f}%")
+    gate_col1.metric("Market gate", "0.10 – 0.90", help="Beide kanten moeten in deze range zijn")
+    gate_col2.metric("Dominant", f"€{dominant_eur}", delta=f"{saved_tranches_n}× tranches")
+    gate_col3.metric("Hedge (laat)", f"€{hedge_eur}", delta="bij ≤0.15")
     gate_col4.metric("Actieve coins", ", ".join(_load_selected_coins()) or "—")
 
     st.divider()

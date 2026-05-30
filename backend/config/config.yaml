@@ -308,10 +308,10 @@ whale_tracker:
 bggdsb:
   coins: ["BTC"]                   # is5minfixedyet handelde vrijwel alleen BTC
   window_budget_eur: 30.0          # totaal per 5-min window (€20–50)
-  entry_price_min: 0.40            # dominant kant: ondergrens
-  entry_price_max: 0.65            # dominant kant: bovengrens
-  dominant_ratio: 0.875            # 87.5% dominant / 12.5% hedge
+  entry_price_min: 0.10            # market competitive: beide kanten minimaal 0.10 (anders al bijna resolved)
+  entry_price_max: 0.90            # market competitive: beide kanten maximaal 0.90 (anders al bijna resolved)
   entry_window_secs: 90            # max seconden na window-start voor entry
-  tranches: 5                      # aantal inkopen per window (is5 doet ~5–20+)
+  tranches: 8                      # mediaan uit is5-data: 8 tranches dominant kant (max 37+)
   tranche_interval_secs: 14        # seconden tussen tranches (~14s zoals is5)
+  hedge_price_trigger: 0.15        # koop hedge zodra tegenovergestelde kant ≤ 0.15 (mediaan is5: 0.11)
   paper_mode: true                 # true = paper (safe start)

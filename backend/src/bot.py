@@ -365,7 +365,7 @@ async def _auto_router_coin_tick(coin: str) -> None:
     await _process_coin_window(coin, market, force_paper=_router_paper)
 
 
-# Tranche state: {f"{coin}_{window_ts}": {placed, last_ts, max_tranches, tranche_eur, dominant_side, paper}}
+# Tranche state: {f"{coin}_{window_ts}": {placed, last_ts, max_tranches, tranche_eur, dominant_side}}
 _bggdsb_tranche_state: dict[str, dict] = {}
 
 
@@ -374,38 +374,29 @@ async def _bggdsb_place_tranche(
     tranche_eur: float, conv_score: float, force_paper: bool,
     skip_window_register: bool,
 ) -> bool:
-    """Place one BGGDSB tranche. Returns True on success."""
-    from .state import create_trade_state, add_active_trade, register_window_trade
+    """Place one BGGDSB dominant-side tranche. Returns True on success.
+
+    Alleen de dominant kant wordt hier gekocht.
+    De hedge (tegenovergestelde kant) wordt gekocht door monitor.py zodra die ≤ 0.15 is.
+    """
+    from .state import create_trade_state, add_active_trade
     from .triggers import execute_entry
 
-    bggdsb_cfg = CONFIG.get("bggdsb", {})
-    dominant_ratio = bggdsb_cfg.get("dominant_ratio", 0.875)
-
     yes_token = market.get("yes_token", "")
-    no_token = market.get("no_token", "")
-    yes_ask = ws_client.get_best_ask(yes_token)
-    no_ask = ws_client.get_best_ask(no_token)
-    if yes_ask is None or no_ask is None:
+    no_token  = market.get("no_token", "")
+    dom_ask = ws_client.get_best_ask(yes_token if dominant_side == "YES" else no_token)
+    if dom_ask is None or dom_ask <= 0:
         return False
 
-    dom_eur   = round(tranche_eur * dominant_ratio, 4)
-    hedge_eur = round(tranche_eur * (1.0 - dominant_ratio), 4)
-
-    dom_price   = yes_ask if dominant_side == "YES" else no_ask
-    hedge_price = no_ask  if dominant_side == "YES" else yes_ask
-    if dom_price <= 0 or hedge_price <= 0:
-        return False
-
-    dom_shares   = round(dom_eur   / dom_price,   2)
-    hedge_shares = round(hedge_eur / hedge_price, 2)
-
-    yes_shares = dom_shares   if dominant_side == "YES" else hedge_shares
-    no_shares  = hedge_shares if dominant_side == "YES" else dom_shares
+    dom_shares = round(tranche_eur / dom_ask, 2)
+    yes_shares = dom_shares if dominant_side == "YES" else 0.0
+    no_shares  = 0.0        if dominant_side == "YES" else dom_shares
 
     mode = "paper" if force_paper else get_mode()
-    market["_bggdsb_yes_shares"] = yes_shares
-    market["_bggdsb_no_shares"]  = no_shares
-    market["_router_bucket"]     = "bggdsb"
+    market["_bggdsb_yes_shares"]    = yes_shares
+    market["_bggdsb_no_shares"]     = no_shares
+    market["_bggdsb_dominant_side"] = dominant_side
+    market["_router_bucket"]        = "bggdsb"
     market["_router_conviction_score"] = conv_score
 
     trade = create_trade_state(coin, market, mode, triggered_by="bggdsb")
@@ -414,17 +405,21 @@ async def _bggdsb_place_tranche(
     log.info(
         "bggdsb_tranche",
         coin=coin, dominant_side=dominant_side,
-        yes_shares=yes_shares, no_shares=no_shares,
+        dom_shares=dom_shares, dom_ask=round(dom_ask, 4),
         tranche_eur=tranche_eur, paper=force_paper,
     )
     return await execute_entry(trade["trade_id"])
 
 
 async def _bggdsb_coin_tick(coin: str) -> None:
-    """One scan tick for bggdsb mode: price gate → tranche → execute straddle.
+    """One scan tick voor bggdsb mode — is5minfixedyet strategie 1:1.
 
-    is5minfixedyet koopt meerdere keren per window (elke ~14s) — dat is price averaging.
-    Wij doen hetzelfde: budget/tranches per keer, zelfde interval, zelfde strategie.
+    Echte strategie (uit data-analyse):
+    1. Geen prijs-gate op dominant kant — kopen op conviction (OFI+funding)
+    2. Market competitive gate: beide kanten 0.10-0.90 (niet al beslist)
+    3. Gemiddeld 8 tranches per window, elke ~14s (alleen dominant kant)
+    4. Hedge koop door monitor.py zodra tegenovergestelde kant ≤ 0.15 (laat in window)
+    5. Hold to expiry
     """
     import json as _json
     from .db_sync import get_state as _get_state
@@ -448,42 +443,27 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if not market or not market.get("window_start"):
         return
 
-    window_ts = market["window_start"].isoformat()
+    window_ts  = market["window_start"].isoformat()
     window_key = f"{coin}_{window_ts}"
-    now = datetime.now(timezone.utc)
+    now        = datetime.now(timezone.utc)
 
-    # Paper mode (read once, used throughout)
     paper_raw = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
     force_paper = bool(int(paper_raw))
 
-    # ── Follow-up tranches: window al geclaimd, maar nog tranches te plaatsen ──
+    # ── Follow-up tranches ────────────────────────────────────────────────────
     existing = _bggdsb_tranche_state.get(window_key)
     if existing:
         if existing["placed"] >= existing["max_tranches"]:
-            return  # klaar
-        interval = existing.get("interval_secs", 14)
+            return
         since_last = (now - existing["last_ts"]).total_seconds()
-        if since_last < interval:
-            return  # te vroeg voor volgende tranche
-
-        # Prijs-gate hercontroleren voor elke tranche (markt kan bewegen)
-        entry_min = bggdsb_cfg.get("entry_price_min", 0.40)
-        entry_max = bggdsb_cfg.get("entry_price_max", 0.65)
-        dom = existing["dominant_side"]
-        yes_token = market.get("yes_token", "")
-        no_token = market.get("no_token", "")
-        dom_ask = ws_client.get_best_ask(yes_token if dom == "YES" else no_token)
-        if dom_ask is None or not (entry_min <= dom_ask <= entry_max):
-            log.info("bggdsb_tranche_skip_price_moved", coin=coin, placed=existing["placed"])
-            # Prijs uit gate: stop met bijkopen maar window al geclaimd
-            register_window_trade(coin, window_ts)
-            del _bggdsb_tranche_state[window_key]
+        if since_last < existing.get("interval_secs", 14):
             return
 
+        # is5 koopt door ongeacht prijsbeweging — geen hercheck van market gate
         is_last = (existing["placed"] + 1 >= existing["max_tranches"])
         ok = await _bggdsb_place_tranche(
             coin, market,
-            dominant_side=dom,
+            dominant_side=existing["dominant_side"],
             tranche_eur=existing["tranche_eur"],
             conv_score=existing["conv_score"],
             force_paper=force_paper,
@@ -492,24 +472,23 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         if ok:
             existing["placed"] += 1
             existing["last_ts"] = now
-            log.info("bggdsb_tranche_placed", coin=coin, placed=existing["placed"],
-                     max=existing["max_tranches"])
+            log.info("bggdsb_tranche_placed", coin=coin,
+                     placed=existing["placed"], max=existing["max_tranches"])
         if is_last or not ok:
             register_window_trade(coin, window_ts)
             del _bggdsb_tranche_state[window_key]
         return
 
-    # ── Eerste tranche: window nog niet geclaimd ──────────────────────────────
+    # ── Eerste tranche ────────────────────────────────────────────────────────
     if has_traded_window(coin, window_ts):
         return
 
     # Timing: alleen in eerste N seconden van window
     entry_window_secs = bggdsb_cfg.get("entry_window_secs", 90)
-    secs_since_start = (now - market["window_start"]).total_seconds()
+    secs_since_start  = (now - market["window_start"]).total_seconds()
     if secs_since_start > entry_window_secs or secs_since_start < -300:
         return
 
-    # Prijs-gate
     yes_token = market.get("yes_token", "")
     no_token  = market.get("no_token", "")
     yes_ask   = ws_client.get_best_ask(yes_token)
@@ -517,31 +496,14 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if yes_ask is None or no_ask is None:
         return
 
-    entry_min = bggdsb_cfg.get("entry_price_min", 0.40)
-    entry_max = bggdsb_cfg.get("entry_price_max", 0.65)
-
-    if entry_min <= yes_ask <= entry_max:
-        dominant_side = "YES"
-    elif entry_min <= no_ask <= entry_max:
-        dominant_side = "NO"
-    else:
-        log.info("bggdsb_skip_price_gate", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
+    # Market competitive gate: beide kanten moeten tussen 0.10-0.90 liggen
+    # (als een kant al >0.90 is, is de markt nagenoeg beslist — niet interessant)
+    comp_min = bggdsb_cfg.get("entry_price_min", 0.10)
+    comp_max = bggdsb_cfg.get("entry_price_max", 0.90)
+    if not (comp_min <= yes_ask <= comp_max and comp_min <= no_ask <= comp_max):
+        log.info("bggdsb_skip_not_competitive", coin=coin,
+                 yes_ask=yes_ask, no_ask=no_ask)
         return
-
-    # Budget en tranches
-    budget_raw = _get_state("bggdsb_window_budget") or str(bggdsb_cfg.get("window_budget_eur", 30.0))
-    try:
-        budget_eur = float(budget_raw)
-    except ValueError:
-        budget_eur = 30.0
-
-    tranches_raw = _get_state("bggdsb_tranches") or str(bggdsb_cfg.get("tranches", 1))
-    try:
-        max_tranches = max(1, int(tranches_raw))
-    except ValueError:
-        max_tranches = 1
-
-    tranche_eur = round(budget_eur / max_tranches, 4)
 
     # is5 signaalgewicht
     is5_weight_raw = _get_state("bggdsb_is5_signal_weight") or "0"
@@ -556,14 +518,33 @@ async def _bggdsb_coin_tick(coin: str) -> None:
             log.info("bggdsb_skip_is5_not_active", coin=coin, is5_weight=is5_weight)
             return
 
-    # Conviction check
+    # Conviction check: richting + minimale score
     from . import signals as _sigs
     conv_dir, conv_score = _sigs.get_conviction(coin)
-    base_threshold = 0.45
+    base_threshold   = 0.35
     adjusted_threshold = base_threshold - (is5_weight / 100.0) * 0.20
-    if conv_score < adjusted_threshold:
-        log.info("bggdsb_skip_low_conviction", coin=coin, score=conv_score, threshold=adjusted_threshold)
+    if not conv_dir or conv_score < adjusted_threshold:
+        log.info("bggdsb_skip_low_conviction", coin=coin,
+                 score=conv_score, threshold=adjusted_threshold)
         return
+
+    # Dominant kant = conviction richting (niet prijs-gebaseerd)
+    dominant_side = "YES" if conv_dir == "UP" else "NO"
+
+    # Budget en tranches
+    budget_raw = _get_state("bggdsb_window_budget") or str(bggdsb_cfg.get("window_budget_eur", 30.0))
+    try:
+        budget_eur = float(budget_raw)
+    except ValueError:
+        budget_eur = 30.0
+
+    tranches_raw = _get_state("bggdsb_tranches") or str(bggdsb_cfg.get("tranches", 8))
+    try:
+        max_tranches = max(1, int(tranches_raw))
+    except ValueError:
+        max_tranches = 8
+
+    tranche_eur = round(budget_eur / max_tranches, 4)
 
     is_last = (max_tranches == 1)
     ok = await _bggdsb_place_tranche(
@@ -580,7 +561,6 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if is_last:
         register_window_trade(coin, window_ts)
     else:
-        # Registreer tranche state voor follow-up ticks
         _bggdsb_tranche_state[window_key] = {
             "placed": 1,
             "last_ts": now,

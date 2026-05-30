@@ -141,6 +141,9 @@ def create_trade_state(
         # BGGDSB sizing — set before execute_entry to override conviction weighting
         "bggdsb_yes_shares": market.get("_bggdsb_yes_shares"),
         "bggdsb_no_shares": market.get("_bggdsb_no_shares"),
+        # BGGDSB hedge tracking
+        "bggdsb_dominant_side": market.get("_bggdsb_dominant_side"),
+        "bggdsb_hedge_placed": False,
     }
     return state
 

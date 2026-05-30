@@ -16,6 +16,7 @@ _save_it_in_progress: set[str] = set()      # trade_ids with a save_it task runn
 # Duration tracking for early loser: loop.time() when loser first fell below threshold.
 # Reset when price recovers. Used to prevent selling on temporary dips.
 _loser_below_ts: dict[str, float] = {}      # trade_id → loop.time()
+_bggdsb_hedge_in_progress: set[str] = set()  # trade_ids with a hedge task running
 
 
 def _get_early_thresholds(regime: str) -> tuple[float | None, float | None]:
@@ -187,6 +188,41 @@ async def _save_it_task(
         log.error("save_it_task_error", trade_id=trade_id, error=str(e))
     finally:
         _save_it_in_progress.discard(trade_id)
+
+
+async def _bggdsb_hedge_task(
+    trade_id: str, dominant_side: str, hedge_token: str, hedge_shares: float,
+    is_paper: bool, coin: str,
+) -> None:
+    """Buy the opposing side as a late hedge when price drops to ≤0.15."""
+    try:
+        if is_paper:
+            result = await paper_trader.simulate_market_buy(hedge_token, hedge_shares)
+        else:
+            resp = await orders.place_market_order(hedge_token, "BUY", hedge_shares)
+            if resp and resp.get("order_id"):
+                f = await _poll_live_fill_for_save_it(resp["order_id"], fallback=0.10, size=hedge_shares)
+                result = {"filled": True, "fill_price": f["fill_price"], "fees": f["fees"]}
+            else:
+                result = None
+
+        if result and result.get("filled"):
+            fill_price = result.get("fill_price") or 0.10
+            hedge_side = "NO" if dominant_side == "YES" else "YES"
+            update_trade_field(trade_id, "bggdsb_hedge_placed", True)
+            log.info("bggdsb_hedge_executed", trade_id=trade_id, coin=coin,
+                     hedge_side=hedge_side, fill_price=round(fill_price, 4),
+                     hedge_shares=hedge_shares, paper=is_paper)
+            await write_event(trade_id, "bggdsb_hedge_executed", coin, {
+                "hedge_side": hedge_side, "fill_price": round(fill_price, 4),
+                "hedge_shares": hedge_shares,
+            })
+        else:
+            log.warning("bggdsb_hedge_fill_failed", trade_id=trade_id)
+    except Exception as e:
+        log.error("bggdsb_hedge_task_error", trade_id=trade_id, error=str(e))
+    finally:
+        _bggdsb_hedge_in_progress.discard(trade_id)
 
 
 async def _poll_live_fill_for_save_it(order_id: str, fallback: float, size: float) -> dict:
@@ -480,6 +516,32 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
                                  peak_no=round(_si["peak_no"], 4), secs_left=round(secs_left, 1))
                         asyncio.create_task(_save_it_task(
                             trade_id, "YES", yes_token, save_shares, is_paper, coin
+                        ))
+
+        # ── BGGDSB Hedge watcher: koop tegenovergestelde kant zodra ≤ trigger prijs ──
+        if (trade
+                and trade.get("router_bucket") == "bggdsb"
+                and not trade.get("bggdsb_hedge_placed")
+                and trade_id not in _bggdsb_hedge_in_progress):
+            dom = trade.get("bggdsb_dominant_side")
+            if dom:
+                hedge_tok = no_token if dom == "YES" else yes_token
+                if hedge_tok:
+                    hedge_mid = ws_client.get_mid_price(hedge_tok)
+                    hedge_trigger = float(CONFIG.get("bggdsb", {}).get("hedge_price_trigger", 0.15))
+                    if hedge_mid is not None and 0 < hedge_mid <= hedge_trigger:
+                        from .db_sync import get_state as _get_state
+                        budget_eur = float(_get_state("bggdsb_window_budget") or
+                                           CONFIG.get("bggdsb", {}).get("window_budget_eur", 30.0))
+                        hedge_eur = budget_eur * 0.11
+                        hedge_shares = round(hedge_eur / max(hedge_mid, 0.01), 2)
+                        is_paper = trade.get("mode", "paper").startswith("paper")
+                        _bggdsb_hedge_in_progress.add(trade_id)
+                        log.info("bggdsb_hedge_triggered", trade_id=trade_id, coin=coin,
+                                 dominant_side=dom, hedge_mid=round(hedge_mid, 4),
+                                 hedge_shares=hedge_shares)
+                        asyncio.create_task(_bggdsb_hedge_task(
+                            trade_id, dom, hedge_tok, hedge_shares, is_paper, coin
                         ))
 
         # Periodic snapshot
