@@ -107,7 +107,7 @@ def bggdsb_panel() -> None:
     bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
     if bggdsb_active:
         label = "🟡 Paper" if current_mode == "bggdsb_paper" else "💸 Live"
-        st.success(f"**BGGDSB actief** — {label} · Activeer via de sidebar.", icon="🧠")
+        st.success(f"**BGGDSB actief** — {label}", icon="🧠")
     else:
         st.info("Zet de modus op **🧠 BGGDSB paper** of **🧠 BGGDSB live** in de sidebar om te starten.", icon="💡")
 
