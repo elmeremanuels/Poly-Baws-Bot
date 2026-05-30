@@ -219,6 +219,19 @@ def get_next_windows(coin: str, n: int = 3) -> list[dict]:
             if m["window_end"] and m["window_end"] > now][:n]
 
 
+def get_current_bggdsb_market(coin: str) -> dict | None:
+    """Return the currently running 5-min window (window_start <= now <= window_end)."""
+    now = datetime.now(timezone.utc)
+    running = [
+        m for m in _market_cache.get(coin, [])
+        if m.get("window_start") and m.get("window_end")
+        and m["window_start"] <= now <= m["window_end"]
+    ]
+    if not running:
+        return None
+    return max(running, key=lambda m: m["window_start"])
+
+
 def get_tradeable_market(coin: str) -> dict | None:
     cfg = CONFIG["trading"]
     start_before = cfg["entry_start_minutes_before_window"]
