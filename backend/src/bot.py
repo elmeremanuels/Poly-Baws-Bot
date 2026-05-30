@@ -379,9 +379,17 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     bggdsb_cfg = CONFIG.get("bggdsb", {})
 
-    # Coin whitelist: als ingesteld, sla andere coins over
-    allowed_coins = bggdsb_cfg.get("coins")  # None = alle coins
-    if allowed_coins and coin not in allowed_coins:
+    # Coin whitelist: dashboard heeft voorrang over config.yaml
+    import json as _json
+    _coins_raw = _get_state("bggdsb_coins")
+    if _coins_raw:
+        try:
+            allowed_coins = _json.loads(_coins_raw)
+        except Exception:
+            allowed_coins = bggdsb_cfg.get("coins", ["BTC"])
+    else:
+        allowed_coins = bggdsb_cfg.get("coins", ["BTC"])
+    if coin not in allowed_coins:
         return
 
     # Only enter in the first N seconds of the window

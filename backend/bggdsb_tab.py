@@ -10,6 +10,9 @@ Strategie 1:1 gebaseerd op is5minfixedyet (data-analyse 2026-05-30):
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
 import streamlit as st
 import pandas as pd
 
@@ -23,6 +26,7 @@ from src.db_sync import (
 from src.commands import write_command
 
 _IS5_ADDRESS = "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
+_ALL_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 # ── Cached data ────────────────────────────────────────────────────────────────
 
@@ -39,6 +43,35 @@ def _q_trades(limit: int = 100) -> list[dict]:
     return get_bggdsb_trades(limit=limit)
 
 
+def _load_selected_coins() -> list[str]:
+    raw = get_state("bggdsb_coins")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [c for c in parsed if c in _ALL_COINS]
+        except Exception:
+            pass
+    return ["BTC"]
+
+
+def _bot_status() -> tuple[bool, str]:
+    """Geeft (online, leeftijd_tekst) op basis van heartbeat."""
+    hb = get_state("heartbeat")
+    if not hb:
+        return False, "nooit"
+    try:
+        ts = datetime.fromisoformat(hb.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age < 15:
+            return True, f"{int(age)}s geleden"
+        if age < 60:
+            return False, f"{int(age)}s geleden"
+        return False, f"{int(age//60)}min geleden"
+    except Exception:
+        return False, "onbekend"
+
+
 # ── Main panel ────────────────────────────────────────────────────────────────
 
 @st.fragment
@@ -46,28 +79,40 @@ def bggdsb_panel() -> None:
     st.subheader("🧠 BGGDSB")
     st.caption("*Beter Goed Gejat Dan Slecht Bedacht* — is5minfixedyet strategie 1:1")
 
-    # ── is5 live indicator ─────────────────────────────────────────────────────
+    # ── Bot + is5 status ──────────────────────────────────────────────────────
+    bot_online, bot_age = _bot_status()
     status = _q_is5_live()
     live = status.get("live", False)
     n_recent = status.get("trades_recent", 0)
     last_seen = status.get("last_seen", "onbekend")
 
-    ind_col, spacer = st.columns([3, 1])
-    with ind_col:
+    bot_col, is5_col = st.columns(2)
+    with bot_col:
+        if bot_online:
+            st.success(f"🟢 **Bot actief** — heartbeat {bot_age}", icon="🤖")
+        else:
+            st.error(f"🔴 **Bot offline** — laatste heartbeat: {bot_age}", icon="🤖")
+    with is5_col:
         if live:
             st.success(
-                f"🟢 **is5minfixedyet LIVE** — {n_recent} nieuwe trades gesignaleerd (laatste 15 min)",
+                f"🟢 **is5minfixedyet LIVE** — {n_recent} trades (laatste 15 min)",
                 icon="📡",
             )
         else:
-            st.info(
-                f"⚫ is5minfixedyet offline — laatste activiteit: {last_seen}",
-                icon="📡",
-            )
+            st.info(f"⚫ is5minfixedyet offline — laatste: {last_seen}", icon="📡")
+
+    # Huidige mode tonen
+    current_mode = get_state("current_mode") or "onbekend"
+    bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
+    if bggdsb_active:
+        label = "🟡 Paper" if current_mode == "bggdsb_paper" else "💸 Live"
+        st.success(f"**BGGDSB modus actief** — {label}", icon="🧠")
+    else:
+        st.warning(f"BGGDSB **niet actief** — huidige modus: `{current_mode}`. Sla instellingen op om te starten.", icon="⚠️")
 
     st.divider()
 
-    # ── Controls ───────────────────────────────────────────────────────────────
+    # ── Controls rij 1: budget / is5 / paper ─────────────────────────────────
     col_a, col_b, col_c = st.columns([2, 2, 2])
 
     with col_a:
@@ -100,16 +145,83 @@ def bggdsb_panel() -> None:
             help="Aan = veilig oefenen. Uit = live trades met echt geld.",
         )
 
-    # Save button
-    if st.button("💾 Instellingen opslaan", key="bggdsb_save"):
+    # ── Controls rij 2: coin selectie ────────────────────────────────────────
+    st.markdown("**Coins**")
+    saved_coins = _load_selected_coins()
+
+    coin_cols = st.columns(len(_ALL_COINS))
+    selected_coins = []
+    for i, coin in enumerate(_ALL_COINS):
+        with coin_cols[i]:
+            checked = st.checkbox(
+                coin,
+                value=(coin in saved_coins),
+                key=f"bggdsb_coin_{coin}",
+                help="is5 handelde vrijwel alleen BTC" if coin == "BTC" else None,
+            )
+            if checked:
+                selected_coins.append(coin)
+
+    if not selected_coins:
+        st.warning("Selecteer minstens één coin.", icon="⚠️")
+
+    # ── Save button ───────────────────────────────────────────────────────────
+    if st.button("💾 Instellingen opslaan", key="bggdsb_save", disabled=not selected_coins):
         set_dashboard_state("bggdsb_window_budget", str(budget))
         set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
         set_dashboard_state("bggdsb_paper_mode", "1" if paper_mode else "0")
+        set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
         mode_to_set = "bggdsb_paper" if paper_mode else "bggdsb_live"
         write_command("set_mode", {"mode": mode_to_set})
-        st.success(f"Opgeslagen — budget €{budget}, is5 gewicht {is5_weight}%, modus {'paper' if paper_mode else 'LIVE'}")
+        coins_str = ", ".join(selected_coins)
+        st.success(
+            f"Opgeslagen — budget €{budget} · coins: {coins_str} · "
+            f"is5 {is5_weight}% · modus {'paper' if paper_mode else 'LIVE'}"
+        )
         _q_is5_live.clear()
         _q_stats.clear()
+
+    st.divider()
+
+    # ── Rekenvoorbeeld: schaling ten opzichte van is5 ─────────────────────────
+    with st.expander("📐 Rekenvoorbeeld — hoe schaalt €30 t.o.v. is5minfixedyet?"):
+        dom_eur  = round(budget * 0.875, 2)
+        hed_eur  = round(budget * 0.125, 2)
+
+        # Voorbeeld met DOM prijs 0.52, HED prijs 0.49
+        dom_price, hed_price = 0.52, 0.49
+        dom_shares = round(dom_eur / dom_price, 1)
+        hed_shares = round(hed_eur / hed_price, 1)
+
+        win_payout  = round(dom_shares * 1.00, 2)
+        win_gross   = round(win_payout - budget, 2)
+        win_roi     = round(win_gross / budget * 100, 1)
+
+        lose_payout = round(hed_shares * 1.00, 2)
+        lose_gross  = round(lose_payout - budget, 2)
+        lose_roi    = round(lose_gross / budget * 100, 1)
+
+        st.markdown(f"""
+**Aanname:** dominant prijs = 0.52 · hedge prijs = 0.49
+
+| | is5minfixedyet (€500) | Jouw bot (€{budget}) |
+|---|---|---|
+| Dominant (87.5%) | €437.50 → {round(437.5/dom_price,0):.0f} shares | **€{dom_eur}** → {dom_shares} shares |
+| Hedge (12.5%) | €62.50 → {round(62.5/hed_price,0):.0f} shares | **€{hed_eur}** → {hed_shares} shares |
+| Als dominant wint | +€{round(437.5/dom_price*1 - 500, 2):+.2f} (**+75.0%**) | **€{win_gross:+.2f} ({win_roi:+.1f}%)** |
+| Als dominant verliest | −€{round(500 - 62.5/hed_price*1, 2):.2f} (**−87.5%**) | **€{lose_gross:+.2f} ({lose_roi:+.1f}%)** |
+
+> **Het ROI-percentage is identiek.** is5 verdient meer in absolute €€ omdat hun budget groter is.
+> Met €{budget} doe je precies hetzelfde — alleen de getallen zijn kleiner.
+> Bij 75% win-rate: verwachte waarde per window = **€{round(0.75*win_gross + 0.25*lose_gross, 2):+.2f}**
+        """)
+
+        st.caption(
+            "is5minfixedyet koopt meerdere keren per window (elke ~14s). "
+            "Dat is een averaging-in tactiek. Het effect: als de prijs beweegt vóór expiry, "
+            "middelen ze hun kostprijs. Met €30 doe je één keer hetzelfde op kleinere schaal. "
+            "Als de backtest een hogere verwachte waarde toont, kun je het budget verhogen."
+        )
 
     st.divider()
 
@@ -153,10 +265,11 @@ def bggdsb_panel() -> None:
     saved_budget = int(get_state("bggdsb_window_budget") or 30)
     dominant_eur = round(saved_budget * 0.875, 2)
     hedge_eur = round(saved_budget * 0.125, 2)
-    gate_col1, gate_col2, gate_col3 = st.columns(3)
+    gate_col1, gate_col2, gate_col3, gate_col4 = st.columns(4)
     gate_col1.metric("Entry zone", "0.40 – 0.65", help="Buiten deze zone = skip")
     gate_col2.metric("Dominant", f"€{dominant_eur}", delta=f"{dominant_eur/saved_budget*100:.0f}%")
     gate_col3.metric("Hedge", f"€{hedge_eur}", delta=f"-{hedge_eur/saved_budget*100:.0f}%")
+    gate_col4.metric("Actieve coins", ", ".join(_load_selected_coins()) or "—")
 
     st.divider()
 
