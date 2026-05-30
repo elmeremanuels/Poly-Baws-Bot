@@ -288,7 +288,7 @@ with st.sidebar:
         else:
             st.caption("_Geen learnings beschikbaar — voer eerst live\\_learning uit._")
 
-    if mode.startswith("paper"):
+    if mode.startswith("paper") or mode.endswith("_paper"):
         confirmed = st.checkbox("Bevestig reset", key="reset_confirm")
         if st.button("🗑 Reset paper data", use_container_width=True, disabled=not confirmed):
             write_command("reset_paper")

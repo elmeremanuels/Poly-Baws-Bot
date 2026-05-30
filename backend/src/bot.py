@@ -272,7 +272,7 @@ async def _coin_loop(coin: str) -> None:
             # Oracle paper_continues_on_kill: switch to paper so Oracle keeps learning
             if CONFIG.get("oracle", {}).get("paper_continues_on_kill", True):
                 mode = get_mode()
-                if not mode.startswith("paper"):
+                if not (mode.startswith("paper") or mode.endswith("_paper")):
                     try:
                         from .state import set_mode
                         set_mode("paper_auto")

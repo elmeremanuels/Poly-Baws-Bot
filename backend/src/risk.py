@@ -43,6 +43,11 @@ def get_kill_reason() -> str:
     return _kill_reason
 
 
+def _is_paper_like_mode(mode: str) -> bool:
+    """True for any paper/simulation mode (no real money at stake)."""
+    return mode.startswith("paper") or mode.endswith("_paper")
+
+
 def _enforces_daily_loss_limit(mode: str) -> bool:
     """Whether the global daily-loss kill applies to this mode.
 
@@ -57,7 +62,7 @@ def _enforces_daily_loss_limit(mode: str) -> bool:
         background paper straddle, so a few paper losses trip a €10 kill that
         immediately re-fires after every reset — making Resume appear dead.
     """
-    return (not mode.startswith("paper")
+    return (not _is_paper_like_mode(mode)
             and mode != "live_learning"
             and mode != "signal_trader")
 
@@ -159,6 +164,9 @@ async def check_portfolio_protection(current_usdc: float) -> None:
     """Three-layer portfolio protection. Call from portfolio_sync_loop."""
     if current_usdc is None:
         return
+    from .state import get_mode
+    if _is_paper_like_mode(get_mode()):
+        return  # paper modes: no real capital at risk
     cfg = CONFIG.get("risk", {})
 
     # Layer 1: absolute capital floor

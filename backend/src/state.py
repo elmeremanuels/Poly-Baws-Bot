@@ -29,7 +29,7 @@ def set_mode(mode: str) -> None:
 
 def is_paper_mode() -> bool:
     # signal_trader has its own paper_mode flag in config
-    return _mode.startswith("paper")
+    return _mode.startswith("paper") or _mode.endswith("_paper")
 
 
 def is_auto_mode() -> bool:
