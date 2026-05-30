@@ -297,6 +297,118 @@ def bggdsb_panel() -> None:
 
     st.divider()
 
+    # ── Live window status + handmatige instructies ───────────────────────────
+    st.markdown("**Live window status**")
+    import json as _json
+    raw_win = get_state("bggdsb_active_window") or ""
+    if raw_win:
+        try:
+            win = _json.loads(raw_win)
+        except Exception:
+            win = None
+    else:
+        win = None
+
+    if win and win.get("secs_left", 0) > 0:
+        coin_w  = win.get("coin", "?")
+        phase   = win.get("phase", "monitoring")
+        dom     = win.get("dominant_side", "?")
+        yes_sp  = float(win.get("yes_spend", 0))
+        no_sp   = float(win.get("no_spend", 0))
+        tot_sp  = yes_sp + no_sp
+        yes_mid = float(win.get("yes_mid", 0))
+        no_mid  = float(win.get("no_mid", 0))
+        secs    = int(win.get("secs_left", 0))
+        be_need = float(win.get("be_needed", 0))
+        be_ok   = win.get("breakeven_reached", False)
+
+        phase_labels = {
+            "monitoring": "🔍 Monitoring",
+            "flipping":   "🔄 Flipping",
+            "confirmed":  "✅ Break-even bereikt",
+            "done":       "✔ Done",
+        }
+        phase_label = phase_labels.get(phase, phase)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(f"{coin_w} fase", phase_label)
+        c2.metric("YES mid", f"{yes_mid:.3f}")
+        c3.metric("NO mid", f"{no_mid:.3f}")
+        c4.metric("Tijd over", f"{secs}s")
+
+        c5, c6, c7 = st.columns(3)
+        c5.metric("YES spend", f"€{yes_sp:.2f}")
+        c6.metric("NO spend", f"€{no_sp:.2f}")
+        c7.metric("Totaal", f"€{tot_sp:.2f}")
+
+        # Break-even indicator
+        other_side = "NO" if dom == "YES" else "YES"
+        other_sp   = no_sp if other_side == "NO" else yes_sp
+        other_mid  = no_mid if other_side == "NO" else yes_mid
+
+        if be_ok:
+            st.success(f"**BREAK-EVEN BEREIKT** — bot koopt extra {other_side} voor maximale winst")
+        elif phase == "flipping":
+            tekort = be_need - other_sp
+            st.warning(
+                f"**FLIPPING naar {other_side}** — nog €{tekort:.2f} nodig voor break-even "
+                f"(bot koopt automatisch in tranches van €8)"
+            )
+        else:
+            winner_mid = max(yes_mid, no_mid)
+            winner = "YES" if yes_mid >= no_mid else "NO"
+            if winner_mid >= 0.55:
+                st.info(f"**{dom} koopt door** — winnaar lijkt {winner} ({winner_mid:.2f})")
+            else:
+                st.info("**Monitoring** — markt nog onbeslist, bot wacht op flip-signaal")
+
+        # Handmatige instructie box
+        with st.expander("📋 Handmatige instructies (als bot niet reageert)"):
+            if phase == "flipping" or (other_mid > 0.50 and other_mid > (yes_mid if dom == "YES" else no_mid)):
+                tekort = max(0, be_need - other_sp)
+                other_ask = other_mid * 1.02
+                shares_needed = round(tekort / max(other_ask, 0.01), 1)
+                st.markdown(f"""
+**BOT IS AAN HET FLIPPEN — {other_side} is nu de favoriet**
+
+Wat de bot doet: elke ~3s een tranche van €8 op {other_side} kopen
+
+Als de bot stokt:
+1. Open Polymarket app/browser
+2. Zoek het actieve {coin_w} window
+3. Koop **{other_side}** voor **€{min(tekort+5, 20):.0f}** (huidige ask ~{other_ask:.3f})
+4. Herhaal tot de status "BREAK-EVEN BEREIKT" toont
+5. Dan: één keer extra kopen zodra winnaar ≥ 0.60
+
+Huidige stand: €{other_sp:.1f} op {other_side} / €{be_need:.1f} nodig
+                """)
+            elif phase == "confirmed" or be_ok:
+                winner = "YES" if yes_mid >= no_mid else "NO"
+                winner_mid_v = max(yes_mid, no_mid)
+                st.markdown(f"""
+**BREAK-EVEN BEREIKT — winnaar is {winner} ({winner_mid_v:.2f})**
+
+Bot koopt nog extra {winner} voor meer winst.
+
+Jij kunt: niets doen, of handmatig extra {winner} kopen als je meer wilt inzetten.
+De bot regelt de confirm buy (€15) in de laatste 90s automatisch.
+                """)
+            else:
+                st.markdown(f"""
+**MONITORING FASE — markt nog onbeslist**
+
+Bot wacht tot de andere kant ({other_side}) boven 0.50 stijgt.
+
+Jij doet: NIETS. Kijk naar de prijzen en wacht.
+Als {other_side} snel boven 0.55 stijgt: bot start automatisch met kopen.
+
+Huidige prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
+                """)
+    else:
+        st.caption("Geen actief window op dit moment.")
+
+    st.divider()
+
     # ── Recent trades ──────────────────────────────────────────────────────────
     st.markdown("**Recente BGGDSB trades**")
     trades = _q_trades()
