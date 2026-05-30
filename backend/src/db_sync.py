@@ -428,6 +428,22 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
+def _date_where(conditions: list, params: list, days: int | None, only_today: bool,
+                date_from: str | None = None, date_to: str | None = None) -> None:
+    """Centraliseert datumfilter-logica. Aangepast bereik overschrijft days/today."""
+    if date_from and date_to:
+        conditions.append("date(created_at) BETWEEN ? AND ?")
+        params.extend([date_from, date_to])
+    elif date_from:
+        conditions.append("date(created_at) >= ?")
+        params.append(date_from)
+    elif only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+
+
 # Mode filter SQL snippets — None = geen filter (alle modes)
 _MODE_SQL: dict[str | None, str | None] = {
     None:          None,
@@ -439,7 +455,8 @@ _MODE_SQL: dict[str | None, str | None] = {
 
 def get_analytics_trades(coin: str | None = None, days: int | None = None,
                          only_today: bool = False,
-                         mode_filter: str | None = "straddle") -> list[dict]:
+                         mode_filter: str | None = "straddle",
+                         date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     """Trades gefilterd op mode, gesorteerd op created_at ASC.
     mode_filter=None toont alle modes; standaard 'straddle' (achterwaarts compatibel).
     """
@@ -453,11 +470,7 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None,
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
-        conditions.append("created_at >= datetime('now', ?)")
-        params.append(f"-{days} days")
+    _date_where(conditions, params, days, only_today, date_from, date_to)
     where = "WHERE " + " AND ".join(conditions)
     with _conn() as conn:
         rows = conn.execute(
@@ -469,7 +482,8 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None,
 
 def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
                           only_today: bool = False,
-                          mode_filter: str | None = "straddle") -> list[dict]:
+                          mode_filter: str | None = "straddle",
+                          date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     """Aggregate stats grouped by winner_exit_reason."""
     if not _db_path.exists():
         return []
@@ -481,11 +495,7 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
-        conditions.append("created_at >= datetime('now', ?)")
-        params.append(f"-{days} days")
+    _date_where(conditions, params, days, only_today, date_from, date_to)
     where = " AND ".join(conditions)
     with _conn() as conn:
         rows = conn.execute(
@@ -507,7 +517,8 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
 
 
 def get_coin_comparison(days: int | None = None, only_today: bool = False,
-                        mode_filter: str | None = "straddle") -> list[dict]:
+                        mode_filter: str | None = "straddle",
+                        date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     """Per-coin aggregated stats for closed triggered trades."""
     if not _db_path.exists():
         return []
@@ -516,11 +527,7 @@ def get_coin_comparison(days: int | None = None, only_today: bool = False,
     if mode_sql:
         conditions.append(mode_sql)
     params: list = []
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
-        conditions.append("created_at >= datetime('now', ?)")
-        params.append(f"-{days} days")
+    _date_where(conditions, params, days, only_today, date_from, date_to)
     where = " AND ".join(conditions)
     with _conn() as conn:
         rows = conn.execute(
@@ -544,7 +551,8 @@ def get_coin_comparison(days: int | None = None, only_today: bool = False,
 
 def get_hourly_pnl(coin: str | None = None, days: int | None = None,
                    only_today: bool = False,
-                   mode_filter: str | None = "straddle") -> list[dict]:
+                   mode_filter: str | None = "straddle",
+                   date_from: str | None = None, date_to: str | None = None) -> list[dict]:
     """Average P&L by hour of day (UTC)."""
     if not _db_path.exists():
         return []
@@ -556,11 +564,7 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None,
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
-        conditions.append("created_at >= datetime('now', ?)")
-        params.append(f"-{days} days")
+    _date_where(conditions, params, days, only_today, date_from, date_to)
     where = " AND ".join(conditions)
     with _conn() as conn:
         rows = conn.execute(
@@ -1069,6 +1073,8 @@ def _signal_where(
     only_today: bool,
     extra_conditions: list[str] | None = None,
     mode_filter: str | None = "straddle",
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> tuple[str, list]:
     """Build WHERE clause + params for signal analytics queries."""
     conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
@@ -1079,11 +1085,7 @@ def _signal_where(
     if coin:
         conditions.append("coin = ?")
         params.append(coin)
-    if only_today:
-        conditions.append("date(created_at) = date('now')")
-    elif days:
-        conditions.append("created_at >= datetime('now', ?)")
-        params.append(f"-{days} days")
+    _date_where(conditions, params, days, only_today, date_from, date_to)
     if extra_conditions:
         conditions.extend(extra_conditions)
     return " AND ".join(conditions), params
@@ -1092,11 +1094,13 @@ def _signal_where(
 def get_conviction_bucket_stats(
     coin: str | None = None, days: int | None = None, only_today: bool = False,
     mode_filter: str | None = "straddle",
+    date_from: str | None = None, date_to: str | None = None,
 ) -> list[dict]:
     """Win rate + avg P&L grouped by conviction_score_at_trigger bucket."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter,
+                                  date_from=date_from, date_to=date_to)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1123,11 +1127,13 @@ def get_conviction_bucket_stats(
 def get_regime_bucket_stats(
     coin: str | None = None, days: int | None = None, only_today: bool = False,
     mode_filter: str | None = "straddle",
+    date_from: str | None = None, date_to: str | None = None,
 ) -> list[dict]:
     """Win rate + avg P&L grouped by regime_at_entry."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter,
+                                  date_from=date_from, date_to=date_to)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1149,11 +1155,13 @@ def get_regime_bucket_stats(
 def get_ofi_bucket_stats(
     coin: str | None = None, days: int | None = None, only_today: bool = False,
     mode_filter: str | None = "straddle",
+    date_from: str | None = None, date_to: str | None = None,
 ) -> list[dict]:
     """Win rate + avg P&L grouped by OFI-at-trigger bucket."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter,
+                                  date_from=date_from, date_to=date_to)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1180,6 +1188,7 @@ def get_ofi_bucket_stats(
 def get_conviction_threshold_sweep(
     coin: str | None = None, days: int | None = None, only_today: bool = False,
     mode_filter: str | None = "straddle",
+    date_from: str | None = None, date_to: str | None = None,
 ) -> list[dict]:
     """For each threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
     return trades included, win%, avg_net_pnl, total_pnl.
@@ -1187,7 +1196,8 @@ def get_conviction_threshold_sweep(
     """
     if not _db_path.exists():
         return []
-    base_where, base_params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
+    base_where, base_params = _signal_where(coin, days, only_today, mode_filter=mode_filter,
+                                            date_from=date_from, date_to=date_to)
     results = []
     with _conn() as conn:
         for threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
