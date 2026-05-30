@@ -649,7 +649,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     market = scanner.get_current_bggdsb_market(coin)
     if not market or not market.get("window_start"):
-        log.debug("bggdsb_no_market", coin=coin)
+        log.info("bggdsb_no_market", coin=coin)
         return
 
     window_ts  = market["window_start"].isoformat()
@@ -658,9 +658,11 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     # Al een flip task bezig voor dit window? Dan niets doen.
     if window_key in _bggdsb_flip_tasks:
+        log.debug("bggdsb_flip_already_running", coin=coin, window_key=window_key)
         return
 
     if has_traded_window(coin, window_ts):
+        log.debug("bggdsb_window_already_traded", coin=coin, window_ts=window_ts)
         return
 
     # Timing: genoeg tijd resterend én niet te vroeg (scanner vindt window pas na ~120s)
