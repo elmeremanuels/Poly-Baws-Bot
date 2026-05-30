@@ -2318,21 +2318,38 @@ def _whale_account_card(m: dict, col_key_suffix: str) -> None:
     if last_sync:
         st.caption(f"Laatste sync: {last_sync}")
 
-    # History load button
-    btn_key = f"wh_hist_{col_key_suffix}"
-    if not history_loaded:
-        if st.button("📥 Laad volledige historie", key=btn_key):
-            with st.spinner(f"Paginering door {name} — kan 20-30 seconden duren…"):
-                total, new_rows = deep_sync_whale_sync(name, address)
-            st.success(f"Klaar: {total} transacties opgehaald, {new_rows} nieuw opgeslagen.")
-            _q_whale_meta.clear()
-            st.rerun()
-    else:
-        st.caption("Volledige historische data geladen.")
+    # Buttons row
+    btn_hist_key = f"wh_hist_{col_key_suffix}"
+    b1, b2 = st.columns(2)
+    with b1:
+        if not history_loaded:
+            if st.button("📥 Laad volledige historie", key=btn_hist_key, use_container_width=True):
+                with st.spinner(f"Paginering door {name} — kan 20-30 seconden duren…"):
+                    total, new_rows = deep_sync_whale_sync(name, address)
+                st.success(f"Klaar: {total} transacties opgehaald, {new_rows} nieuw opgeslagen.")
+                _q_whale_meta.clear()
+                st.rerun()
+        else:
+            st.caption("✅ Volledige historische data geladen.")
+    with b2:
+        # CSV export — fetch all rows, no limit
+        all_rows = get_whale_activity(address=address, limit=100_000)
+        if all_rows:
+            csv_df = pd.DataFrame(all_rows)
+            export_cols = [c for c in ["event_ts", "coin", "outcome_side", "trade_type", "price", "usdc_size", "size", "question", "market_id", "transaction_hash"] if c in csv_df.columns]
+            csv_bytes = csv_df[export_cols].to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Exporteer CSV",
+                data=csv_bytes,
+                file_name=f"{name}_activity.csv",
+                mime="text/csv",
+                key=f"wh_csv_{col_key_suffix}",
+                use_container_width=True,
+            )
 
     st.divider()
 
-    # Recent activity for this account
+    # Preview: last 50 rows in card
     rows = get_whale_activity(address=address, limit=50)
     if rows:
         df = pd.DataFrame(rows)
