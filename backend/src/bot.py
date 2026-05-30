@@ -426,14 +426,10 @@ async def _bggdsb_window_flip_task(window_key: str) -> None:
     flip_threshold    = float(cfg.get("flip_trigger_price", 0.50))
     confirm_threshold = float(cfg.get("confirm_trigger_price", 0.60))
     confirm_secs      = float(cfg.get("confirm_window_secs", 90))
-    # Schaal tranches proportioneel met budget (basis: €8 flip / €15 confirm bij €30)
-    _scale            = window_budget / 30.0
-    flip_tranche_eur  = round(float(cfg.get("flip_tranche_eur", 8.0)) * _scale, 1)
-    confirm_eur       = round(float(cfg.get("confirm_tranche_eur", 15.0)) * _scale, 1)
     hedge_price       = float(cfg.get("hedge_price_trigger", 0.11))
     max_mult          = float(cfg.get("max_budget_multiplier", 2.5))
     flip_interval     = float(cfg.get("flip_interval_secs", 3.0))
-    dashboard_interval = 3.0  # seconden tussen dashboard updates
+    dashboard_interval = 3.0
 
     try:
         st = _bggdsb_tranche_state.get(window_key)
@@ -449,6 +445,11 @@ async def _bggdsb_window_flip_task(window_key: str) -> None:
         coin          = st["coin"]
         window_budget = st["window_budget"]
         max_spend     = window_budget * max_mult
+
+        # Schaal tranches proportioneel met budget (basis: €8 flip / €15 confirm bij €30)
+        _scale            = window_budget / 30.0
+        flip_tranche_eur  = round(float(cfg.get("flip_tranche_eur", 8.0)) * _scale, 1)
+        confirm_eur       = round(float(cfg.get("confirm_tranche_eur", 15.0)) * _scale, 1)
 
         hedge_placed  = False
         confirm_done  = False
