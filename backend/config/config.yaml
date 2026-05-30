@@ -306,7 +306,8 @@ whale_tracker:
     is5minfixedyet: "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
 
 bggdsb:
-  window_budget_eur: 30.0          # totaal per 5-min window
+  coins: ["BTC"]                   # is5minfixedyet handelde vrijwel alleen BTC
+  window_budget_eur: 30.0          # totaal per 5-min window (€20–50)
   entry_price_min: 0.40            # dominant kant: ondergrens
   entry_price_max: 0.65            # dominant kant: bovengrens
   dominant_ratio: 0.875            # 87.5% dominant / 12.5% hedge

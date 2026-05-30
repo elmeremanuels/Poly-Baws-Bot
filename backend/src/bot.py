@@ -377,8 +377,14 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if has_traded_window(coin, window_ts):
         return
 
-    # Only enter in the first N seconds of the window
     bggdsb_cfg = CONFIG.get("bggdsb", {})
+
+    # Coin whitelist: als ingesteld, sla andere coins over
+    allowed_coins = bggdsb_cfg.get("coins")  # None = alle coins
+    if allowed_coins and coin not in allowed_coins:
+        return
+
+    # Only enter in the first N seconds of the window
     entry_window_secs = bggdsb_cfg.get("entry_window_secs", 90)
     if market.get("window_start"):
         now = datetime.now(timezone.utc)
