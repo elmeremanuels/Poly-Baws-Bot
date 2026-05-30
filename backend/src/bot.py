@@ -949,10 +949,10 @@ async def _portfolio_sync_loop() -> None:
             await save_dashboard_state("portfolio_value", str(round(portfolio_value, 4)))
             await save_dashboard_state("portfolio_updated_at", datetime.now(timezone.utc).isoformat())
 
-            # Portfolio protection: three-layer safety check
+            # Portfolio protection: vergelijk totale waarde (USDC + posities), niet alleen vrij saldo
             if balance is not None:
                 from . import risk as _risk
-                await _risk.check_portfolio_protection(balance)
+                await _risk.check_portfolio_protection(portfolio_value)
         except Exception as e:
             log.warning("portfolio_sync_failed", error=str(e))
         await asyncio.sleep(30)
