@@ -102,28 +102,14 @@ def bggdsb_panel() -> None:
         else:
             st.info(f"⚫ is5minfixedyet offline — laatste: {last_seen}", icon="📡")
 
-    # ── Aan/uit knop ─────────────────────────────────────────────────────────
-    current_mode = get_state("mode") or "onbekend"
+    # ── Status ───────────────────────────────────────────────────────────────
+    current_mode  = get_state("mode") or "onbekend"
     bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
-    paper_is_on   = bool(int(get_state("bggdsb_paper_mode") or 1))
-
-    btn_col, status_col = st.columns([1, 3])
-    with btn_col:
-        if bggdsb_active:
-            if st.button("⏹ BGGDSB UIT", key="bggdsb_toggle_off", type="primary", use_container_width=True):
-                write_command("set_mode", {"mode": "paper_hybrid"})
-                st.rerun()
-        else:
-            if st.button("▶ BGGDSB AAN", key="bggdsb_toggle_on", type="primary", use_container_width=True):
-                target = "bggdsb_paper" if paper_is_on else "bggdsb_live"
-                write_command("set_mode", {"mode": target})
-                st.rerun()
-    with status_col:
-        if bggdsb_active:
-            label = "🟡 Paper" if current_mode == "bggdsb_paper" else "💸 Live"
-            st.success(f"**BGGDSB actief** — {label}", icon="🧠")
-        else:
-            st.warning(f"Niet actief — modus: `{current_mode}`", icon="⚠️")
+    if bggdsb_active:
+        label = "🟡 Paper" if current_mode == "bggdsb_paper" else "💸 Live"
+        st.success(f"**BGGDSB actief** — {label} · Activeer via de sidebar.", icon="🧠")
+    else:
+        st.info("Zet de modus op **🧠 BGGDSB paper** of **🧠 BGGDSB live** in de sidebar om te starten.", icon="💡")
 
     st.divider()
 

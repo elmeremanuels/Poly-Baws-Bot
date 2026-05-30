@@ -52,7 +52,18 @@ from bggdsb_tab import bggdsb_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router"]
+MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live"]
+MODE_LABELS = {
+    "paper_hybrid":   "paper_hybrid",
+    "paper_auto":     "paper_auto",
+    "live_hybrid":    "live_hybrid",
+    "live_auto":      "live_auto",
+    "live_learning":  "live_learning",
+    "signal_trader":  "signal_trader",
+    "auto_router":    "auto_router",
+    "bggdsb_paper":   "🧠 BGGDSB paper",
+    "bggdsb_live":    "🧠 BGGDSB live",
+}
 
 st.set_page_config(
     page_title="Poly-Baws-Bot",
@@ -248,15 +259,16 @@ with st.sidebar:
 
     st.markdown("**Mode**")
     mode = current_mode()
-    if mode in ("bggdsb_paper", "bggdsb_live"):
-        label = "🟡 Paper" if mode == "bggdsb_paper" else "💸 Live"
-        st.info(f"🧠 BGGDSB actief — {label}", icon="🧠")
-    else:
-        mode_idx = MODES.index(mode) if mode in MODES else 0
-        new_mode = st.radio("mode", MODES, index=mode_idx, label_visibility="collapsed")
-        if new_mode != mode:
-            write_command("set_mode", {"mode": new_mode})
-            st.rerun()
+    mode_idx = MODES.index(mode) if mode in MODES else 0
+    new_mode = st.radio(
+        "mode", MODES,
+        index=mode_idx,
+        format_func=lambda m: MODE_LABELS.get(m, m),
+        label_visibility="collapsed",
+    )
+    if new_mode != mode:
+        write_command("set_mode", {"mode": new_mode})
+        st.rerun()
 
     if mode == "live_auto":
         completed = get_latest_completed_cycle()
