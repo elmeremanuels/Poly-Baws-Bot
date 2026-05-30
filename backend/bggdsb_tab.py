@@ -127,8 +127,8 @@ def bggdsb_panel() -> None:
 
     st.divider()
 
-    # ── Controls rij 1: budget / tranches / is5 / paper ──────────────────────
-    col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 1])
+    # ── Controls rij 1: budget / is5 / paper ────────────────────────────────
+    col_a, col_c, col_d = st.columns([3, 3, 1])
 
     with col_a:
         budget = st.slider(
@@ -136,19 +136,11 @@ def bggdsb_panel() -> None:
             min_value=20, max_value=50, step=5,
             value=int(get_state("bggdsb_window_budget") or 30),
             key="bggdsb_budget",
-            help="Totaal per 5-min window: ~89% dominant (tranches) + ~11% late hedge (bij ≤0.15)",
-        )
-
-    with col_b:
-        tranches = st.slider(
-            "🔁 Tranches per window",
-            min_value=1, max_value=20, step=1,
-            value=int(get_state("bggdsb_tranches") or 8),
-            key="bggdsb_tranches",
             help=(
-                "is5minfixedyet koopt mediaan 8× per window (~elke 14s), max 37+. "
-                "Alleen de dominant kant. Hedge wordt apart gekocht zodra ≤0.15. "
-                "Meer tranches = betere prijsgemiddeling."
+                "Initieel: volledig budget op dominante kant. "
+                "Bij flip: bot koopt andere kant in €8 tranches. "
+                "Confirm buy: €15 extra op winnaar in laatste 90s. "
+                "Max totaal = 2.5× budget."
             ),
         )
 
@@ -196,16 +188,14 @@ def bggdsb_panel() -> None:
     # ── Save button ───────────────────────────────────────────────────────────
     if st.button("💾 Instellingen opslaan", key="bggdsb_save", disabled=not selected_coins):
         set_dashboard_state("bggdsb_window_budget", str(budget))
-        set_dashboard_state("bggdsb_tranches", str(tranches))
         set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
         set_dashboard_state("bggdsb_paper_mode", "1" if paper_mode else "0")
         set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
         mode_to_set = "bggdsb_paper" if paper_mode else "bggdsb_live"
         write_command("set_mode", {"mode": mode_to_set})
         coins_str = ", ".join(selected_coins)
-        tranche_eur = round(budget / tranches, 2)
         st.success(
-            f"Opgeslagen — budget €{budget} · {tranches}× €{tranche_eur}/tranche · "
+            f"Opgeslagen — budget €{budget}/window · "
             f"coins: {coins_str} · is5 {is5_weight}% · modus {'paper' if paper_mode else 'LIVE'}"
         )
         _q_is5_live.clear()
@@ -214,48 +204,37 @@ def bggdsb_panel() -> None:
     st.divider()
 
     # ── Rekenvoorbeeld: schaling ten opzichte van is5 ─────────────────────────
-    with st.expander("📐 Rekenvoorbeeld — tranches + late hedge (is5minfixedyet patroon)"):
-        saved_tranches = int(get_state("bggdsb_tranches") or 8)
-        tranche_budget = round(budget / saved_tranches, 2)
-        dom_price = 0.495  # mediaan eerste entry is5
-
-        rows_md = ""
-        total_dom_shares = 0.0
-        for i in range(1, saved_tranches + 1):
-            ds = round(tranche_budget / dom_price, 1)
-            total_dom_shares += ds
-            rows_md += f"| T{i} (+{(i-1)*14}s) | €{tranche_budget} | {ds} shares @ ~{dom_price:.2f} |\n"
-
-        # Hedge: 11% van budget, gekocht LAAT bij ~0.11
-        hedge_eur = round(budget * 0.11, 2)
-        hedge_price = 0.11  # mediaan is5 hedge prijs
-        hedge_shares = round(hedge_eur / hedge_price, 1)
-
-        win_gross  = round(total_dom_shares * 1.0 - budget, 2)
-        lose_gross = round(hedge_shares * 1.0 - budget, 2)
-        ev = round(0.754 * win_gross + 0.246 * lose_gross, 2)
+    with st.expander("📐 Rekenvoorbeeld — dynamische chase (is5minfixedyet patroon)"):
+        dom_price   = 0.495   # mediaan eerste entry is5
+        flip_eur    = 8.0     # tranche grootte bij flip
+        confirm_eur_ex = 15.0 # confirm buy
+        hedge_pct   = 0.05    # 5% budget als hedge
+        dom_shares  = round(budget / dom_price, 1)
+        hedge_eur_ex = round(budget * hedge_pct, 2)
 
         st.markdown(f"""
-**{saved_tranches} tranches · €{budget} totaal · €{tranche_budget}/tranche · dom entry ~{dom_price:.2f}**
+**Aankopen per window · budget €{budget}**
 
-| Tranche | Inleg | Dominant kant |
-|---|---|---|
-{rows_md}
-| **Totaal dom** | **€{budget - hedge_eur:.2f}** | **{round(total_dom_shares,1)} shares** |
-
-**Late hedge** (zodra tegengestelde kant ≤ 0.15):
-€{hedge_eur} · ~{hedge_price:.2f}/share → {hedge_shares} shares
-
-| Scenario | Payout | P&L | ROI |
+| Moment | Actie | Kant | Bedrag |
 |---|---|---|---|
-| Dominant wint | €{round(total_dom_shares,1)} | **€{win_gross:+.2f}** | **{round(win_gross/budget*100,1):+.1f}%** |
-| Dominant verliest | €{round(hedge_shares,1)} | **€{lose_gross:+.2f}** | **{round(lose_gross/budget*100,1):+.1f}%** |
-| Verwachte waarde (75.4% WR) | | **€{ev:+.2f}/window** | |
+| Window start | Volledige entry | Dominant | **€{budget}** (~{dom_shares} shares @ {dom_price}) |
+| Als flip nodig | Bijkopen per 3s | Andere kant | **€{flip_eur}/tranche** tot break-even |
+| Na break-even | Extra kopen per 6s | Winnende kant | €{flip_eur}/tranche |
+| Laatste 90s (≥0.60) | Confirm buy | Winnende kant | **€{confirm_eur_ex}** |
+| Verliezer ≤ 0.11 | Hedge | Verliezende kant | €{hedge_eur_ex} |
+
+**Break-even formule:**
+Als de flip-kant wint, moet de payout ≥ totaal uitgegeven zijn.
+→ flip-spend ÷ flip-prijs ≥ totale spend
+
+**Scenario's bij €{budget} budget zonder flip (dominant wint direct):**
+- Winst: ~{round(dom_shares - budget, 2):+.2f} euro (dom shares × €1 payout − inleg)
+- Verlies: −€{budget} (bij clean verlies zonder hedge)
+- Met confirm buy: extra {confirm_eur_ex}€ inleg → meer winst bij hoge prijs
 """)
         st.caption(
-            "Het aantal tranches schaalt NIET mee met het budget — dat is de strategie zelf. "
-            "is5 koopt mediaan 8× dominant, dan LAAT een kleine hedge zodra de tegengestelde kant "
-            "≤0.15 is (betekent: markt denkt bijna zeker dat dominant wint)."
+            "De bot koopt de dominante kant ook opnieuw bij — tijdens de confirm buy in de laatste 90s "
+            "als die kant aan het winnen is (≥ 0.60). Dat is normaal en gewenst."
         )
 
     st.divider()
@@ -270,10 +249,11 @@ def bggdsb_panel() -> None:
 |---|---|
 | Market gate | Beide kanten 0.10 – 0.90 |
 | Richting | OFI + funding rate (conviction) |
-| Dominant tranches | Mediaan **8×** (~elke 14s) |
-| Geen prijsgate hercheck | Koopt door ongeacht beweging |
-| Hedge timing | **LAAT** — zodra andere kant ≤ 0.15 |
-| Hedge budget | ~11% van window budget |
+| Initiële entry | Volledig budget op dominante kant |
+| Flip trigger | Andere kant > 0.50 én wint |
+| Flip tranches | €8/tranche elke 3s tot break-even |
+| Confirm buy | €15 op winnaar in laatste 90s (≥ 0.60) |
+| Hedge timing | Verliezer ≤ 0.11 → 5% budget |
 | Hedge mediaan prijs | **0.11** (mediaan is5 data) |
 | Exit | Hold to expiry (€1.00) |
 | Win-rate (is5 data) | **75.4%** initieel |
