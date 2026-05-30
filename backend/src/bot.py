@@ -265,7 +265,7 @@ async def _coin_loop(coin: str) -> None:
                     await _bggdsb_coin_tick(coin)
                 except Exception as e:
                     log.error("bggdsb_loop_error", coin=coin, error=str(e))
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
             continue
 
         if risk.is_killed():
@@ -666,7 +666,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     # Timing: genoeg tijd resterend én niet te vroeg (scanner vindt window pas na ~120s)
     secs_since_start   = (now - market["window_start"]).total_seconds()
     secs_until_end     = (market["window_end"] - now).total_seconds()
-    min_secs_remaining = float(bggdsb_cfg.get("min_secs_remaining", 150))
+    min_secs_remaining = float(bggdsb_cfg.get("min_secs_remaining", 90))
     entry_delay_secs   = float(bggdsb_cfg.get("entry_delay_secs", 10))
     if secs_since_start < entry_delay_secs:
         log.info("bggdsb_too_early", coin=coin, secs=round(secs_since_start, 1))
