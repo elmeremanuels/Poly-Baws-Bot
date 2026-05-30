@@ -729,17 +729,26 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         if not is5_recently_active(coin=coin, minutes=15):
             return
 
-    # Conviction
+    # Richting: conviction als beschikbaar, anders marktprijs als proxy.
+    # is5minfixedyet gebruikte geen OFI — kocht gewoon de kant die op dat
+    # moment favoriet was (hogere ask = markt betaalt meer = favoriet).
+    # Regime-multiplier in conviction is 0.30× voor UNKNOWN → praktisch altijd
+    # geblokkeerd voor nieuwe 5m-windows. Prijs-fallback lost dit op.
     from . import signals as _sigs
     conv_dir, conv_score = _sigs.get_conviction(coin)
     base_thr = 0.35
     adj_thr  = base_thr - (is5_weight / 100.0) * 0.20
-    if not conv_dir or conv_score < adj_thr:
-        log.info("bggdsb_skip_low_conviction", coin=coin,
-                 score=conv_score, threshold=adj_thr)
-        return
 
-    dominant_side = "YES" if conv_dir == "UP" else "NO"
+    if conv_dir and conv_score >= adj_thr:
+        dominant_side = "YES" if conv_dir == "UP" else "NO"
+        log.info("bggdsb_direction_conviction", coin=coin,
+                 dominant=dominant_side, score=round(conv_score, 3))
+    else:
+        # Fallback: hogere ask = markt-favoriet = dominant kant
+        dominant_side = "YES" if yes_ask >= no_ask else "NO"
+        log.info("bggdsb_direction_price", coin=coin,
+                 dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask,
+                 conv_score=round(conv_score, 3))
 
     # Budget
     try:
