@@ -424,8 +424,10 @@ async def _bggdsb_window_flip_task(window_key: str) -> None:
     flip_threshold    = float(cfg.get("flip_trigger_price", 0.50))
     confirm_threshold = float(cfg.get("confirm_trigger_price", 0.60))
     confirm_secs      = float(cfg.get("confirm_window_secs", 90))
-    flip_tranche_eur  = float(cfg.get("flip_tranche_eur", 8.0))
-    confirm_eur       = float(cfg.get("confirm_tranche_eur", 15.0))
+    # Schaal tranches proportioneel met budget (basis: €8 flip / €15 confirm bij €30)
+    _scale            = window_budget / 30.0
+    flip_tranche_eur  = round(float(cfg.get("flip_tranche_eur", 8.0)) * _scale, 1)
+    confirm_eur       = round(float(cfg.get("confirm_tranche_eur", 15.0)) * _scale, 1)
     hedge_price       = float(cfg.get("hedge_price_trigger", 0.11))
     max_mult          = float(cfg.get("max_budget_multiplier", 2.5))
     flip_interval     = float(cfg.get("flip_interval_secs", 3.0))
@@ -657,9 +659,12 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if has_traded_window(coin, window_ts):
         return
 
-    # Timing
+    # Timing — wacht op entry_delay zodat prijzen gezet zijn, enter dan met meest recente data
     entry_window_secs = bggdsb_cfg.get("entry_window_secs", 90)
+    entry_delay_secs  = bggdsb_cfg.get("entry_delay_secs", 45)
     secs_since_start  = (now - market["window_start"]).total_seconds()
+    if secs_since_start < entry_delay_secs:
+        return  # te vroeg — wacht op meer prijsdata
     if secs_since_start > entry_window_secs or secs_since_start < -300:
         return
 

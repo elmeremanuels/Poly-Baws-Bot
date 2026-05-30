@@ -310,6 +310,7 @@ bggdsb:
   window_budget_eur: 30.0           # volledig budget op dominant kant bij entry
   entry_price_min: 0.10             # market competitive gate — ondergrens
   entry_price_max: 0.90             # market competitive gate — bovengrens
+  entry_delay_secs: 45              # wacht minimaal X seconden na window-start (meest recente data)
   entry_window_secs: 90             # max seconden na window-start voor entry
   flip_trigger_price: 0.50          # andere kant > dit → start flip
   confirm_trigger_price: 0.60       # winnaar > dit → confirm buy

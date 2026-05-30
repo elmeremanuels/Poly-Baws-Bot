@@ -136,12 +136,14 @@ def bggdsb_panel() -> None:
             min_value=20, max_value=50, step=5,
             value=int(get_state("bggdsb_window_budget") or 30),
             key="bggdsb_budget",
-            help=(
-                "Initieel: volledig budget op dominante kant. "
-                "Bij flip: bot koopt andere kant in €8 tranches. "
-                "Confirm buy: €15 extra op winnaar in laatste 90s. "
-                "Max totaal = 2.5× budget."
-            ),
+        )
+        flip_t   = round(budget / 30 * 8, 1)
+        confirm_t = round(budget / 30 * 15, 1)
+        hedge_t  = round(budget * 0.05, 1)
+        st.caption(
+            f"Flip tranche: **€{flip_t}**/3s · "
+            f"Confirm buy: **€{confirm_t}** (laatste 90s) · "
+            f"Hedge: €{hedge_t} (bij ≤0.11)"
         )
 
     with col_c:
