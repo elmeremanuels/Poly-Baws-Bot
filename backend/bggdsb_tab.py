@@ -103,7 +103,7 @@ def bggdsb_panel() -> None:
             st.info(f"⚫ is5minfixedyet offline — laatste: {last_seen}", icon="📡")
 
     # ── Aan/uit knop ─────────────────────────────────────────────────────────
-    current_mode = get_state("current_mode") or "onbekend"
+    current_mode = get_state("mode") or "onbekend"
     bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
     paper_is_on   = bool(int(get_state("bggdsb_paper_mode") or 1))
 
