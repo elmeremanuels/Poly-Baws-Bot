@@ -48,6 +48,7 @@ from src.risk import KILL_FLAG_PATH
 from analytics_tab import analytics_panel
 from signal_lab_tab import signal_lab_panel
 from coin_protection_tab import coin_protection_panel
+from bggdsb_tab import bggdsb_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -2472,9 +2473,39 @@ def _whale_panel() -> None:
 # Render 3+ (_tabs_ready=True): alles normaal.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-tab_live, tab_st, tab_ar, tab_analytics, tab_signal_lab, tab_learning, tab_portfolio, tab_guard, tab_whale = st.tabs(
-    ["🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "📊 Analytics", "🔬 Signal Lab", "🧠 Learning", "💼 Portfolio", "🛡️ Beveiliging", "🐋 Whales"]
-)
+# ── Sidebar: toon/verberg geavanceerde tabs ───────────────────────────────────
+with st.sidebar:
+    st.divider()
+    show_advanced = st.toggle(
+        "🔬 Toon geavanceerde tabs",
+        value=st.session_state.get("show_advanced_tabs", False),
+        key="show_advanced_tabs",
+        help="Analytics, Portfolio en Whales tabbladen zichtbaar maken",
+    )
+
+_base_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging"]
+_adv_tab_names  = ["📊 Analytics", "💼 Portfolio", "🐋 Whales"]
+
+_all_tab_names = _base_tab_names + (_adv_tab_names if show_advanced else [])
+_all_tabs = st.tabs(_all_tab_names)
+
+# Map tab objects by name
+_tab_map = dict(zip(_all_tab_names, _all_tabs))
+
+tab_bggdsb    = _tab_map["🧠 BGGDSB"]
+tab_live      = _tab_map["🔴 Live"]
+tab_st        = _tab_map["🎯 Signal Trader"]
+tab_ar        = _tab_map["🤖 Auto Router"]
+tab_signal_lab = _tab_map["🔬 Signal Lab"]
+tab_learning  = _tab_map["🧠 Learning"]
+tab_guard     = _tab_map["🛡️ Beveiliging"]
+
+with tab_bggdsb:
+    if _tabs_ready:
+        bggdsb_panel()
+    else:
+        _tab_loading("🧠 BGGDSB", "BGGDSB strategie data wordt geladen…")
+
 with tab_live:
     if _tabs_ready:
         dashboard()
@@ -2494,12 +2525,6 @@ with tab_ar:
     else:
         _tab_loading("🤖 Auto Router", "Router configuratie wordt geladen…")
 
-with tab_analytics:
-    if _tabs_ready:
-        analytics_panel()
-    else:
-        _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
-
 with tab_signal_lab:
     if _tabs_ready:
         signal_lab_panel()
@@ -2507,22 +2532,33 @@ with tab_signal_lab:
         _tab_loading("🔬 Signal Lab", "Trade-data en signalen worden geladen…")
 
 with tab_learning:
-    _learning_panel()   # ← direct beschikbaar na startup
-
-with tab_portfolio:
-    if _tabs_ready:
-        _portfolio_panel()
-    else:
-        _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
+    _learning_panel()
 
 with tab_guard:
-    coin_protection_panel()  # ← direct beschikbaar na startup
+    coin_protection_panel()
 
-with tab_whale:
-    if _tabs_ready:
-        _whale_panel()
-    else:
-        _tab_loading("🐋 Whales", "Whale data wordt geladen…")
+if show_advanced:
+    tab_analytics = _tab_map["📊 Analytics"]
+    tab_portfolio = _tab_map["💼 Portfolio"]
+    tab_whale     = _tab_map["🐋 Whales"]
+
+    with tab_analytics:
+        if _tabs_ready:
+            analytics_panel()
+        else:
+            _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
+
+    with tab_portfolio:
+        if _tabs_ready:
+            _portfolio_panel()
+        else:
+            _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
+
+    with tab_whale:
+        if _tabs_ready:
+            _whale_panel()
+        else:
+            _tab_loading("🐋 Whales", "Whale data wordt geladen…")
 
 # ── Auto-advance naar volledig dashboard ───────────────────────────────────────
 # Na render 2 (skeleton pass) → trigger render 3 (volledig).

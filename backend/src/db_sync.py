@@ -1447,3 +1447,127 @@ def get_whale_bot_overlap(days: int = 7) -> list[dict]:
         return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+# ── BGGDSB reads ──────────────────────────────────────────────────────────────
+
+_IS5_ADDRESS = "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
+
+
+def set_dashboard_state(key: str, value: str) -> None:
+    """Sync write to dashboard_state table (for use from Streamlit threads)."""
+    if not _db_path.exists():
+        return
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(str(_db_path), timeout=10)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO dashboard_state (key, value, updated_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is5_live_status() -> dict:
+    """Check if is5minfixedyet has new activity in the last 15 minutes.
+
+    Uses synced_at (our insert time) rather than event_ts to avoid timezone
+    parsing. Since we sync every 5 min, new rows with synced_at < 10 min ago
+    means they just traded.
+    """
+    if not _db_path.exists():
+        return {"live": False, "last_seen": "DB niet gevonden", "trades_recent": 0}
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), MAX(synced_at) FROM whale_activity "
+                "WHERE address = ? AND synced_at >= datetime('now', '-15 minutes')",
+                (_IS5_ADDRESS,),
+            ).fetchone()
+            n_recent = row[0] if row else 0
+            last_synced = (row[1] or "")[:16] if row else ""
+
+            # Get last seen (most recent event_ts regardless)
+            last_row = conn.execute(
+                "SELECT MAX(synced_at) FROM whale_activity WHERE address = ?",
+                (_IS5_ADDRESS,),
+            ).fetchone()
+            last_seen = (last_row[0] or "onbekend")[:16] if last_row else "onbekend"
+
+        return {
+            "live": n_recent > 0,
+            "trades_recent": n_recent,
+            "last_seen": last_seen,
+        }
+    except Exception:
+        return {"live": False, "last_seen": "fout", "trades_recent": 0}
+
+
+def is5_recently_active(coin: str | None = None, minutes: int = 15) -> bool:
+    """True if is5 has new activity synced in last N minutes (optionally filtered by coin)."""
+    if not _db_path.exists():
+        return False
+    try:
+        conditions = ["address = ?", "synced_at >= datetime('now', ?)"]
+        params: list = [_IS5_ADDRESS, f"-{minutes} minutes"]
+        if coin:
+            conditions.append("coin = ?")
+            params.append(coin)
+        with _conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM whale_activity WHERE {' AND '.join(conditions)}",
+                params,
+            ).fetchone()
+        return row[0] > 0
+    except Exception:
+        return False
+
+
+def get_bggdsb_stats() -> dict:
+    """Performance stats for trades with router_bucket = 'bggdsb'."""
+    if not _db_path.exists():
+        return {}
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS n,
+                    ROUND(AVG(CASE WHEN net_pnl > 0 THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                    ROUND(SUM(net_pnl), 4) AS total_pnl,
+                    ROUND(AVG(net_pnl), 4) AS avg_pnl,
+                    ROUND(AVG(entry_yes_price), 3) AS gem_entry_prijs
+                FROM trades
+                WHERE router_bucket = 'bggdsb'
+                  AND status IN ('closed', 'resolved')
+                """
+            ).fetchone()
+        return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def get_bggdsb_trades(limit: int = 100) -> list[dict]:
+    """Recent bggdsb trades ordered by creation time."""
+    if not _db_path.exists():
+        return []
+    try:
+        with _conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT trade_id, created_at, coin, winner_side,
+                       entry_yes_price, entry_no_price, yes_size, no_size,
+                       winner_exit_reason, net_pnl, status
+                FROM trades
+                WHERE router_bucket = 'bggdsb'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []

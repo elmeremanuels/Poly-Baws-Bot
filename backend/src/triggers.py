@@ -81,6 +81,17 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "regime_at_entry", _regime_label)
     update_trade_field(trade_id, "bias_direction_at_entry", _conv_dir)
 
+    # ── BGGDSB: use pre-computed share counts, skip conviction weighting ─────
+    if trade.get("router_bucket") == "bggdsb":
+        _b_yes = trade.get("bggdsb_yes_shares")
+        _b_no = trade.get("bggdsb_no_shares")
+        if _b_yes is not None and _b_no is not None:
+            update_trade_field(trade_id, "yes_size", float(_b_yes))
+            update_trade_field(trade_id, "no_size", float(_b_no))
+            update_trade_field(trade_id, "entry_size", round((float(_b_yes) + float(_b_no)) / 2, 2))
+            update_trade_field(trade_id, "entry_type", "straddle")
+            return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
+
     # ── Conviction-weighted sizing ────────────────────────────────────────────
     # When conviction_weighting.enabled and score >= min_score, the biased side
     # gets up to max_ratio× the base size. Falls back to price_position bias
@@ -984,10 +995,12 @@ async def _winner_exit_paper(
 
         if seconds_left <= es["force_exit_seconds"]:
             # Fix 2: only hold to resolution when EV-positive (mid >= break_even).
-            # At mid=0.55 with break_even=0.78, holding has negative EV — raises hold threshold.
             hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.70)
             if es.get("hold_for_resolution_ev_floor", True) and break_even_price:
                 hold_threshold = max(hold_threshold, break_even_price)
+            # BGGDSB: always hold to $1 resolution — no force exit
+            if trade.get("router_bucket") == "bggdsb":
+                hold_threshold = 0.0
             mid_check = ws_client.get_mid_price(winner_token)
             if mid_check is not None and mid_check >= hold_threshold:
                 _store_trail_metrics(trade_id, peak_mid, ratchet_count, loop_time - trail_start)
@@ -1209,6 +1222,9 @@ async def _winner_exit_live(
             hold_threshold = es.get("hold_for_resolution_mid_threshold", 0.70)
             if es.get("hold_for_resolution_ev_floor", True) and break_even_price:
                 hold_threshold = max(hold_threshold, break_even_price)
+            # BGGDSB: always hold to $1 resolution
+            if trade.get("router_bucket") == "bggdsb":
+                hold_threshold = 0.0
             mid_check = ws_client.get_mid_price(winner_token)
             await orders.cancel_order(current_order_id)
             if mid_check is not None and mid_check >= hold_threshold:

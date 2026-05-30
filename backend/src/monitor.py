@@ -315,6 +315,9 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
             coin = trade.get("coin", "")
             regime_label = trade.get("regime_at_entry") or "NORMAL"
             early_thr, rebuy_thr = _get_early_thresholds(regime_label)
+            # BGGDSB: hold both sides to expiry — disable early loser exit
+            if trade.get("router_bucket") == "bggdsb":
+                early_thr = None
             exit_cfg = CONFIG.get("exit", {})
             cooldown = float(exit_cfg.get("early_loser_cooldown_secs", 90))
             winner_min = float(exit_cfg.get("early_loser_winner_min", 0.57))

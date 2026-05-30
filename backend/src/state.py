@@ -20,7 +20,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str) -> None:
     global _mode
-    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router"}
+    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live"}
     if mode not in valid:
         raise ValueError(f"Invalid mode: {mode}. Must be one of {valid}")
     _mode = mode
@@ -138,6 +138,9 @@ def create_trade_state(
         "early_loser_price": None,      # fill price of the early sell
         "early_loser_ts": None,
         "early_loser_rebought": False,  # True if re-bought after wrong-side early sell
+        # BGGDSB sizing — set before execute_entry to override conviction weighting
+        "bggdsb_yes_shares": market.get("_bggdsb_yes_shares"),
+        "bggdsb_no_shares": market.get("_bggdsb_no_shares"),
     }
     return state
 
