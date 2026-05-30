@@ -2296,8 +2296,63 @@ def _q_whale_overlap(days):
     return get_whale_bot_overlap(days=days)
 
 
+def _whale_account_card(m: dict, col_key_suffix: str) -> None:
+    """Render one whale account card: stats + history load button."""
+    import pandas as pd
+    from src.whale_tracker import deep_sync_whale_sync
+
+    name = m["name"]
+    address = m["address"]
+    addr_short = f"{address[:8]}…{address[-6:]}"
+    history_loaded = bool(m.get("history_loaded", 0))
+    act_count = m.get("activity_count", 0)
+    pos_count = m.get("positions_count", 0)
+    last_sync = (m.get("last_synced_at") or "")[:16]
+
+    st.markdown(f"**{name}**  `{addr_short}`")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Transacties", act_count, help="Aantal transacties in database")
+    c2.metric("Posities", pos_count, help="Huidige open/gesloten posities")
+    hist_label = "✅ Volledig" if history_loaded else "⚠️ Gedeeltelijk"
+    c3.metric("Historie", hist_label, help="Is de volledige geschiedenis geladen?")
+    if last_sync:
+        st.caption(f"Laatste sync: {last_sync}")
+
+    # History load button
+    btn_key = f"wh_hist_{col_key_suffix}"
+    if not history_loaded:
+        if st.button("📥 Laad volledige historie", key=btn_key):
+            with st.spinner(f"Paginering door {name} — kan 20-30 seconden duren…"):
+                total, new_rows = deep_sync_whale_sync(name, address)
+            st.success(f"Klaar: {total} transacties opgehaald, {new_rows} nieuw opgeslagen.")
+            _q_whale_meta.clear()
+            st.rerun()
+    else:
+        st.caption("Volledige historische data geladen.")
+
+    st.divider()
+
+    # Recent activity for this account
+    rows = get_whale_activity(address=address, limit=50)
+    if rows:
+        df = pd.DataFrame(rows)
+        show = [c for c in ["coin", "outcome_side", "trade_type", "price", "usdc_size", "event_ts"] if c in df.columns]
+        df_s = df[show].copy()
+        df_s.columns = [{"coin": "Coin", "outcome_side": "Kant", "trade_type": "Type",
+                          "price": "Prijs", "usdc_size": "USDC", "event_ts": "Tijd"}.get(c, c) for c in show]
+        if "Prijs" in df_s.columns:
+            df_s["Prijs"] = df_s["Prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+        if "USDC" in df_s.columns:
+            df_s["USDC"] = df_s["USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+        st.dataframe(df_s, hide_index=True, use_container_width=True, height=320)
+    else:
+        st.caption("Nog geen activiteit geladen.")
+
+
 @st.fragment
 def _whale_panel() -> None:
+    import pandas as pd
+
     st.subheader("🐋 Whale Tracker")
 
     meta = _q_whale_meta()
@@ -2305,20 +2360,17 @@ def _whale_panel() -> None:
         st.info("Geen whale-adressen geconfigureerd of nog niet gesynct. Voeg adressen toe in `config.yaml → whale_tracker.addresses`.")
         return
 
-    # ── Status bar ──────────────────────────────────────────────────────────
-    for m in meta:
-        sync_ago = ""
-        if m.get("last_synced_at"):
-            sync_ago = f" · gesynchroniseerd {m['last_synced_at'][:16]}"
-        st.caption(f"**{m['name']}** `{m['address'][:10]}…{m['address'][-6:]}` — {m['activity_count']} transacties · {m['positions_count']} posities{sync_ago}")
+    # ── Side-by-side account cards ───────────────────────────────────────────
+    cols = st.columns(len(meta))
+    for col, m in zip(cols, meta):
+        with col:
+            _whale_account_card(m, col_key_suffix=m["name"].replace(" ", "_"))
 
-    st.divider()
-
-    # ── Filters ─────────────────────────────────────────────────────────────
+    # ── Gedeelde filterbalk ──────────────────────────────────────────────────
     col_addr, col_coin, col_days = st.columns([2, 1.5, 1.5])
     addr_options = ["Alle"] + [m["name"] for m in meta]
     with col_addr:
-        sel_addr_label = st.selectbox("Account", addr_options, key="wh_addr")
+        sel_addr_label = st.selectbox("Gefilterd account", addr_options, key="wh_addr")
     with col_coin:
         sel_coin = st.selectbox("Coin", ["Alle", "BTC", "ETH", "SOL", "DOGE", "XRP"], key="wh_coin")
     with col_days:
@@ -2328,19 +2380,18 @@ def _whale_panel() -> None:
     sel_coin_val = None if sel_coin == "Alle" else sel_coin
     sel_days = {"7 dagen": 7, "30 dagen": 30, "Alle": None}[sel_days_label]
 
-    # ── Tabs ────────────────────────────────────────────────────────────────
-    tab_act, tab_pos, tab_overlap = st.tabs(["📋 Activiteit", "💼 Posities", "🔀 Overlap met bot"])
+    # ── Detail tabs ──────────────────────────────────────────────────────────
+    tab_act, tab_pos, tab_overlap = st.tabs(["📋 Alle activiteit", "💼 Posities", "🔀 Overlap met bot"])
 
     with tab_act:
         rows = _q_whale_activity(sel_addr, sel_coin_val, sel_days)
         if not rows:
             st.caption("Geen activiteit gevonden.")
         else:
-            import pandas as pd
             df = pd.DataFrame(rows)
             show_cols = [c for c in ["name", "coin", "outcome_side", "trade_type", "price", "usdc_size", "question", "event_ts"] if c in df.columns]
             df_show = df[show_cols].copy()
-            df_show.columns = [{"name": "Account", "coin": "Coin", "outcome_side": "YES/NO", "trade_type": "Type",
+            df_show.columns = [{"name": "Account", "coin": "Coin", "outcome_side": "Kant", "trade_type": "Type",
                                  "price": "Prijs", "usdc_size": "USDC", "question": "Markt", "event_ts": "Tijd"}.get(c, c) for c in show_cols]
             if "Prijs" in df_show.columns:
                 df_show["Prijs"] = df_show["Prijs"].apply(lambda x: f"{x:.3f}" if x else "")
@@ -2354,45 +2405,37 @@ def _whale_panel() -> None:
         if not rows:
             st.caption("Geen posities gevonden.")
         else:
-            import pandas as pd
             df = pd.DataFrame(rows)
-            # Split actief / expired
             if "is_redeemable" in df.columns:
                 active = df[df["is_redeemable"] == 0]
                 expired = df[df["is_redeemable"] == 1]
             else:
                 active = df
                 expired = pd.DataFrame()
-
             show_cols = [c for c in ["name", "coin", "side", "size", "avg_price", "cur_price", "cash_pnl", "pct_pnl", "question"] if c in df.columns]
-
             if not active.empty:
                 st.markdown("**Actieve posities**")
                 df_a = active[show_cols].copy()
                 df_a.columns = [{"name": "Account", "coin": "Coin", "side": "Kant", "size": "Shares",
-                                  "avg_price": "Gem.prijs", "cur_price": "Nu", "cash_pnl": "P&L €",
+                                  "avg_price": "Gem.prijs", "cur_price": "Nu", "cash_pnl": "P&L $",
                                   "pct_pnl": "P&L %", "question": "Markt"}.get(c, c) for c in show_cols]
                 if "P&L %" in df_a.columns:
                     df_a["P&L %"] = df_a["P&L %"].apply(lambda x: f"{x:+.1f}%" if x else "")
-                if "P&L €" in df_a.columns:
-                    df_a["P&L €"] = df_a["P&L €"].apply(lambda x: f"${x:+.2f}" if x else "")
+                if "P&L $" in df_a.columns:
+                    df_a["P&L $"] = df_a["P&L $"].apply(lambda x: f"${x:+.2f}" if x else "")
                 st.dataframe(df_a, hide_index=True, use_container_width=True)
-
             if not expired.empty:
                 with st.expander(f"Verlopen posities ({len(expired)}) — redeemable"):
-                    df_e = expired[show_cols].copy()
-                    st.dataframe(df_e, hide_index=True, use_container_width=True)
+                    st.dataframe(expired[show_cols], hide_index=True, use_container_width=True)
 
     with tab_overlap:
-        st.caption("Markten waar de whale handelde terwijl jouw bot ook actief was (±30 min).")
+        st.caption("Markten waar een whale handelde terwijl jouw bot ook actief was (±30 min).")
         overlap = _q_whale_overlap(sel_days or 30)
         if not overlap:
             st.caption("Geen overlap gevonden in geselecteerde periode.")
         else:
-            import pandas as pd
             df = pd.DataFrame(overlap)
-            show_cols = [c for c in ["coin", "bot_ts", "whale_name", "whale_side", "whale_price", "whale_usdc",
-                                      "winner_side", "net_pnl"] if c in df.columns]
+            show_cols = [c for c in ["coin", "bot_ts", "whale_name", "whale_side", "whale_price", "whale_usdc", "winner_side", "net_pnl"] if c in df.columns]
             df_show = df[show_cols].copy()
             df_show.columns = [{"coin": "Coin", "bot_ts": "Bot tijd", "whale_name": "Whale",
                                   "whale_side": "Whale kant", "whale_price": "Whale prijs",

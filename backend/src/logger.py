@@ -367,7 +367,8 @@ async def init_db() -> None:
                 name TEXT,
                 last_synced_at TEXT,
                 activity_count INTEGER DEFAULT 0,
-                positions_count INTEGER DEFAULT 0
+                positions_count INTEGER DEFAULT 0,
+                history_loaded INTEGER DEFAULT 0
             )
         """)
         await db.execute(

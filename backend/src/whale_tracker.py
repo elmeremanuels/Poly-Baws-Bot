@@ -138,6 +138,114 @@ async def _save_positions(db: aiosqlite.Connection, address: str, name: str, ite
             pass
 
 
+async def fetch_whale_activity_paginated(address: str, max_records: int = 5000) -> list[dict]:
+    """Paginate through all available activity. Returns up to max_records items."""
+    all_items: list[dict] = []
+    page_size = 100
+    offset = 0
+    async with httpx.AsyncClient(timeout=15) as client:
+        while len(all_items) < max_records:
+            url = f"{_BASE}/activity?user={address}&limit={page_size}&offset={offset}"
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                page = resp.json()
+                if not page or not isinstance(page, list):
+                    break
+                all_items.extend(page)
+                if len(page) < page_size:
+                    break
+                offset += page_size
+                await asyncio.sleep(0.25)  # rate-limit friendly
+            except Exception as exc:
+                log.warning("whale_history_page_failed", address=address, offset=offset, error=str(exc))
+                break
+    return all_items
+
+
+# ── Sync (blocking) versions for use from Streamlit threads ──────────────────
+
+def fetch_whale_activity_paginated_sync(address: str, max_records: int = 5000) -> list[dict]:
+    """Blocking paginated fetch — safe to call from Streamlit button handlers."""
+    import time as _time
+    all_items: list[dict] = []
+    page_size = 100
+    offset = 0
+    with httpx.Client(timeout=15) as client:
+        while len(all_items) < max_records:
+            url = f"{_BASE}/activity?user={address}&limit={page_size}&offset={offset}"
+            try:
+                resp = client.get(url)
+                resp.raise_for_status()
+                page = resp.json()
+                if not page or not isinstance(page, list):
+                    break
+                all_items.extend(page)
+                if len(page) < page_size:
+                    break
+                offset += page_size
+                _time.sleep(0.25)
+            except Exception as exc:
+                log.warning("whale_history_page_failed", address=address, offset=offset, error=str(exc))
+                break
+    return all_items
+
+
+def deep_sync_whale_sync(name: str, address: str) -> tuple[int, int]:
+    """Full historical sync, blocking. Returns (total_fetched, new_rows)."""
+    import sqlite3 as _sqlite3
+
+    all_activity = fetch_whale_activity_paginated_sync(address)
+
+    conn = _sqlite3.connect(str(_db_path), timeout=30)
+    conn.row_factory = _sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=15000")
+        inserted = 0
+        for item in all_activity:
+            tx_hash = _f(item, "transactionHash", "id", default="")
+            if not tx_hash:
+                continue
+            question = _f(item, "title", "question", "market_question", default="")
+            coin = _extract_coin(question)
+            outcome_side = _f(item, "outcome", default="")
+            if not outcome_side:
+                idx = item.get("outcomeIndex")
+                outcome_side = "YES" if idx == 0 else ("NO" if idx == 1 else "")
+            trade_type = _f(item, "type", "side", default="BUY")
+            price = float(_f(item, "price", default=0) or 0)
+            size = float(_f(item, "size", default=0) or 0)
+            usdc = float(_f(item, "usdcSize", "amount", default=0) or 0)
+            market_id = _f(item, "market", "conditionId", "marketId", default="")
+            ts = _f(item, "timestamp", "createdAt", "created_at", default="")
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO whale_activity
+                       (address, name, transaction_hash, market_id, question, outcome_side,
+                        trade_type, price, size, usdc_size, coin, event_ts)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (address, name, tx_hash, market_id, question, outcome_side,
+                     trade_type, price, size, usdc, coin, ts),
+                )
+                inserted += 1
+            except Exception:
+                pass
+        conn.execute(
+            "INSERT OR REPLACE INTO whale_meta "
+            "(address, name, last_synced_at, activity_count, positions_count, history_loaded) "
+            "SELECT ?, ?, datetime('now'), "
+            "(SELECT COUNT(*) FROM whale_activity WHERE address=?), "
+            "COALESCE((SELECT positions_count FROM whale_meta WHERE address=?), 0), 1",
+            (address, name, address, address),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    log.info("whale_deep_sync_done", name=name, total=len(all_activity), new_rows=inserted)
+    return len(all_activity), inserted
+
+
 # ── Public sync entry point ──────────────────────────────────────────────────
 
 async def sync_whale(name: str, address: str) -> None:
