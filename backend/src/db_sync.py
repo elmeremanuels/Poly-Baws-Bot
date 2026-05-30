@@ -428,13 +428,27 @@ def get_scanner_alerts(limit: int = 5) -> list[dict]:
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
+# Mode filter SQL snippets — None = geen filter (alle modes)
+_MODE_SQL: dict[str | None, str | None] = {
+    None:          None,
+    "straddle":    "(mode IS NULL OR mode NOT IN ('signal_trader', 'auto_router'))",
+    "signal":      "mode = 'signal_trader'",
+    "auto_router": "mode = 'auto_router'",
+}
+
+
 def get_analytics_trades(coin: str | None = None, days: int | None = None,
-                         only_today: bool = False) -> list[dict]:
-    """Straddle trades only (excludes signal_trader mode), ordered by created_at ASC."""
+                         only_today: bool = False,
+                         mode_filter: str | None = "straddle") -> list[dict]:
+    """Trades gefilterd op mode, gesorteerd op created_at ASC.
+    mode_filter=None toont alle modes; standaard 'straddle' (achterwaarts compatibel).
+    """
     if not _db_path.exists():
         return []
-    # Exclude signal_trader mode — die heeft eigen analytics tab en ander P&L-bereik (±€10)
-    conditions: list[str] = ["(mode IS NULL OR mode != 'signal_trader')"]
+    conditions: list[str] = []
+    mode_sql = _MODE_SQL.get(mode_filter)
+    if mode_sql:
+        conditions.append(mode_sql)
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -454,12 +468,15 @@ def get_analytics_trades(coin: str | None = None, days: int | None = None,
 
 
 def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
-                          only_today: bool = False) -> list[dict]:
-    """Aggregate stats grouped by winner_exit_reason (straddle only)."""
+                          only_today: bool = False,
+                          mode_filter: str | None = "straddle") -> list[dict]:
+    """Aggregate stats grouped by winner_exit_reason."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
-                  "(mode IS NULL OR mode != 'signal_trader')"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    mode_sql = _MODE_SQL.get(mode_filter)
+    if mode_sql:
+        conditions.append(mode_sql)
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -489,12 +506,15 @@ def get_exit_reason_stats(coin: str | None = None, days: int | None = None,
     return [dict(r) for r in rows]
 
 
-def get_coin_comparison(days: int | None = None, only_today: bool = False) -> list[dict]:
-    """Per-coin aggregated stats for closed triggered straddle trades."""
+def get_coin_comparison(days: int | None = None, only_today: bool = False,
+                        mode_filter: str | None = "straddle") -> list[dict]:
+    """Per-coin aggregated stats for closed triggered trades."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
-                  "(mode IS NULL OR mode != 'signal_trader')"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    mode_sql = _MODE_SQL.get(mode_filter)
+    if mode_sql:
+        conditions.append(mode_sql)
     params: list = []
     if only_today:
         conditions.append("date(created_at) = date('now')")
@@ -523,12 +543,15 @@ def get_coin_comparison(days: int | None = None, only_today: bool = False) -> li
 
 
 def get_hourly_pnl(coin: str | None = None, days: int | None = None,
-                   only_today: bool = False) -> list[dict]:
-    """Average P&L by hour of day (UTC), straddle trades only."""
+                   only_today: bool = False,
+                   mode_filter: str | None = "straddle") -> list[dict]:
+    """Average P&L by hour of day (UTC)."""
     if not _db_path.exists():
         return []
-    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1",
-                  "(mode IS NULL OR mode != 'signal_trader')"]
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    mode_sql = _MODE_SQL.get(mode_filter)
+    if mode_sql:
+        conditions.append(mode_sql)
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -555,6 +578,35 @@ def get_hourly_pnl(coin: str | None = None, days: int | None = None,
             WHERE {where}
             GROUP BY hour_utc
             ORDER BY hour_utc""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_mode_comparison(days: int | None = None, only_today: bool = False) -> list[dict]:
+    """Per-mode aggregated stats — altijd alle modes, geen mode_filter."""
+    if not _db_path.exists():
+        return []
+    conditions = ["status IN ('closed','resolved')", "trigger_hit = 1"]
+    params: list = []
+    if only_today:
+        conditions.append("date(created_at) = date('now')")
+    elif days:
+        conditions.append("created_at >= datetime('now', ?)")
+        params.append(f"-{days} days")
+    where = " AND ".join(conditions)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""SELECT
+                COALESCE(mode, 'straddle') AS trade_mode,
+                COUNT(*) AS n,
+                ROUND(AVG(CASE WHEN actual_winner = winner_side THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
+                ROUND(AVG(net_pnl), 4) AS avg_pnl,
+                ROUND(SUM(net_pnl), 4) AS total_pnl
+            FROM trades
+            WHERE {where}
+            GROUP BY COALESCE(mode, 'straddle')
+            ORDER BY total_pnl DESC""",
             params,
         ).fetchall()
     return [dict(r) for r in rows]
@@ -1016,12 +1068,13 @@ def _signal_where(
     days: int | None,
     only_today: bool,
     extra_conditions: list[str] | None = None,
+    mode_filter: str | None = "straddle",
 ) -> tuple[str, list]:
-    """Build WHERE clause + params for straddle signal analytics queries.
-    Excludes signal_trader mode — die heeft eigen accuracybereik en P&L-schaal.
-    """
-    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')",
-                  "(mode IS NULL OR mode != 'signal_trader')"]
+    """Build WHERE clause + params for signal analytics queries."""
+    conditions = ["trigger_hit = 1", "status IN ('closed','resolved')"]
+    mode_sql = _MODE_SQL.get(mode_filter)
+    if mode_sql:
+        conditions.append(mode_sql)
     params: list = []
     if coin:
         conditions.append("coin = ?")
@@ -1037,12 +1090,13 @@ def _signal_where(
 
 
 def get_conviction_bucket_stats(
-    coin: str | None = None, days: int | None = None, only_today: bool = False
+    coin: str | None = None, days: int | None = None, only_today: bool = False,
+    mode_filter: str | None = "straddle",
 ) -> list[dict]:
     """Win rate + avg P&L grouped by conviction_score_at_trigger bucket."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1067,12 +1121,13 @@ def get_conviction_bucket_stats(
 
 
 def get_regime_bucket_stats(
-    coin: str | None = None, days: int | None = None, only_today: bool = False
+    coin: str | None = None, days: int | None = None, only_today: bool = False,
+    mode_filter: str | None = "straddle",
 ) -> list[dict]:
     """Win rate + avg P&L grouped by regime_at_entry."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1092,12 +1147,13 @@ def get_regime_bucket_stats(
 
 
 def get_ofi_bucket_stats(
-    coin: str | None = None, days: int | None = None, only_today: bool = False
+    coin: str | None = None, days: int | None = None, only_today: bool = False,
+    mode_filter: str | None = "straddle",
 ) -> list[dict]:
     """Win rate + avg P&L grouped by OFI-at-trigger bucket."""
     if not _db_path.exists():
         return []
-    where, params = _signal_where(coin, days, only_today)
+    where, params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT
@@ -1122,7 +1178,8 @@ def get_ofi_bucket_stats(
 
 
 def get_conviction_threshold_sweep(
-    coin: str | None = None, days: int | None = None, only_today: bool = False
+    coin: str | None = None, days: int | None = None, only_today: bool = False,
+    mode_filter: str | None = "straddle",
 ) -> list[dict]:
     """For each threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
     return trades included, win%, avg_net_pnl, total_pnl.
@@ -1130,7 +1187,7 @@ def get_conviction_threshold_sweep(
     """
     if not _db_path.exists():
         return []
-    base_where, base_params = _signal_where(coin, days, only_today)
+    base_where, base_params = _signal_where(coin, days, only_today, mode_filter=mode_filter)
     results = []
     with _conn() as conn:
         for threshold in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:

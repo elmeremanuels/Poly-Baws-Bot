@@ -11,6 +11,7 @@ from src.db_sync import (
     get_conviction_threshold_sweep,
     get_exit_reason_stats,
     get_hourly_pnl,
+    get_mode_comparison,
     get_ofi_bucket_stats,
     get_pnl_by_exit_reason,
     get_regime_bucket_stats,
@@ -29,48 +30,53 @@ _RANGE_DAYS = {"24 uur": 1, "7 dagen": 7, "30 dagen": 30, "Alle tijd": None}
 # ── Gecachede DB-queries ───────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
-def _q_trades(coin, days, only_today):
-    return get_analytics_trades(coin=coin, days=days, only_today=only_today)
+def _q_trades(coin, days, only_today, mode_filter):
+    return get_analytics_trades(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_exit_stats(coin, days, only_today):
-    return get_exit_reason_stats(coin=coin, days=days, only_today=only_today)
+def _q_exit_stats(coin, days, only_today, mode_filter):
+    return get_exit_reason_stats(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_coin_comparison(days, only_today):
-    return get_coin_comparison(days=days, only_today=only_today)
+def _q_coin_comparison(days, only_today, mode_filter):
+    return get_coin_comparison(days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_hourly_pnl(coin, days, only_today):
-    return get_hourly_pnl(coin=coin, days=days, only_today=only_today)
+def _q_hourly_pnl(coin, days, only_today, mode_filter):
+    return get_hourly_pnl(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_conviction_buckets(coin, days, only_today):
-    return get_conviction_bucket_stats(coin=coin, days=days, only_today=only_today)
+def _q_conviction_buckets(coin, days, only_today, mode_filter):
+    return get_conviction_bucket_stats(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_regime_buckets(coin, days, only_today):
-    return get_regime_bucket_stats(coin=coin, days=days, only_today=only_today)
+def _q_regime_buckets(coin, days, only_today, mode_filter):
+    return get_regime_bucket_stats(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_ofi_buckets(coin, days, only_today):
-    return get_ofi_bucket_stats(coin=coin, days=days, only_today=only_today)
+def _q_ofi_buckets(coin, days, only_today, mode_filter):
+    return get_ofi_bucket_stats(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
-def _q_conviction_sweep(coin, days, only_today):
-    return get_conviction_threshold_sweep(coin=coin, days=days, only_today=only_today)
+def _q_conviction_sweep(coin, days, only_today, mode_filter):
+    return get_conviction_threshold_sweep(coin=coin, days=days, only_today=only_today, mode_filter=mode_filter)
 
 
 @st.cache_data(ttl=60)
 def _q_pnl_by_exit_reason(coin, days, only_today):
     return get_pnl_by_exit_reason(coin=coin, days=days, only_today=only_today)
+
+
+@st.cache_data(ttl=60)
+def _q_mode_comparison(days, only_today):
+    return get_mode_comparison(days=days, only_today=only_today)
 
 
 @st.cache_data(ttl=120)
@@ -96,24 +102,35 @@ def _results_to_df(results: list[BacktestResult]) -> pd.DataFrame:
 
 # ── Hoofd-fragment ─────────────────────────────────────────────────────────────
 
+_MODE_LABELS = ["Alle", "Straddle", "Signal", "Auto Router"]
+_MODE_KEYS   = {"Alle": None, "Straddle": "straddle", "Signal": "signal", "Auto Router": "auto_router"}
+
+
 @st.fragment
 def analytics_panel() -> None:
-    # ── Zoekfilter ────────────────────────────────────────────────────────────
-    st.markdown("### 🔍 Zoekfilter")
-    col_coin, col_range = st.columns([2, 3])
+    # ── Zoekfilter (compact: coin · mode · periode in één rij) ────────────────
+    col_coin, col_mode, col_range = st.columns([1.5, 2.5, 2])
     with col_coin:
-        selected_coin = st.selectbox("Coin", ["Alle"] + COINS, key="an_coin")
+        selected_coin = st.selectbox("Coin", ["Alle"] + COINS, key="an_coin", label_visibility="collapsed")
+        st.caption("Coin")
+    with col_mode:
+        selected_mode_label = st.radio(
+            "Mode", _MODE_LABELS, horizontal=True, key="an_mode", label_visibility="collapsed"
+        )
+        st.caption("Mode")
     with col_range:
         selected_range = st.radio(
-            "Periode", list(_RANGE_DAYS.keys()), horizontal=True, key="an_range", index=0
+            "Periode", list(_RANGE_DAYS.keys()), horizontal=True, key="an_range",
+            index=0, label_visibility="collapsed"
         )
+        st.caption("Periode")
 
     col_btn, col_clear = st.columns([2, 1])
     with col_btn:
-        apply_filter = st.button("🔍 Zoekfilter toepassen", key="an_apply_filter", type="primary")
+        apply_filter = st.button("🔍 Toepassen", key="an_apply_filter", type="primary")
     with col_clear:
         if st.session_state.get("an_results"):
-            if st.button("✕ Wis filter", key="an_clear_filter"):
+            if st.button("✕ Wis", key="an_clear_filter"):
                 st.session_state.pop("an_results", None)
                 st.session_state.pop("bt_cache", None)
                 st.session_state.pop("wt_cache", None)
@@ -122,14 +139,16 @@ def analytics_panel() -> None:
     if apply_filter:
         coin_filter_new = selected_coin if selected_coin != "Alle" else None
         days_new = _RANGE_DAYS[selected_range]
-        trades_new = _q_trades(coin_filter_new, days_new, False)
+        mode_filter_new = _MODE_KEYS[selected_mode_label]
+        trades_new = _q_trades(coin_filter_new, days_new, False, mode_filter_new)
         st.session_state["an_results"] = {
             "coin": coin_filter_new,
             "days": days_new,
             "range_label": selected_range,
+            "mode_filter": mode_filter_new,
+            "mode_label": selected_mode_label,
             "trades": trades_new,
         }
-        # Backtest cache ongeldig bij nieuwe filterparameters
         st.session_state.pop("bt_cache", None)
         st.session_state.pop("wt_cache", None)
 
@@ -138,29 +157,32 @@ def analytics_panel() -> None:
     # ── Data bepalen ──────────────────────────────────────────────────────────
     results = st.session_state.get("an_results")
     if results:
-        coin_filter = results["coin"]
-        days = results["days"]
-        range_label = results["range_label"]
-        trades = results["trades"]
-        only_today = False
-        is_filtered = True
+        coin_filter  = results["coin"]
+        days         = results["days"]
+        range_label  = results["range_label"]
+        mode_filter  = results.get("mode_filter", "straddle")
+        mode_label   = results.get("mode_label", "Straddle")
+        trades       = results["trades"]
+        only_today   = False
+        is_filtered  = True
     else:
-        # Standaard: afgelopen 24 uur, alle coins — lichtgewicht
         coin_filter = None
-        days = 1
+        days        = 1
         range_label = "24 uur"
-        only_today = False
-        trades = _q_trades(None, 1, False)
+        mode_filter = "straddle"
+        mode_label  = "Straddle"
+        only_today  = False
+        trades      = _q_trades(None, 1, False, "straddle")
         is_filtered = False
 
     df = pd.DataFrame(trades) if trades else pd.DataFrame()
 
-    # ── Label + export ────────────────────────────────────────────────────────
+    # ── Caption + export ──────────────────────────────────────────────────────
     col_lbl, col_export = st.columns([4, 1])
     with col_lbl:
-        prefix = "🔍 Gefilterd" if is_filtered else "📊 Standaard (24 uur)"
-        coin_suffix = f" — {coin_filter}" if coin_filter else " — alle coins"
-        st.caption(f"{prefix}: **{len(trades)} trades** — {range_label}{coin_suffix}")
+        prefix      = "🔍" if is_filtered else "📊"
+        coin_suffix = f" · {coin_filter}" if coin_filter else " · alle coins"
+        st.caption(f"{prefix} **{len(trades)} trades** · {range_label}{coin_suffix} · {mode_label}")
     with col_export:
         if not df.empty:
             export_cols = [
@@ -181,33 +203,37 @@ def analytics_panel() -> None:
     if df.empty:
         st.info("Geen voltooide triggered trades in deze periode.")
         if not is_filtered:
-            st.caption("Gebruik het zoekfilter hierboven om een andere periode te bekijken.")
+            st.caption("Gebruik het filter hierboven om een andere periode of mode te bekijken.")
         return
 
-    # ── Key Metrics — altijd prominent ────────────────────────────────────────
+    # ── Key Metrics ────────────────────────────────────────────────────────────
     _key_metrics(df)
 
-    # ── Exit Reason Breakdown — altijd prominent ───────────────────────────────
-    _exit_breakdown(coin_filter, days, only_today)
+    # ── Mode Overzicht (compact, alleen als mode_filter=None = "Alle") ─────────
+    if mode_filter is None:
+        _mode_overview(days, only_today)
 
-    # ── Per-Coin Vergelijking ─────────────────────────────────────────────────
+    # ── Exit Reason Breakdown ──────────────────────────────────────────────────
+    _exit_breakdown(coin_filter, days, only_today, mode_filter)
+
+    # ── Per-Coin Vergelijking ──────────────────────────────────────────────────
     if coin_filter is None:
-        _coin_comparison(days, only_today)
+        _coin_comparison(days, only_today, mode_filter)
 
-    # ── Cumulatief P&L ────────────────────────────────────────────────────────
+    # ── Cumulatief P&L ─────────────────────────────────────────────────────────
     _cumulative_pnl(df)
 
-    # ── Ingeklapte secties (opt-in) ───────────────────────────────────────────
+    # ── Ingeklapte secties ─────────────────────────────────────────────────────
     with st.expander("📈 Trailing & Uurlijkse Analyse", expanded=False):
         _trailing_metrics(df)
         st.divider()
-        _hourly_analysis(coin_filter, days, only_today)
+        _hourly_analysis(coin_filter, days, only_today, mode_filter)
 
     with st.expander("🚪 Exit Analyse (P&L per exit-reden)", expanded=False):
         _exit_loss_analysis(coin_filter, days, only_today)
 
     with st.expander("🧠 Signal Analytics", expanded=False):
-        _signal_analytics(coin_filter, days, only_today)
+        _signal_analytics(coin_filter, days, only_today, mode_filter)
 
     with st.expander("🤖 Claude Analyse", expanded=False):
         _claude_analysis_section(df, coin_filter, days)
@@ -242,9 +268,27 @@ def _key_metrics(df: pd.DataFrame) -> None:
     c[5].metric("Gem. P&L/trade", f"€{avg_pnl:+.4f}")
 
 
-def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False) -> None:
+def _mode_overview(days: int | None, only_today: bool = False) -> None:
+    rows = _q_mode_comparison(days, only_today)
+    if not rows or len(rows) < 2:
+        return
+    _MODE_DISPLAY = {
+        "straddle":    "🔁 Straddle",
+        "signal_trader": "📡 Signal",
+        "auto_router": "🤖 Auto Router",
+    }
+    cols = st.columns(len(rows))
+    for col, row in zip(cols, rows):
+        label = _MODE_DISPLAY.get(row["trade_mode"], row["trade_mode"])
+        pnl = row["total_pnl"] or 0.0
+        delta = f"{row['win_pct'] or 0:.0f}% win · n={row['n']}"
+        col.metric(label, f"€{pnl:+.2f}", delta)
+
+
+def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False,
+                    mode_filter: str | None = "straddle") -> None:
     st.markdown("### Exit Reason Breakdown")
-    stats = _q_exit_stats(coin, days, only_today)
+    stats = _q_exit_stats(coin, days, only_today, mode_filter)
     if not stats:
         st.caption("Geen data.")
         return
@@ -268,9 +312,10 @@ def _exit_breakdown(coin: str | None, days: int | None, only_today: bool = False
         st.bar_chart(sdf.set_index("winner_exit_reason")[["count"]])
 
 
-def _coin_comparison(days: int | None, only_today: bool = False) -> None:
+def _coin_comparison(days: int | None, only_today: bool = False,
+                     mode_filter: str | None = "straddle") -> None:
     st.markdown("### Per-Coin Vergelijking")
-    rows = _q_coin_comparison(days, only_today)
+    rows = _q_coin_comparison(days, only_today, mode_filter)
     if not rows:
         st.caption("Geen data.")
         return
@@ -325,9 +370,10 @@ def _trailing_metrics(df: pd.DataFrame) -> None:
         st.scatter_chart(scatter, x="time_in_trail_seconds", y="net_pnl", color="winner_exit_reason")
 
 
-def _hourly_analysis(coin: str | None, days: int | None, only_today: bool = False) -> None:
+def _hourly_analysis(coin: str | None, days: int | None, only_today: bool = False,
+                     mode_filter: str | None = "straddle") -> None:
     st.markdown("**Gem. P&L per uur van de dag (UTC)**")
-    hourly = _q_hourly_pnl(coin, days, only_today)
+    hourly = _q_hourly_pnl(coin, days, only_today, mode_filter)
     if not hourly:
         st.caption("Onvoldoende data (minimaal 100+ trades voor betrouwbaar signaal).")
         return
@@ -401,7 +447,8 @@ def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = F
         )
 
 
-def _signal_analytics(coin: str | None, days: int | None, only_today: bool = False) -> None:
+def _signal_analytics(coin: str | None, days: int | None, only_today: bool = False,
+                      mode_filter: str | None = "straddle") -> None:
     st.caption(
         "Win rate en P&L per signaalklasse — gebaseerd op getriggerde + gesloten trades. "
         "Gebruik dit om te bepalen welke signaalcombinaties daadwerkelijk een edge geven."
@@ -412,7 +459,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
     )
 
     with tab_conv:
-        rows = _q_conviction_buckets(coin, days, only_today)
+        rows = _q_conviction_buckets(coin, days, only_today, mode_filter)
         if rows:
             bdf = pd.DataFrame(rows)
             st.dataframe(
@@ -429,7 +476,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.caption("Nog geen data (trades moeten getriggerd + gesloten zijn).")
 
     with tab_regime:
-        rows = _q_regime_buckets(coin, days, only_today)
+        rows = _q_regime_buckets(coin, days, only_today, mode_filter)
         if rows:
             rdf = pd.DataFrame(rows)
             st.dataframe(
@@ -445,7 +492,7 @@ def _signal_analytics(coin: str | None, days: int | None, only_today: bool = Fal
             st.caption("Nog geen data.")
 
     with tab_ofi:
-        rows = _q_ofi_buckets(coin, days, only_today)
+        rows = _q_ofi_buckets(coin, days, only_today, mode_filter)
         if rows:
             odf = pd.DataFrame(rows)
             st.dataframe(
@@ -678,6 +725,9 @@ def _trade_history_inner(df: pd.DataFrame) -> None:
 
     if "winner_exit_reason" in show.columns or "status" in show.columns:
         show.insert(2, "Resultaat", show.apply(lambda r: _fmt_result(r.to_dict()), axis=1))
+
+    if "mode" in show.columns:
+        show["mode"] = show["mode"].fillna("straddle")
 
     if "net_pnl" in show.columns:
         show["net_pnl"] = show["net_pnl"].apply(
