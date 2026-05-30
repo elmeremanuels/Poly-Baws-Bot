@@ -648,6 +648,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     market = scanner.get_tradeable_market(coin)
     if not market or not market.get("window_start"):
+        log.debug("bggdsb_no_market", coin=coin)
         return
 
     window_ts  = market["window_start"].isoformat()
@@ -666,8 +667,10 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     entry_delay_secs  = bggdsb_cfg.get("entry_delay_secs", 45)
     secs_since_start  = (now - market["window_start"]).total_seconds()
     if secs_since_start < entry_delay_secs:
+        log.debug("bggdsb_too_early", coin=coin, secs=round(secs_since_start, 1), delay=entry_delay_secs)
         return  # te vroeg — wacht op meer prijsdata
     if secs_since_start > entry_window_secs or secs_since_start < -300:
+        log.debug("bggdsb_outside_entry_window", coin=coin, secs=round(secs_since_start, 1))
         return
 
     paper_raw   = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
@@ -678,12 +681,14 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     yes_ask   = ws_client.get_best_ask(yes_token)
     no_ask    = ws_client.get_best_ask(no_token)
     if yes_ask is None or no_ask is None:
+        log.debug("bggdsb_no_ask_price", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
         return
 
     # Market competitive gate
     comp_min = bggdsb_cfg.get("entry_price_min", 0.10)
     comp_max = bggdsb_cfg.get("entry_price_max", 0.90)
     if not (comp_min <= yes_ask <= comp_max and comp_min <= no_ask <= comp_max):
+        log.debug("bggdsb_gate_fail", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
         return
 
     # is5 signaalgewicht
