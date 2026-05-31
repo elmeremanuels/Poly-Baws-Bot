@@ -347,7 +347,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     col_a, col_c, col_d = st.columns([3, 3, 1])
 
     with col_a:
-        _saved_budget = int(get_state("bggdsb_window_budget") or 20)
+        _saved_budget = int(get_state("bggdsb_window_budget") or 2)
         budget = st.slider(
             "💶 Budget per window (€)",
             min_value=2, max_value=200, step=1,

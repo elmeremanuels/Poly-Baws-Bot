@@ -307,7 +307,7 @@ whale_tracker:
 
 bggdsb:
   coins: ["BTC"]                    # is5minfixedyet handelde vrijwel alleen BTC
-  window_budget_eur: 20.0           # volledig budget op dominant kant bij entry
+  window_budget_eur: 2.0            # volledig budget op dominant kant bij entry
   entry_price_min: 0.10             # market competitive gate — ondergrens
   entry_price_max: 0.90             # market competitive gate — bovengrens
   dom_ask_max: 0.65                 # skip window als dominant kant al > dit (te laat, payout te klein)

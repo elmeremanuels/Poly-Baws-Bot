@@ -372,6 +372,7 @@ async def _auto_router_coin_tick(coin: str) -> None:
 # Module level state for bggdsb dynamic winner-chase strategy
 _bggdsb_tranche_state: dict[str, dict] = {}   # window_key -> window state
 _bggdsb_flip_tasks: dict[str, asyncio.Task] = {}  # window_key -> flip task
+_bggdsb_startup_ts: "datetime | None" = None  # set in run_bot(); skip pre-boot windows
 
 
 async def _bggdsb_extra_buy(
@@ -740,6 +741,16 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     if has_traded_window(coin, window_ts):
         log.debug("bggdsb_window_already_traded", coin=coin, window_ts=window_ts)
+        return
+
+    # Skip windows that started before this bot process — prevents mid-window re-entry
+    # after a restart where tranche state is lost and conviction may have reversed.
+    if _bggdsb_startup_ts and market["window_start"] < _bggdsb_startup_ts:
+        register_window_trade(coin, window_ts)
+        log.info("bggdsb_skip_preboot_window", coin=coin,
+                 window_ts=window_ts,
+                 started_secs_before_boot=round(
+                     (_bggdsb_startup_ts - market["window_start"]).total_seconds()))
         return
 
     # Timing: genoeg tijd resterend én niet te vroeg (scanner vindt window pas na ~120s)
@@ -1152,6 +1163,9 @@ async def _oracle_analysis_loop() -> None:
 
 
 async def run_bot() -> None:
+    global _bggdsb_startup_ts
+    _bggdsb_startup_ts = datetime.now(timezone.utc)
+
     # Safety: always start BGGDSB in paper mode after (re)start.
     # The user must explicitly click "Ga LIVE" on the dashboard to enable live orders.
     # This prevents unintended live trading when the bot restarts with saved live settings.
