@@ -92,17 +92,9 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
 
-    now_utc = datetime.now(timezone.utc)
-    if now_utc >= cutoff_time:
-        update_trade_field(trade_id, "status", "aborted")
-        update_trade_field(trade_id, "notes", "past_cutoff")
-        await persist_trade(trade_id)
-        remove_active_trade(trade_id)
-        log.info("entry_aborted_past_cutoff", trade_id=trade_id,
-                 seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
-        return False
-
     # ── BGGDSB: use pre-computed share counts, skip conviction weighting ─────
+    # Must come before the past_cutoff check: BGGDSB enters DURING the window
+    # (after window_start), so now_utc is always >= cutoff_time for these trades.
     if trade.get("router_bucket") == "bggdsb":
         _b_yes = trade.get("bggdsb_yes_shares")
         _b_no = trade.get("bggdsb_no_shares")
@@ -112,6 +104,16 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
             update_trade_field(trade_id, "entry_size", round((float(_b_yes) + float(_b_no)) / 2, 2))
             update_trade_field(trade_id, "entry_type", "straddle")
             return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
+
+    now_utc = datetime.now(timezone.utc)
+    if now_utc >= cutoff_time:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "past_cutoff")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("entry_aborted_past_cutoff", trade_id=trade_id,
+                 seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
+        return False
 
     # ── Conviction-weighted sizing ────────────────────────────────────────────
     # When conviction_weighting.enabled and score >= min_score, the biased side
