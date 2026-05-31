@@ -414,17 +414,39 @@ async def _bggdsb_extra_buy(
 
 async def _bggdsb_window_hold_task(window_key: str) -> None:
     """
-    is5minfixedyet strategie — koop dominant kant vroeg, hold to expiry.
-
-    Enige actie tijdens window: koop kleine hedge als verliezende kant ≤ 0.11.
-    Geen flipping. Geen confirm. P&L = winner_shares × €1 - total_spend.
+    is5minfixedyet strategie — hold to expiry met:
+    1. Hedge: tiny buy op verliezende kant bij ≤ 0.11
+    2. Averaging down: extra tranches op dominant kant als die > 8ct daalt
+    3. Flip: koop andere kant als die boven flip_trigger stijgt
+    4. Confirm: grote eenmalige koop in laatste 90s als winnaar duidelijk is
     """
     import json as _json
     from .db_sync import set_dashboard_state as _sds
     cfg = CONFIG.get("bggdsb", {})
     hedge_price = float(cfg.get("hedge_price_trigger", 0.11))
-    hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))  # 10% van budget
+    hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))
     dashboard_interval = 3.0
+
+    # Averaging down
+    avg_down_enabled  = bool(cfg.get("avg_down_enabled", True))
+    avg_down_tranche  = float(cfg.get("avg_down_tranche_eur", 10.0))
+    avg_down_min_drop = float(cfg.get("avg_down_min_drop", 0.08))
+    avg_down_interval = float(cfg.get("avg_down_interval_secs", 25))
+    avg_down_max_eur  = float(cfg.get("avg_down_max_eur", 80.0))
+
+    # Flip
+    flip_enabled  = bool(cfg.get("flip_enabled", True))
+    flip_trigger  = float(cfg.get("flip_trigger_price", 0.62))
+    flip_tranche  = float(cfg.get("flip_tranche_eur", 15.0))
+    flip_interval = float(cfg.get("flip_interval_secs", 20))
+    flip_max_eur  = float(cfg.get("flip_max_eur", 60.0))
+    flip_min_secs = float(cfg.get("flip_min_secs_remaining", 60))
+
+    # Confirm
+    confirm_enabled = bool(cfg.get("confirm_enabled", True))
+    confirm_trigger = float(cfg.get("confirm_trigger_price", 0.78))
+    confirm_secs    = float(cfg.get("confirm_secs_remaining", 90))
+    confirm_eur     = float(cfg.get("confirm_eur", 20.0))
 
     try:
         st = _bggdsb_tranche_state.get(window_key)
@@ -432,6 +454,7 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             return
 
         dominant_side = st["dominant_side"]
+        other_side    = "NO" if dominant_side == "YES" else "YES"
         yes_token     = st["yes_token"]
         no_token      = st["no_token"]
         window_end_dt = st["window_end_dt"]
@@ -441,6 +464,19 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
 
         hedge_placed = False
         last_dash_t  = 0.0
+
+        # Avg-down state — reference price starts at entry price
+        avg_down_spend      = 0.0
+        avg_down_last_price = st.get("dom_entry_price")  # None → set on first tick
+        avg_down_last_t     = asyncio.get_event_loop().time()
+
+        # Flip state
+        flip_spend  = 0.0
+        flip_last_t = 0.0
+        flip_active = False
+
+        # Confirm state
+        confirm_done = False
 
         log.info("bggdsb_hold_task_start", coin=coin, window_key=window_key,
                  dominant_side=dominant_side, budget=window_budget)
@@ -463,31 +499,108 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                 await asyncio.sleep(1.0)
                 continue
 
-            # ── HEDGE: koop tiny hedge als verliezende kant ≤ 0.11 ────────
-            # Exact zoals is5: goedkoop verzekeringsshot op de verliezende kant.
-            if not hedge_placed:
-                loser_mid  = no_mid  if dominant_side == "YES" else yes_mid
-                loser_side = "NO"    if dominant_side == "YES" else "YES"
-                loser_tok  = no_token if loser_side == "NO" else yes_token
-                if 0 < loser_mid <= hedge_price:
-                    hedge_eur = round(window_budget * hedge_pct, 2)
-                    l_ask     = ws_client.get_best_ask(loser_tok) or loser_mid
-                    shares    = round(hedge_eur / max(l_ask, 0.01), 2)
-                    if shares >= 0.1:
-                        ok = await _bggdsb_extra_buy(
-                            coin, loser_side, loser_tok,
-                            shares, hedge_eur, is_paper, window_key
-                        )
-                        if ok:
-                            hedge_placed = True
-                            log.info("bggdsb_hedge_placed", coin=coin,
-                                     loser_mid=round(loser_mid, 4),
-                                     eur=hedge_eur, shares=shares)
+            dom_mid   = yes_mid if dominant_side == "YES" else no_mid
+            other_mid = no_mid  if dominant_side == "YES" else yes_mid
+            dom_tok   = yes_token if dominant_side == "YES" else no_token
+            other_tok = no_token  if dominant_side == "YES" else yes_token
+
+            # Initialise avg-down reference from first live price
+            if avg_down_last_price is None:
+                avg_down_last_price = dom_mid
+
+            # ── HEDGE ────────────────────────────────────────────────────────
+            if not hedge_placed and 0 < other_mid <= hedge_price:
+                hedge_eur = round(window_budget * hedge_pct, 2)
+                o_ask     = ws_client.get_best_ask(other_tok) or other_mid
+                shares    = round(hedge_eur / max(o_ask, 0.01), 2)
+                if shares >= 0.1:
+                    ok = await _bggdsb_extra_buy(
+                        coin, other_side, other_tok,
+                        shares, hedge_eur, is_paper, window_key
+                    )
+                    if ok:
+                        hedge_placed = True
+                        log.info("bggdsb_hedge_placed", coin=coin,
+                                 loser_mid=round(other_mid, 4),
+                                 eur=hedge_eur, shares=shares)
+
+            # ── AVERAGING DOWN ───────────────────────────────────────────────
+            if (avg_down_enabled
+                    and avg_down_spend < avg_down_max_eur
+                    and dom_mid < avg_down_last_price - avg_down_min_drop
+                    and loop_t - avg_down_last_t >= avg_down_interval):
+                tranche = min(avg_down_tranche, avg_down_max_eur - avg_down_spend)
+                d_ask   = ws_client.get_best_ask(dom_tok) or dom_mid
+                shares  = round(tranche / max(d_ask, 0.01), 2)
+                if shares >= 0.1:
+                    ok = await _bggdsb_extra_buy(
+                        coin, dominant_side, dom_tok,
+                        shares, tranche, is_paper, window_key
+                    )
+                    if ok:
+                        avg_down_spend      += tranche
+                        avg_down_last_price  = dom_mid
+                        avg_down_last_t      = loop_t
+                        log.info("bggdsb_avg_down", coin=coin,
+                                 dom_mid=round(dom_mid, 4), tranche=tranche,
+                                 total_avg_down=round(avg_down_spend, 2))
+
+            # ── FLIP ─────────────────────────────────────────────────────────
+            if (flip_enabled
+                    and flip_spend < flip_max_eur
+                    and secs_left >= flip_min_secs
+                    and other_mid >= flip_trigger
+                    and (flip_last_t == 0 or loop_t - flip_last_t >= flip_interval)):
+                tranche = min(flip_tranche, flip_max_eur - flip_spend)
+                o_ask   = ws_client.get_best_ask(other_tok) or other_mid
+                shares  = round(tranche / max(o_ask, 0.01), 2)
+                if shares >= 0.1:
+                    ok = await _bggdsb_extra_buy(
+                        coin, other_side, other_tok,
+                        shares, tranche, is_paper, window_key
+                    )
+                    if ok:
+                        flip_spend  += tranche
+                        flip_last_t  = loop_t
+                        if not flip_active:
+                            flip_active = True
+                            log.info("bggdsb_flip_started", coin=coin,
+                                     other_side=other_side,
+                                     other_mid=round(other_mid, 4),
+                                     secs_left=round(secs_left))
+                        else:
+                            log.info("bggdsb_flip_tranche", coin=coin,
+                                     other_mid=round(other_mid, 4),
+                                     flip_total=round(flip_spend, 2))
+
+            # ── CONFIRM BUY ──────────────────────────────────────────────────
+            if (confirm_enabled
+                    and not confirm_done
+                    and secs_left <= confirm_secs
+                    and max(yes_mid, no_mid) >= confirm_trigger):
+                win_side = "YES" if yes_mid >= no_mid else "NO"
+                win_tok  = yes_token if win_side == "YES" else no_token
+                win_mid  = yes_mid   if win_side == "YES" else no_mid
+                w_ask    = ws_client.get_best_ask(win_tok) or win_mid
+                shares   = round(confirm_eur / max(w_ask, 0.01), 2)
+                if shares >= 0.1:
+                    ok = await _bggdsb_extra_buy(
+                        coin, win_side, win_tok,
+                        shares, confirm_eur, is_paper, window_key
+                    )
+                    if ok:
+                        confirm_done = True
+                        log.info("bggdsb_confirm_buy", coin=coin,
+                                 win_side=win_side, win_mid=round(win_mid, 4),
+                                 eur=confirm_eur, shares=shares,
+                                 secs_left=round(secs_left))
 
             # ── State + dashboard ──────────────────────────────────────────
             if st2 := _bggdsb_tranche_state.get(window_key):
                 st2["phase"]        = "holding"
                 st2["hedge_placed"] = hedge_placed
+                st2["flip_active"]  = flip_active
+                st2["confirm_done"] = confirm_done
                 st2["yes_mid"]      = round(yes_mid, 4)
                 st2["no_mid"]       = round(no_mid, 4)
                 st2["secs_left"]    = round(secs_left, 0)
@@ -496,18 +609,22 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                 st2 = _bggdsb_tranche_state.get(window_key)
                 if st2:
                     _sds("bggdsb_active_window", _json.dumps({
-                        "coin": coin,
-                        "window_key": window_key,
-                        "phase": "holding",
-                        "dominant_side": dominant_side,
-                        "yes_spend":  round(st2.get("yes_spend",  0), 2),
-                        "no_spend":   round(st2.get("no_spend",   0), 2),
-                        "yes_shares": round(st2.get("yes_shares", 0), 2),
-                        "no_shares":  round(st2.get("no_shares",  0), 2),
-                        "yes_mid":    round(yes_mid, 4),
-                        "no_mid":     round(no_mid, 4),
-                        "secs_left":  round(secs_left, 0),
-                        "hedge_placed": hedge_placed,
+                        "coin":           coin,
+                        "window_key":     window_key,
+                        "phase":          "holding",
+                        "dominant_side":  dominant_side,
+                        "yes_spend":      round(st2.get("yes_spend",  0), 2),
+                        "no_spend":       round(st2.get("no_spend",   0), 2),
+                        "yes_shares":     round(st2.get("yes_shares", 0), 2),
+                        "no_shares":      round(st2.get("no_shares",  0), 2),
+                        "yes_mid":        round(yes_mid, 4),
+                        "no_mid":         round(no_mid, 4),
+                        "secs_left":      round(secs_left, 0),
+                        "hedge_placed":   hedge_placed,
+                        "avg_down_spend": round(avg_down_spend, 2),
+                        "flip_spend":     round(flip_spend, 2),
+                        "flip_active":    flip_active,
+                        "confirm_done":   confirm_done,
                     }))
                 last_dash_t = loop_t
 
@@ -727,21 +844,22 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     initial_yes_shares = dom_shares  if dominant_side == "YES" else 0.0
     initial_no_shares  = dom_shares  if dominant_side == "NO"  else 0.0
     _bggdsb_tranche_state[window_key] = {
-        "coin":          coin,
-        "trade_id":      trade["trade_id"],
-        "dominant_side": dominant_side,
-        "yes_spend":     initial_yes_spend,
-        "no_spend":      initial_no_spend,
-        "yes_shares":    initial_yes_shares,
-        "no_shares":     initial_no_shares,
-        "yes_token":     yes_token,
-        "no_token":      no_token,
-        "window_end_dt": market["window_end"],
-        "window_ts":     window_ts,
-        "is_paper":      force_paper,
-        "window_budget": budget_eur,
-        "phase":         "holding",
-        "hedge_placed":  False,
+        "coin":           coin,
+        "trade_id":       trade["trade_id"],
+        "dominant_side":  dominant_side,
+        "yes_spend":      initial_yes_spend,
+        "no_spend":       initial_no_spend,
+        "yes_shares":     initial_yes_shares,
+        "no_shares":      initial_no_shares,
+        "yes_token":      yes_token,
+        "no_token":       no_token,
+        "window_end_dt":  market["window_end"],
+        "window_ts":      window_ts,
+        "is_paper":       force_paper,
+        "window_budget":  budget_eur,
+        "phase":          "holding",
+        "hedge_placed":   False,
+        "dom_entry_price": dom_ask_entry,
     }
     task = asyncio.create_task(_bggdsb_window_hold_task(window_key))
     _bggdsb_flip_tasks[window_key] = task

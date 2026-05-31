@@ -316,4 +316,19 @@ bggdsb:
   is5_tiebreak_threshold: 0.03      # als |yes_ask - no_ask| <= dit, gebruik is5 als tiebreaker
   hedge_price_trigger: 0.11         # koop tiny hedge als verliezende kant ≤ dit
   hedge_size_pct: 0.10              # hedge = 10% van window_budget (€2 bij €20 budget)
+  avg_down_enabled: true
+  avg_down_tranche_eur: 10.0        # extra inleg per avg-down tranche
+  avg_down_min_drop: 0.08           # buy again als dom prijs > 8ct gezakt is tov laatste koop
+  avg_down_interval_secs: 25        # min seconden tussen twee avg-down buys
+  avg_down_max_eur: 80.0            # max totale extra spend op averaging down
+  flip_enabled: true
+  flip_trigger_price: 0.62          # koop andere kant als die boven dit stijgt
+  flip_tranche_eur: 15.0            # EUR per flip tranche
+  flip_interval_secs: 20            # min seconden tussen twee flip buys
+  flip_max_eur: 60.0                # max totale extra spend op flip
+  flip_min_secs_remaining: 60       # geen flip als < 60s resterend
+  confirm_enabled: true
+  confirm_trigger_price: 0.78       # confirm buy als winnende kant boven dit staat
+  confirm_secs_remaining: 90        # alleen confirm in laatste 90s
+  confirm_eur: 20.0                 # EUR voor confirm buy
   paper_mode: true                  # true = paper (safe start)
