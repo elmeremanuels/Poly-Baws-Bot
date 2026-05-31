@@ -223,29 +223,72 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     else:
         df = pd.DataFrame(trades)
         n_aborted = int((df["status"] == "aborted").sum()) if "status" in df.columns else 0
-        # Toon alleen afgeronde en actieve trades — aborted = mislukte instap-pogingen
         df = df[df["status"] != "aborted"].copy() if "status" in df.columns else df
 
-        show = [c for c in [
-            "created_at", "coin", "winner_side", "entry_yes_price", "entry_no_price",
-            "yes_size", "no_size", "winner_exit_reason", "net_pnl", "status"
+        # Afleiding: instaprichting uit yes_size/no_size
+        def _dir(row) -> str:
+            ys = row.get("yes_size") or 0
+            return "Up" if float(ys) > 0 else "Down"
+
+        def _correct(row) -> str:
+            winner = row.get("winner_side")
+            if not winner:
+                return ""
+            entry_is_yes = float(row.get("yes_size") or 0) > 0
+            won = (entry_is_yes and winner == "YES") or (not entry_is_yes and winner == "NO")
+            return "✅" if won else "❌"
+
+        df["Richting"]  = df.apply(_dir, axis=1)
+        df["Juist"]     = df.apply(_correct, axis=1)
+
+        # YES/NO → Up/Down voor Winnaar
+        df["winner_side"] = df["winner_side"].map({"YES": "Up", "NO": "Down"}).fillna("")
+
+        # Instap prijs = whichever side was entered
+        df["entry_price"] = df.apply(
+            lambda r: r.get("entry_yes_price") if float(r.get("yes_size") or 0) > 0
+                      else r.get("entry_no_price"),
+            axis=1,
+        )
+        # Aandelen = dom side shares
+        df["entry_shares"] = df.apply(
+            lambda r: r.get("yes_size") if float(r.get("yes_size") or 0) > 0
+                      else r.get("no_size"),
+            axis=1,
+        )
+
+        cols = [c for c in [
+            "created_at", "coin", "Richting", "entry_price", "entry_shares",
+            "winner_side", "Juist", "winner_exit_reason", "net_pnl", "status"
         ] if c in df.columns]
-        df_s = df[show].copy()
-        rename = {
-            "created_at": "Tijd", "coin": "Coin", "winner_side": "Winnaar",
-            "entry_yes_price": "YES prijs", "entry_no_price": "NO prijs",
-            "yes_size": "YES shares", "no_size": "NO shares",
-            "winner_exit_reason": "Exit reden", "net_pnl": "P&L", "status": "Status",
-        }
-        df_s.columns = [rename.get(c, c) for c in show]
+        df_s = df[cols].copy()
+        df_s.columns = [
+            {"created_at": "Tijd", "coin": "Coin", "entry_price": "Instap prijs",
+             "entry_shares": "Aandelen", "winner_side": "Winnaar",
+             "winner_exit_reason": "Exit reden", "net_pnl": "P&L",
+             "status": "Status"}.get(c, c)
+            for c in cols
+        ]
+        if "Instap prijs" in df_s.columns:
+            df_s["Instap prijs"] = df_s["Instap prijs"].apply(
+                lambda x: f"{float(x):.3f}" if pd.notna(x) and x is not None else ""
+            )
+        if "Aandelen" in df_s.columns:
+            df_s["Aandelen"] = df_s["Aandelen"].apply(
+                lambda x: f"{float(x):.2f}" if pd.notna(x) and x is not None else ""
+            )
         if "P&L" in df_s.columns:
             df_s["P&L"] = df_s["P&L"].apply(
                 lambda x: f"€{float(x):+.2f}" if pd.notna(x) and x is not None else ""
             )
         st.dataframe(df_s, hide_index=True, use_container_width=True)
+        n_correct = int((df["Juist"] == "✅").sum())
+        n_decided = int((df["Juist"].isin(["✅", "❌"])).sum())
         caption_parts = [f"{len(df_s)} trades"]
+        if n_decided:
+            caption_parts.append(f"richting {n_correct}/{n_decided} juist ({n_correct/n_decided*100:.0f}%)")
         if n_aborted:
-            caption_parts.append(f"{n_aborted} mislukte instap-pogingen verborgen")
+            caption_parts.append(f"{n_aborted} instap-pogingen verborgen")
         st.caption(" · ".join(caption_parts))
 
     st.divider()
