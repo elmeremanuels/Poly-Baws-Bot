@@ -658,39 +658,38 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         log.info("bggdsb_gate_fail", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
         return
 
-    # is5 signaalgewicht
-    is5_weight = 0
-    try:
-        is5_weight = int(_get_state("bggdsb_is5_signal_weight") or "0")
-    except ValueError:
-        pass
+    # Richting: altijd marktprijs — de kant die al boven 0.50 staat.
+    # Analyse over 17 windows toont dat conviction de markt niet verslaat:
+    # bij de 4 windows waar wij (via OFI) van de markt afweken was onze
+    # accuracy 50/50, identiek aan de markt. Marktprijs is de beste prior.
+    dom_ask_max = float(bggdsb_cfg.get("dom_ask_max", 0.65))
+    tiebreak_thr = float(bggdsb_cfg.get("is5_tiebreak_threshold", 0.03))
 
-    if is5_weight > 0:
-        from .db_sync import is5_recently_active
-        if not is5_recently_active(coin=coin, minutes=15):
-            log.info("bggdsb_skip_is5_offline", coin=coin, is5_weight=is5_weight)
-            return
+    dominant_side = "YES" if yes_ask >= no_ask else "NO"
 
-    # Richting: conviction als beschikbaar, anders marktprijs als proxy.
-    # is5minfixedyet gebruikte geen OFI — kocht gewoon de kant die op dat
-    # moment favoriet was (hogere ask = markt betaalt meer = favoriet).
-    # Regime-multiplier in conviction is 0.30× voor UNKNOWN → praktisch altijd
-    # geblokkeerd voor nieuwe 5m-windows. Prijs-fallback lost dit op.
-    from . import signals as _sigs
-    conv_dir, conv_score = _sigs.get_conviction(coin)
-    base_thr = 0.35
-    adj_thr  = base_thr - (is5_weight / 100.0) * 0.20
-
-    if conv_dir and conv_score >= adj_thr:
-        dominant_side = "YES" if conv_dir == "UP" else "NO"
-        log.info("bggdsb_direction_conviction", coin=coin,
-                 dominant=dominant_side, score=round(conv_score, 3))
+    # Tiebreaker: als prijzen bijna gelijk zijn, raadpleeg is5's recente keuze.
+    if abs(yes_ask - no_ask) <= tiebreak_thr:
+        from .db_sync import get_is5_recent_side
+        is5_side = get_is5_recent_side(coin, minutes=15)
+        if is5_side:
+            dominant_side = is5_side
+            log.info("bggdsb_direction_is5_tiebreak", coin=coin,
+                     dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask)
+        else:
+            log.info("bggdsb_direction_price_near50", coin=coin,
+                     dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask)
     else:
-        # Fallback: hogere ask = markt-favoriet = dominant kant
-        dominant_side = "YES" if yes_ask >= no_ask else "NO"
         log.info("bggdsb_direction_price", coin=coin,
-                 dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask,
-                 conv_score=round(conv_score, 3))
+                 dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask)
+
+    # Bovengrens gate: als dominant kant al te ver is gelopen, payout te klein.
+    dom_ask_entry = yes_ask if dominant_side == "YES" else no_ask
+    if dom_ask_entry > dom_ask_max:
+        log.info("bggdsb_dom_price_too_high", coin=coin,
+                 dominant=dominant_side, dom_ask=dom_ask_entry, max=dom_ask_max)
+        return
+
+    conv_score = 0.0  # niet meer gebruikt voor richting, wel gelogd op trade
 
     # Budget
     try:
@@ -700,8 +699,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     # Initiële entry: koop volledig budget op dominant kant
     dom_token  = yes_token if dominant_side == "YES" else no_token
-    dom_ask    = yes_ask   if dominant_side == "YES" else no_ask
-    dom_shares = round(budget_eur / max(dom_ask, 0.01), 2)
+    dom_shares = round(budget_eur / max(dom_ask_entry, 0.01), 2)
 
     yes_shares = dom_shares if dominant_side == "YES" else 0.0
     no_shares  = 0.0        if dominant_side == "YES" else dom_shares
@@ -749,7 +747,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     _bggdsb_flip_tasks[window_key] = task
     log.info("bggdsb_entry_and_hold_started", coin=coin,
              dominant_side=dominant_side, budget=budget_eur,
-             dom_shares=dom_shares, dom_ask=dom_ask, paper=force_paper)
+             dom_shares=dom_shares, dom_ask=dom_ask_entry, paper=force_paper)
 
 
 async def _oracle_coin_paper_gate(coin: str, conviction_score: float, regime: str) -> bool:

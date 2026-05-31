@@ -310,8 +310,10 @@ bggdsb:
   window_budget_eur: 20.0           # volledig budget op dominant kant bij entry
   entry_price_min: 0.10             # market competitive gate — ondergrens
   entry_price_max: 0.90             # market competitive gate — bovengrens
-  entry_delay_secs: 10              # wacht minimaal X seconden na window-start
+  dom_ask_max: 0.65                 # skip window als dominant kant al > dit (te laat, payout te klein)
+  entry_delay_secs: 2               # minimaal 2s na window-start zodat WS orderbook gevuld is
   min_secs_remaining: 30            # alleen instappen als window nog minimaal X seconden duurt
+  is5_tiebreak_threshold: 0.03      # als |yes_ask - no_ask| <= dit, gebruik is5 als tiebreaker
   hedge_price_trigger: 0.11         # koop tiny hedge als verliezende kant ≤ dit
   hedge_size_pct: 0.10              # hedge = 10% van window_budget (€2 bij €20 budget)
   paper_mode: true                  # true = paper (safe start)

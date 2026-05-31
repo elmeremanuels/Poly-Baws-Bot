@@ -1526,6 +1526,32 @@ def is5_recently_active(coin: str | None = None, minutes: int = 15) -> bool:
         return False
 
 
+def get_is5_recent_side(coin: str, minutes: int = 15) -> str | None:
+    """Return is5's most recent outcome_side ('YES'/'NO') for coin within last N minutes.
+
+    Used as a tiebreaker when yes_ask ≈ no_ask at window entry.
+    Returns None if no recent activity or data unavailable.
+    """
+    if not _db_path.exists():
+        return None
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                """
+                SELECT outcome_side FROM whale_activity
+                WHERE address = ?
+                  AND coin = ?
+                  AND synced_at >= datetime('now', ?)
+                  AND outcome_side IN ('YES', 'NO')
+                ORDER BY event_ts DESC LIMIT 1
+                """,
+                (_IS5_ADDRESS, coin, f"-{minutes} minutes"),
+            ).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 def get_bggdsb_stats() -> dict:
     """Performance stats for trades with router_bucket = 'bggdsb'."""
     if not _db_path.exists():
