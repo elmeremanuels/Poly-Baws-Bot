@@ -75,7 +75,7 @@ def _bot_status() -> tuple[bool, str]:
 
 # ── Main panel ────────────────────────────────────────────────────────────────
 
-@st.fragment
+@st.fragment(run_every=5)
 def bggdsb_panel() -> None:
     import json as _json
 
