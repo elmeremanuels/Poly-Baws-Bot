@@ -165,10 +165,10 @@ def bggdsb_panel() -> None:
         be_ok   = tot_sp > 0 and other_sh >= tot_sp
         be_need = max(0.0, round((tot_sp - other_sh) * max(other_mid, 0.01), 2))
 
-        # Virtual P&L — payout if current winner prices become final result
-        v_winner    = "YES" if yes_mid >= no_mid else "NO"
-        v_winner_sh = yes_sh if v_winner == "YES" else no_sh
-        virtual_pnl = round(v_winner_sh - tot_sp, 2) if tot_sp > 0 else 0.0
+        # Virtual P&L — mark-to-market: waarde beide posities bij huidige marktprijzen
+        # (yes_shares × yes_mid) + (no_shares × no_mid) − totaal uitgegeven
+        current_value = yes_sh * yes_mid + no_sh * no_mid
+        virtual_pnl = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
 
         if abs(virtual_pnl) < 1.0:
             pnl_color = "#ff9800"   # orange — < €1 margin either way

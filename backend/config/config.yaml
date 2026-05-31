@@ -324,6 +324,7 @@ bggdsb:
   avg_down_max_pct: 4.00            # max 4× budget aan avg-down totaal (€8 bij €2, €80 bij €20)
   flip_enabled: true
   flip_trigger_price: 0.62          # koop andere kant als die boven dit stijgt
+  flip_max_price: 0.85              # STOP flip als andere kant al boven 85¢ staat (slechte odds)
   flip_tranche_pct: 0.75            # 75% van window_budget per flip tranche (€1.50 bij €2, €15 bij €20)
   flip_interval_secs: 20            # min seconden tussen twee flip buys
   flip_max_pct: 3.00                # max 3× budget aan flip totaal (€6 bij €2, €60 bij €20)

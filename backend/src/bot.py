@@ -435,10 +435,11 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
     avg_down_interval = float(cfg.get("avg_down_interval_secs", 25))
 
     # Flip — proportioneel aan budget
-    flip_enabled  = bool(cfg.get("flip_enabled", True))
-    flip_trigger  = float(cfg.get("flip_trigger_price", 0.62))
-    flip_interval = float(cfg.get("flip_interval_secs", 20))
-    flip_min_secs = float(cfg.get("flip_min_secs_remaining", 60))
+    flip_enabled   = bool(cfg.get("flip_enabled", True))
+    flip_trigger   = float(cfg.get("flip_trigger_price", 0.62))
+    flip_max_price = float(cfg.get("flip_max_price", 0.85))  # stop flipping above this price
+    flip_interval  = float(cfg.get("flip_interval_secs", 20))
+    flip_min_secs  = float(cfg.get("flip_min_secs_remaining", 60))
 
     # Confirm — proportioneel aan budget
     confirm_enabled = bool(cfg.get("confirm_enabled", True))
@@ -568,7 +569,7 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                     and flip_enabled
                     and flip_spend < flip_max_eur
                     and secs_left >= flip_min_secs
-                    and other_mid >= flip_trigger
+                    and flip_trigger <= other_mid <= flip_max_price  # stop boven 85¢
                     and (flip_last_t == 0 or loop_t - flip_last_t >= flip_interval)):
                 tranche = min(flip_tranche, flip_max_eur - flip_spend)
                 o_ask   = ws_client.get_best_ask(other_tok) or other_mid
@@ -1170,8 +1171,12 @@ async def run_bot() -> None:
     # The user must explicitly click "Ga LIVE" on the dashboard to enable live orders.
     # This prevents unintended live trading when the bot restarts with saved live settings.
     try:
-        from .db_sync import set_dashboard_state as _sds_startup
+        from .db_sync import set_dashboard_state as _sds_startup, get_state as _gs_startup
         _sds_startup("bggdsb_paper_mode", "1")
+        # If no budget saved yet, seed with the config default so the tab shows the right value
+        if not _gs_startup("bggdsb_window_budget"):
+            _cfg_budget = str(int(CONFIG.get("bggdsb", {}).get("window_budget_eur", 2)))
+            _sds_startup("bggdsb_window_budget", _cfg_budget)
         log.info("bggdsb_startup_reset_to_paper")
     except Exception:
         pass
