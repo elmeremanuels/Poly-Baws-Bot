@@ -332,3 +332,5 @@ bggdsb:
   confirm_secs_remaining: 90        # alleen confirm in laatste 90s
   confirm_pct: 1.00                 # 100% van window_budget voor confirm buy (€2 bij €2, €20 bij €20)
   paper_mode: true                  # true = paper (safe start)
+  streak_min_wins: 1                # minimale winning streak vóór verlies skip-penalty triggert
+  streak_skip_count: 2              # aantal windows te skippen na onderbroken streak

@@ -122,6 +122,20 @@ def bggdsb_panel() -> None:
     else:
         st.caption("📊 Nog geen afgeronde BGGDSB trades — metrics verschijnen na het eerste window.")
 
+    # ── Streak status ─────────────────────────────────────────────────────────
+    streak_wins = int(get_state("bggdsb_streak_wins") or 0)
+    streak_skip = int(get_state("bggdsb_streak_skip") or 0)
+    if streak_skip > 0:
+        st.warning(
+            f"⏸ **Streak onderbroken** — {streak_skip} window(s) overgeslagen "
+            f"(streak herstel na verlies na {streak_wins + (streak_skip)} wins op rij)",
+            icon="🛑",
+        )
+    elif streak_wins >= 2:
+        st.success(f"🔥 **Winning streak: {streak_wins}** wins op rij", icon="🔥")
+    elif streak_wins == 1:
+        st.caption("✅ 1 win op rij")
+
     # ── Live window status ────────────────────────────────────────────────────
     raw_win = get_state("bggdsb_active_window") or ""
     try:

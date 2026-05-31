@@ -737,6 +737,16 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         log.info("bggdsb_too_late", coin=coin, secs_left=round(secs_until_end, 1))
         return
 
+    # Streak skip: skip this window if we just broke a winning streak
+    _streak_skip = int(_get_state("bggdsb_streak_skip") or 0)
+    if _streak_skip > 0:
+        from .db_sync import set_dashboard_state as _sds_streak
+        _sds_streak("bggdsb_streak_skip", str(_streak_skip - 1))
+        register_window_trade(coin, window_ts)  # mark window used to prevent double-decrement
+        log.info("bggdsb_streak_skip_window", coin=coin,
+                 skip_remaining=_streak_skip - 1)
+        return
+
     paper_raw   = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
     force_paper = bool(int(paper_raw))
 

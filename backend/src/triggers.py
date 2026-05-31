@@ -1599,6 +1599,24 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     except Exception:
         pass
 
+    # BGGDSB streak tracker — skip N windows after breaking a win streak
+    try:
+        if trade.get("router_bucket") == "bggdsb":
+            from .db_sync import get_state as _gs, set_dashboard_state as _sds
+            _min_w  = int(CONFIG.get("bggdsb", {}).get("streak_min_wins", 1))
+            _skip_n = int(CONFIG.get("bggdsb", {}).get("streak_skip_count", 2))
+            _wins   = int(_gs("bggdsb_streak_wins") or 0)
+            if net_pnl > 0:
+                _sds("bggdsb_streak_wins", str(_wins + 1))
+                _sds("bggdsb_streak_skip", "0")
+            else:
+                if _wins >= _min_w:
+                    _sds("bggdsb_streak_skip", str(_skip_n))
+                    log.info("bggdsb_streak_broken", streak=_wins, skipping=_skip_n)
+                _sds("bggdsb_streak_wins", "0")
+    except Exception:
+        pass
+
     await persist_trade(trade_id)
     await write_event(trade_id, "trade_closed", trade["coin"], {
         "reason": reason, "net_pnl": net_pnl, "fill_price": fill_price
