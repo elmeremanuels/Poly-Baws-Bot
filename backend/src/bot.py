@@ -434,6 +434,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
     from .db_sync import set_dashboard_state as _sds
     cfg = CONFIG.get("bggdsb", {})
     hedge_price = float(cfg.get("hedge_price_trigger", 0.11))
+    # hedge_size_eur: vaste bedrag (prioriteit boven hedge_size_pct × budget)
+    _hedge_size_eur_cfg = cfg.get("hedge_size_eur")
     hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))
     dashboard_interval = 3.0
 
@@ -536,7 +538,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
 
             # ── HEDGE ────────────────────────────────────────────────────────
             if not _at_limit and not hedge_placed and 0 < other_mid <= hedge_price:
-                hedge_eur = round(window_budget * hedge_pct, 2)
+                hedge_eur = round(float(_hedge_size_eur_cfg) if _hedge_size_eur_cfg is not None
+                                  else window_budget * hedge_pct, 2)
                 o_ask     = ws_client.get_best_ask(other_tok) or other_mid
                 shares    = round(hedge_eur / max(o_ask, 0.01), 2)
                 if shares >= 0.1:

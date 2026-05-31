@@ -315,7 +315,8 @@ bggdsb:
   min_secs_remaining: 30            # alleen instappen als window nog minimaal X seconden duurt
   is5_tiebreak_threshold: 0.03      # als |yes_ask - no_ask| <= dit, gebruik is5 als tiebreaker
   hedge_price_trigger: 0.11         # koop tiny hedge als verliezende kant ≤ dit
-  hedge_size_pct: 0.10              # hedge = 10% van window_budget (€2 bij €20 budget)
+  hedge_size_eur: 2.50              # vaste hedge-inleg in EUR (overschrijft hedge_size_pct)
+  hedge_size_pct: 0.10              # backup: % van budget als hedge_size_eur niet ingesteld is
   max_window_total_eur: 0            # HARDE TOTAALLIMIET per window (0 = onbeperkt). Stel in op b.v. 10 om nooit meer dan €10 te spenderen, inclusief alle avg-down/flip/confirm buys.
   avg_down_enabled: true
   avg_down_tranche_pct: 0.50        # 50% van window_budget per avg-down tranche (€1 bij €2, €10 bij €20)
