@@ -427,26 +427,21 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
     hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))
     dashboard_interval = 3.0
 
-    # Averaging down
+    # Averaging down — bedragen proportioneel aan window_budget
     avg_down_enabled  = bool(cfg.get("avg_down_enabled", True))
-    avg_down_tranche  = float(cfg.get("avg_down_tranche_eur", 10.0))
     avg_down_min_drop = float(cfg.get("avg_down_min_drop", 0.08))
     avg_down_interval = float(cfg.get("avg_down_interval_secs", 25))
-    avg_down_max_eur  = float(cfg.get("avg_down_max_eur", 80.0))
 
-    # Flip
+    # Flip — proportioneel aan budget
     flip_enabled  = bool(cfg.get("flip_enabled", True))
     flip_trigger  = float(cfg.get("flip_trigger_price", 0.62))
-    flip_tranche  = float(cfg.get("flip_tranche_eur", 15.0))
     flip_interval = float(cfg.get("flip_interval_secs", 20))
-    flip_max_eur  = float(cfg.get("flip_max_eur", 60.0))
     flip_min_secs = float(cfg.get("flip_min_secs_remaining", 60))
 
-    # Confirm
+    # Confirm — proportioneel aan budget
     confirm_enabled = bool(cfg.get("confirm_enabled", True))
     confirm_trigger = float(cfg.get("confirm_trigger_price", 0.78))
     confirm_secs    = float(cfg.get("confirm_secs_remaining", 90))
-    confirm_eur     = float(cfg.get("confirm_eur", 20.0))
 
     try:
         st = _bggdsb_tranche_state.get(window_key)
@@ -461,6 +456,13 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
         is_paper      = st["is_paper"]
         coin          = st["coin"]
         window_budget = st["window_budget"]
+
+        # Proportionele bedragen — schalen met window_budget
+        avg_down_tranche = round(window_budget * float(cfg.get("avg_down_tranche_pct", 0.50)), 2)
+        avg_down_max_eur = round(window_budget * float(cfg.get("avg_down_max_pct", 4.00)), 2)
+        flip_tranche     = round(window_budget * float(cfg.get("flip_tranche_pct", 0.75)), 2)
+        flip_max_eur     = round(window_budget * float(cfg.get("flip_max_pct", 3.00)), 2)
+        confirm_eur      = round(window_budget * float(cfg.get("confirm_pct", 1.00)), 2)
 
         hedge_placed = False
         last_dash_t  = 0.0

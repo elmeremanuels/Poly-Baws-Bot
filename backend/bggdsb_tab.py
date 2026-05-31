@@ -222,6 +222,10 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
         st.caption("Geen BGGDSB trades gevonden.")
     else:
         df = pd.DataFrame(trades)
+        n_aborted = int((df["status"] == "aborted").sum()) if "status" in df.columns else 0
+        # Toon alleen afgeronde en actieve trades — aborted = mislukte instap-pogingen
+        df = df[df["status"] != "aborted"].copy() if "status" in df.columns else df
+
         show = [c for c in [
             "created_at", "coin", "winner_side", "entry_yes_price", "entry_no_price",
             "yes_size", "no_size", "winner_exit_reason", "net_pnl", "status"
@@ -236,10 +240,13 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
         df_s.columns = [rename.get(c, c) for c in show]
         if "P&L" in df_s.columns:
             df_s["P&L"] = df_s["P&L"].apply(
-                lambda x: f"€{x:+.4f}" if x is not None else ""
+                lambda x: f"€{float(x):+.2f}" if pd.notna(x) and x is not None else ""
             )
         st.dataframe(df_s, hide_index=True, use_container_width=True)
-        st.caption(f"{len(trades)} trades")
+        caption_parts = [f"{len(df_s)} trades"]
+        if n_aborted:
+            caption_parts.append(f"{n_aborted} mislukte instap-pogingen verborgen")
+        st.caption(" · ".join(caption_parts))
 
     st.divider()
 
@@ -254,11 +261,13 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             value=_saved_budget,
             key="bggdsb_budget",
         )
-        avg_down_t = round(budget * 0.50, 1)
-        confirm_t  = round(budget * 1.00, 1)
-        hedge_t    = round(budget * 0.10, 1)
+        avg_down_t = round(budget * 0.50, 2)
+        flip_t     = round(budget * 0.75, 2)
+        confirm_t  = round(budget * 1.00, 2)
+        hedge_t    = round(budget * 0.10, 2)
         st.caption(
-            f"Avg-down: **€10**/tranche · Confirm: **€20** (90s) · Hedge: **€{hedge_t}** (≤0.11)"
+            f"Avg-down: **€{avg_down_t}**/tranche · Flip: **€{flip_t}**/tranche · "
+            f"Confirm: **€{confirm_t}** (90s) · Hedge: **€{hedge_t}** (≤0.11)"
         )
 
     with col_c:
@@ -319,9 +328,14 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 
     # ── Documentatie (expanders) ──────────────────────────────────────────────
     with st.expander("📐 Rekenvoorbeeld — is5minfixedyet strategie"):
-        dom_price  = 0.50
-        dom_shares = round(budget / dom_price, 1)
-        hedge_eur_ex = round(budget * 0.10, 2)
+        dom_price      = 0.50
+        dom_shares     = round(budget / dom_price, 1)
+        avg_down_ex    = round(budget * 0.50, 2)
+        avg_down_max   = round(budget * 4.00, 2)
+        flip_tranche_ex = round(budget * 0.75, 2)
+        flip_max_ex    = round(budget * 3.00, 2)
+        confirm_ex     = round(budget * 1.00, 2)
+        hedge_eur_ex   = round(budget * 0.10, 2)
 
         st.markdown(f"""
 **Aankopen per window · budget €{budget}**
@@ -329,9 +343,9 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 | Moment | Actie | Kant | Bedrag |
 |---|---|---|---|
 | Window start | Volledige entry | Dominant | **€{budget}** (~{dom_shares} shares @ {dom_price}) |
-| Prijs daalt > 8ct | Averaging down | Dominant (bijkopen) | **€10/tranche** (max €80 totaal) |
-| Andere kant > 0.62 | Flip | Andere kant | **€15/tranche** elke 20s (max €60) |
-| Laatste 90s (≥0.78) | Confirm buy | Winnende kant | **€20** eenmalig |
+| Prijs daalt > 8ct | Averaging down | Dominant (bijkopen) | **€{avg_down_ex}/tranche** (max €{avg_down_max} totaal) |
+| Andere kant > 0.62 | Flip | Andere kant | **€{flip_tranche_ex}/tranche** elke 20s (max €{flip_max_ex}) |
+| Laatste 90s (≥0.78) | Confirm buy | Winnende kant | **€{confirm_ex}** eenmalig |
 | Verliezer ≤ 0.11 | Hedge | Verliezende kant | **€{hedge_eur_ex}** |
 
 *Exit: hold to expiry (€1.00 per winnende share)*
