@@ -259,8 +259,12 @@ async def _coin_loop(coin: str) -> None:
 
         if get_mode() in ("bggdsb_paper", "bggdsb_live"):
             # Paper mode nooit blokkeren door kill switch — kost geen echt geld.
-            # Live mode WEL blokkeren bij kill switch (dagelijks verlies, handmatige pauze).
-            is_bggdsb_paper = get_mode() == "bggdsb_paper"
+            # Live mode WEL blokkeren bij kill switch, TENZIJ de effectieve paper-mode aan staat
+            # (bggdsb_paper_mode=1 betekent dat ook bggdsb_live als paper draait).
+            from .db_sync import get_state as _gs_kill
+            _bggdsb_pm = _gs_kill("bggdsb_paper_mode")
+            is_bggdsb_paper = (get_mode() == "bggdsb_paper"
+                               or (get_mode() == "bggdsb_live" and _bggdsb_pm == "1"))
             if not risk.is_killed() or is_bggdsb_paper:
                 try:
                     await _bggdsb_coin_tick(coin)
