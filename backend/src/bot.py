@@ -395,9 +395,11 @@ async def _bggdsb_extra_buy(
             result = await _pt.simulate_market_buy(token, shares)
             filled = result.get("filled", True)
         else:
-            # Limit order op huidige ask — fill nooit duurder dan verwacht bedrag
+            # Bereken shares op basis van ask_price hier, niet op trigger-time prijs
             ask_price = round(ws_client.get_best_ask(token) or (buy_eur / max(shares, 0.01)), 2)
-            resp = await _ord.place_limit_order(token, "BUY", ask_price, shares)
+            actual_shares = round(buy_eur / max(ask_price, 0.01), 2)
+            resp = await _ord.place_limit_order(token, "BUY", ask_price, actual_shares)
+            shares = actual_shares  # gebruik altijd de herberekende waarde
             filled = False
             if resp and resp.get("order_id"):
                 for _ in range(5):
