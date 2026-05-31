@@ -782,7 +782,12 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     # bij de 4 windows waar wij (via OFI) van de markt afweken was onze
     # accuracy 50/50, identiek aan de markt. Marktprijs is de beste prior.
     dom_ask_max = float(bggdsb_cfg.get("dom_ask_max", 0.65))
-    tiebreak_thr = float(bggdsb_cfg.get("is5_tiebreak_threshold", 0.03))
+    _is5w = _get_state("bggdsb_is5_signal_weight")
+    tiebreak_thr = (
+        round(int(_is5w) / 100.0 * 0.50, 3)
+        if _is5w is not None
+        else float(bggdsb_cfg.get("is5_tiebreak_threshold", 0.03))
+    )
 
     dominant_side = "YES" if yes_ask >= no_ask else "NO"
 

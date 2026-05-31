@@ -139,11 +139,29 @@ def bggdsb_panel() -> None:
         yes_mid = float(win.get("yes_mid", 0))
         no_mid  = float(win.get("no_mid", 0))
         secs    = int(win.get("secs_left", 0))
-        be_need = float(win.get("be_needed", 0))
-        be_ok   = win.get("breakeven_reached", False)
+        yes_sh  = float(win.get("yes_shares", 0))
+        no_sh   = float(win.get("no_shares", 0))
+
         other_side = "NO" if dom == "YES" else "YES"
-        other_sp   = no_sp if other_side == "NO" else yes_sp
+        other_sp   = no_sp  if other_side == "NO" else yes_sp
         other_mid  = no_mid if other_side == "NO" else yes_mid
+        other_sh   = no_sh  if other_side == "NO" else yes_sh
+
+        # Breakeven — computed from actual shares held
+        be_ok   = tot_sp > 0 and other_sh >= tot_sp
+        be_need = max(0.0, round((tot_sp - other_sh) * max(other_mid, 0.01), 2))
+
+        # Virtual P&L — payout if current winner prices become final result
+        v_winner    = "YES" if yes_mid >= no_mid else "NO"
+        v_winner_sh = yes_sh if v_winner == "YES" else no_sh
+        virtual_pnl = round(v_winner_sh - tot_sp, 2) if tot_sp > 0 else 0.0
+
+        if abs(virtual_pnl) < 1.0:
+            pnl_color = "#ff9800"   # orange — < €1 margin either way
+        elif virtual_pnl > 0:
+            pnl_color = "#00c853"   # green
+        else:
+            pnl_color = "#ef5350"   # red
 
         phase_labels = {
             "monitoring": "🔍 Monitoring",
@@ -153,21 +171,34 @@ def bggdsb_panel() -> None:
         }
         phase_label = phase_labels.get(phase, phase)
 
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-        c1.metric(f"**{coin_w}**", phase_label)
-        c2.metric("YES mid", f"{yes_mid:.3f}")
-        c3.metric("NO mid", f"{no_mid:.3f}")
-        c4.metric("⏱ Resterend", f"{secs}s")
-        c5.metric("YES €", f"€{yes_sp:.2f}")
-        c6.metric("NO €", f"€{no_sp:.2f}")
-        c7.metric("Totaal €", f"€{tot_sp:.2f}")
+        # Row 1: identity + prices + time + virtual P&L
+        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns([2, 1, 1, 1, 1.5])
+        r1c1.metric(f"**{coin_w}**", phase_label)
+        r1c2.metric("YES mid", f"{yes_mid:.3f}")
+        r1c3.metric("NO mid", f"{no_mid:.3f}")
+        r1c4.metric("⏱ Resterend", f"{secs}s")
+        with r1c5:
+            st.markdown(
+                "<p style='font-size:0.85em;color:rgba(49,51,63,0.6);margin:0 0 4px 0;'>"
+                "Virtuele P&amp;L</p>"
+                f"<p style='font-size:1.6em;font-weight:bold;color:{pnl_color};margin:0;'>"
+                f"€{virtual_pnl:+.2f}</p>",
+                unsafe_allow_html=True,
+            )
+
+        # Row 2: spend + shares per side + total
+        r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
+        r2c1.metric("YES €", f"€{yes_sp:.2f}")
+        r2c2.metric("YES shares", f"{yes_sh:.2f}")
+        r2c3.metric("NO €", f"€{no_sp:.2f}")
+        r2c4.metric("NO shares", f"{no_sh:.2f}")
+        r2c5.metric("Totaal €", f"€{tot_sp:.2f}")
 
         if be_ok:
             st.success(f"**BREAK-EVEN BEREIKT** — bot koopt extra {other_side} voor maximale winst")
         elif phase == "flipping":
-            tekort = be_need - other_sp
             st.warning(
-                f"**FLIPPING → {other_side}** — nog €{tekort:.2f} nodig voor break-even "
+                f"**FLIPPING → {other_side}** — nog €{be_need:.2f} nodig voor break-even "
                 f"(bot koopt automatisch in tranches)"
             )
         else:
@@ -180,7 +211,6 @@ def bggdsb_panel() -> None:
 
         with st.expander("📋 Handmatige instructies (als bot niet reageert)"):
             if phase == "flipping" or (other_mid > 0.50 and other_mid > (yes_mid if dom == "YES" else no_mid)):
-                tekort = max(0, be_need - other_sp)
                 other_ask = other_mid * 1.02
                 st.markdown(f"""
 **BOT IS AAN HET FLIPPEN — {other_side} is nu de favoriet**
@@ -189,10 +219,10 @@ Wat de bot doet: elke ~3s een tranche op {other_side} kopen
 
 Als de bot stokt:
 1. Open Polymarket → zoek actief {coin_w} window
-2. Koop **{other_side}** voor **€{min(tekort+5, 20):.0f}** (ask ~{other_ask:.3f})
+2. Koop **{other_side}** voor **€{min(be_need + 5, 20):.0f}** (ask ~{other_ask:.3f})
 3. Herhaal tot "BREAK-EVEN BEREIKT" verschijnt
 
-Huidige stand: €{other_sp:.1f} op {other_side} / €{be_need:.1f} nodig
+Huidige stand: €{other_sp:.1f} op {other_side} / €{be_need:.1f} nog nodig
                 """)
             elif phase == "confirmed" or be_ok:
                 winner = "YES" if yes_mid >= no_mid else "NO"
@@ -320,9 +350,10 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             value=int(get_state("bggdsb_is5_signal_weight") or 0),
             key="bggdsb_is5_weight",
             help=(
-                "0% = puur eigen conviction. "
-                "50% = conviction drempel -25% als is5 actief is. "
-                "100% = conviction drempel -50% bij is5 bevestiging."
+                "0% = is5 nooit gebruikt (puur marktprijs). "
+                "6% ≈ origineel (tiebreaker bij prijsverschil ≤ 3ct). "
+                "50% = is5 tiebreaker tot 25ct verschil. "
+                "100% = is5 altijd boven marktprijs."
             ),
         )
 
