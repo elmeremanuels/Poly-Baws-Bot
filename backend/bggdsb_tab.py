@@ -348,13 +348,15 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             value=_saved_budget,
             key="bggdsb_budget",
         )
-        avg_down_t = round(budget * 0.50, 2)
-        flip_t     = round(budget * 0.75, 2)
-        confirm_t  = round(budget * 1.00, 2)
-        hedge_t    = round(budget * 0.10, 2)
+        avg_down_t   = round(budget * 0.50, 2)
+        flip_t       = round(budget * 0.75, 2)
+        confirm_t    = round(budget * 1.00, 2)
+        hedge_t      = round(budget * 0.10, 2)
+        max_possible = round(budget + budget * 4.00 + budget * 3.00 + budget * 1.00 + budget * 0.10, 2)
         st.caption(
             f"Avg-down: **€{avg_down_t}**/tranche · Flip: **€{flip_t}**/tranche · "
-            f"Confirm: **€{confirm_t}** (90s) · Hedge: **€{hedge_t}** (≤0.11)"
+            f"Confirm: **€{confirm_t}** (90s) · Hedge: **€{hedge_t}** (≤0.11) · "
+            f"⚠️ Max totaal zonder limiet: **€{max_possible}**"
         )
 
     with col_c:

@@ -465,6 +465,9 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
         flip_max_eur     = round(window_budget * float(cfg.get("flip_max_pct", 3.00)), 2)
         confirm_eur      = round(window_budget * float(cfg.get("confirm_pct", 1.00)), 2)
 
+        # Harde totaallimiet — 0 = onbeperkt
+        max_total = float(cfg.get("max_window_total_eur", 0))
+
         hedge_placed = False
         last_dash_t  = 0.0
 
@@ -511,8 +514,13 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             if avg_down_last_price is None:
                 avg_down_last_price = dom_mid
 
+            # Totaalspend voor harde limiet check
+            _cur_st   = _bggdsb_tranche_state.get(window_key) or {}
+            _tot_spent = _cur_st.get("yes_spend", 0.0) + _cur_st.get("no_spend", 0.0)
+            _at_limit  = max_total > 0 and _tot_spent >= max_total
+
             # ── HEDGE ────────────────────────────────────────────────────────
-            if not hedge_placed and 0 < other_mid <= hedge_price:
+            if not _at_limit and not hedge_placed and 0 < other_mid <= hedge_price:
                 hedge_eur = round(window_budget * hedge_pct, 2)
                 o_ask     = ws_client.get_best_ask(other_tok) or other_mid
                 shares    = round(hedge_eur / max(o_ask, 0.01), 2)
@@ -528,7 +536,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                                  eur=hedge_eur, shares=shares)
 
             # ── AVERAGING DOWN ───────────────────────────────────────────────
-            if (avg_down_enabled
+            if (not _at_limit
+                    and avg_down_enabled
                     and avg_down_spend < avg_down_max_eur
                     and dom_mid < avg_down_last_price - avg_down_min_drop
                     and loop_t - avg_down_last_t >= avg_down_interval):
@@ -549,7 +558,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                                  total_avg_down=round(avg_down_spend, 2))
 
             # ── FLIP ─────────────────────────────────────────────────────────
-            if (flip_enabled
+            if (not _at_limit
+                    and flip_enabled
                     and flip_spend < flip_max_eur
                     and secs_left >= flip_min_secs
                     and other_mid >= flip_trigger
@@ -577,7 +587,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                                      flip_total=round(flip_spend, 2))
 
             # ── CONFIRM BUY ──────────────────────────────────────────────────
-            if (confirm_enabled
+            if (not _at_limit
+                    and confirm_enabled
                     and not confirm_done
                     and secs_left <= confirm_secs
                     and max(yes_mid, no_mid) >= confirm_trigger):
