@@ -230,9 +230,15 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
     loop = asyncio.get_event_loop()
     monitor_start = loop.time()  # track monitoring age for early loser cooldown
 
+    is_bggdsb = trade.get("router_bucket") == "bggdsb"
+
     while True:
         now = datetime.now(timezone.utc)
         if window_end_dt and now >= window_end_dt:
+            # Fix 2: BGGDSB hold-task beheert eigen afsluiting — monitor doet niets
+            if is_bggdsb:
+                log.debug("monitor_window_expired_bggdsb_skip", trade_id=trade_id)
+                break
             log.info("monitor_window_expired", trade_id=trade_id)
             update_trade_field(trade_id, "winner_exit_reason", "resolution")
             yes_mid_final = ws_client.get_mid_price(yes_token)
@@ -255,6 +261,10 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
         threshold = _regime.get_effective_trigger_threshold(coin)
         winner, price = paper_trader.check_trigger(yes_token, no_token, threshold)
         if winner:
+            # Fix 2: BGGDSB hold-task beheert de volledige levenscyclus — geen trigger actie
+            if is_bggdsb:
+                await asyncio.sleep(1.0)
+                continue
             log.info("trigger_detected", trade_id=trade_id, winner=winner, price=price)
             update_trade_field(trade_id, "trigger_hit", True)
             update_trade_field(trade_id, "trigger_ts", now.isoformat())
