@@ -499,6 +499,11 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             if not st:
                 break
 
+            # Re-check paper flag on every tick — user may switch mid-window
+            from .db_sync import get_state as _gs_tick
+            _paper_raw_tick = _gs_tick("bggdsb_paper_mode")
+            is_paper = bool(int(_paper_raw_tick)) if _paper_raw_tick is not None else is_paper
+
             yes_mid = ws_client.get_mid_price(yes_token)
             no_mid  = ws_client.get_mid_price(no_token)
             if yes_mid is None or no_mid is None:
