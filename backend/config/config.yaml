@@ -311,7 +311,7 @@ bggdsb:
   entry_price_min: 0.10             # market competitive gate — ondergrens
   entry_price_max: 0.90             # market competitive gate — bovengrens
   entry_delay_secs: 10              # wacht minimaal X seconden na window-start
-  min_secs_remaining: 90            # alleen instappen als window nog minimaal X seconden duurt
+  min_secs_remaining: 30            # alleen instappen als window nog minimaal X seconden duurt
   flip_trigger_price: 0.50          # andere kant > dit → start flip
   confirm_trigger_price: 0.60       # winnaar > dit → confirm buy
   confirm_window_secs: 90           # confirm buy alleen in laatste N seconden
