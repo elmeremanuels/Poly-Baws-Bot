@@ -81,6 +81,27 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "regime_at_entry", _regime_label)
     update_trade_field(trade_id, "bias_direction_at_entry", _conv_dir)
 
+    # ── paper flag + cutoff_time — needed by all paths below ────────────────
+    trade_mode = trade.get("mode") or get_mode()
+    if trade_mode == "live_learning":
+        from . import learning as _learning
+        paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
+    else:
+        paper = trade_mode.startswith("paper")
+
+    window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
+    cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
+
+    now_utc = datetime.now(timezone.utc)
+    if now_utc >= cutoff_time:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "past_cutoff")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.info("entry_aborted_past_cutoff", trade_id=trade_id,
+                 seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
+        return False
+
     # ── BGGDSB: use pre-computed share counts, skip conviction weighting ─────
     if trade.get("router_bucket") == "bggdsb":
         _b_yes = trade.get("bggdsb_yes_shares")
@@ -127,27 +148,6 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     update_trade_field(trade_id, "yes_size", yes_size)
     update_trade_field(trade_id, "no_size", no_size)
     update_trade_field(trade_id, "bias_certainty", round(_conv_score, 3))
-    # Use the mode stored in the trade (set at creation time) so that mode changes
-    # during an active trade don't switch it between paper/live mid-flight.
-    trade_mode = trade.get("mode") or get_mode()
-    if trade_mode == "live_learning":
-        from . import learning as _learning
-        paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
-    else:
-        paper = trade_mode.startswith("paper")
-
-    window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
-    cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
-
-    now_utc = datetime.now(timezone.utc)
-    if now_utc >= cutoff_time:
-        update_trade_field(trade_id, "status", "aborted")
-        update_trade_field(trade_id, "notes", "past_cutoff")
-        await persist_trade(trade_id)
-        remove_active_trade(trade_id)
-        log.info("entry_aborted_past_cutoff", trade_id=trade_id,
-                 seconds_past=round((now_utc - cutoff_time).total_seconds(), 1))
-        return False
 
     # ── Phase 3: Tripartite entry routing ────────────────────────────────────
     _de_cfg = CONFIG.get("directional_entry", {})
