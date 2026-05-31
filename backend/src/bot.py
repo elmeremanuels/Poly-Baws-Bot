@@ -744,7 +744,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     comp_min = bggdsb_cfg.get("entry_price_min", 0.10)
     comp_max = bggdsb_cfg.get("entry_price_max", 0.90)
     if not (comp_min <= yes_ask <= comp_max and comp_min <= no_ask <= comp_max):
-        log.debug("bggdsb_gate_fail", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
+        log.info("bggdsb_gate_fail", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
         return
 
     # is5 signaalgewicht
@@ -757,6 +757,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if is5_weight > 0:
         from .db_sync import is5_recently_active
         if not is5_recently_active(coin=coin, minutes=15):
+            log.info("bggdsb_skip_is5_offline", coin=coin, is5_weight=is5_weight)
             return
 
     # Richting: conviction als beschikbaar, anders marktprijs als proxy.
