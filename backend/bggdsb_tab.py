@@ -25,6 +25,7 @@ from src.db_sync import (
     is5_live_status,
 )
 from src.commands import write_command
+from src.config_loader import CONFIG as _CFG
 
 _IS5_ADDRESS = "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
 _ALL_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
@@ -361,26 +362,41 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             disabled=not bggdsb_active,
             help=None if bggdsb_active else "Activeer eerst BGGDSB modus via de sidebar.",
         )
+        _bc = _CFG.get("bggdsb", {})
+        _avg_pct     = float(_bc.get("avg_down_tranche_pct", 0.50))
+        _avg_max_pct = float(_bc.get("avg_down_max_pct", 4.00))
+        _flip_pct    = float(_bc.get("flip_tranche_pct", 0.75))
+        _flip_max_pct= float(_bc.get("flip_max_pct", 3.00))
+        _conf_pct    = float(_bc.get("confirm_pct", 1.00))
+        _hedge_pct   = float(_bc.get("hedge_size_pct", 0.10))
+        _hedge_trig  = float(_bc.get("hedge_price_trigger", 0.11))
+        _flip_trig   = float(_bc.get("flip_trigger_price", 0.62))
+        _conf_trig   = float(_bc.get("confirm_trigger_price", 0.78))
+        _conf_secs   = int(_bc.get("confirm_secs_remaining", 90))
+
         entry_t      = round(budget * 1.00, 2)
-        avg_down_t   = round(budget * 0.50, 2)
-        avg_down_max = round(budget * 4.00, 2)
-        flip_t       = round(budget * 0.75, 2)
-        flip_max     = round(budget * 3.00, 2)
-        confirm_t    = round(budget * 1.00, 2)
-        hedge_t      = round(budget * 0.10, 2)
+        avg_down_t   = round(budget * _avg_pct, 2)
+        avg_down_max = round(budget * _avg_max_pct, 2)
+        flip_t       = round(budget * _flip_pct, 2)
+        flip_max     = round(budget * _flip_max_pct, 2)
+        confirm_t    = round(budget * _conf_pct, 2)
+        hedge_t      = round(budget * _hedge_pct, 2)
         max_possible = round(budget + avg_down_max + flip_max + confirm_t + hedge_t, 2)
 
-        st.caption("**Bedragen bij dit budget:**")
+        st.caption("**Bedragen bij dit budget (uit config):**")
         bc1, bc2, bc3, bc4, bc5 = st.columns(5)
-        bc1.metric("🟢 Entry", f"€{entry_t:.2f}", help="Volledige inleg op dominante kant bij window-start")
+        bc1.metric("🟢 Entry", f"€{entry_t:.2f}",
+                   help="Volledige inleg op dominante kant bij window-start")
         bc2.metric("📉 Avg-down", f"€{avg_down_t:.2f}", f"max €{avg_down_max:.2f}",
-                   help="Per tranche bijkopen als dom. kant > 8¢ daalt (max 4× budget)")
+                   help=f"Per tranche bijkopen als dom. kant > {_bc.get('avg_down_min_drop', 0.08):.0%} daalt "
+                        f"({_avg_pct:.0%} budget/tranche, max {_avg_max_pct:.0f}× budget)")
         bc3.metric("🔄 Flip", f"€{flip_t:.2f}", f"max €{flip_max:.2f}",
-                   help="Per tranche andere kant kopen als die > 0.62 stijgt (max 3× budget)")
+                   help=f"Per tranche andere kant kopen als die > {_flip_trig} stijgt "
+                        f"({_flip_pct:.0%} budget/tranche, max {_flip_max_pct:.0f}× budget)")
         bc4.metric("✅ Confirm", f"€{confirm_t:.2f}",
-                   help="Eenmalige extra koop in laatste 90s als winnaar ≥ 0.78")
+                   help=f"Eenmalige extra koop in laatste {_conf_secs}s als winnaar ≥ {_conf_trig}")
         bc5.metric("🛡 Hedge", f"€{hedge_t:.2f}",
-                   help="Verliezende kant kopen als prijs ≤ 0.11 (10% van budget)")
+                   help=f"Verliezende kant kopen als prijs ≤ {_hedge_trig} ({_hedge_pct:.0%} van budget)")
         st.caption(f"⚠️ Max totaal per window zonder limiet: **€{max_possible:.2f}**")
 
     with col_c:
@@ -474,14 +490,21 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 
     # ── Documentatie (expanders) ──────────────────────────────────────────────
     with st.expander("📐 Rekenvoorbeeld — is5minfixedyet strategie"):
-        dom_price      = 0.50
-        dom_shares     = round(budget / dom_price, 1)
-        avg_down_ex    = round(budget * 0.50, 2)
-        avg_down_max   = round(budget * 4.00, 2)
-        flip_tranche_ex = round(budget * 0.75, 2)
-        flip_max_ex    = round(budget * 3.00, 2)
-        confirm_ex     = round(budget * 1.00, 2)
-        hedge_eur_ex   = round(budget * 0.10, 2)
+        _bc2 = _CFG.get("bggdsb", {})
+        dom_price       = 0.50
+        dom_shares      = round(budget / dom_price, 1)
+        avg_down_ex     = round(budget * float(_bc2.get("avg_down_tranche_pct", 0.50)), 2)
+        avg_down_max2   = round(budget * float(_bc2.get("avg_down_max_pct", 4.00)), 2)
+        flip_tranche_ex = round(budget * float(_bc2.get("flip_tranche_pct", 0.75)), 2)
+        flip_max_ex     = round(budget * float(_bc2.get("flip_max_pct", 3.00)), 2)
+        confirm_ex      = round(budget * float(_bc2.get("confirm_pct", 1.00)), 2)
+        hedge_eur_ex    = round(budget * float(_bc2.get("hedge_size_pct", 0.10)), 2)
+        flip_trig2      = float(_bc2.get("flip_trigger_price", 0.62))
+        flip_int2       = int(_bc2.get("flip_interval_secs", 20))
+        conf_trig2      = float(_bc2.get("confirm_trigger_price", 0.78))
+        conf_secs2      = int(_bc2.get("confirm_secs_remaining", 90))
+        hedge_trig2     = float(_bc2.get("hedge_price_trigger", 0.11))
+        avg_drop2       = float(_bc2.get("avg_down_min_drop", 0.08))
 
         st.markdown(f"""
 **Aankopen per window · budget €{budget}**
@@ -489,36 +512,48 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 | Moment | Actie | Kant | Bedrag |
 |---|---|---|---|
 | Window start | Volledige entry | Dominant | **€{budget}** (~{dom_shares} shares @ {dom_price}) |
-| Prijs daalt > 8ct | Averaging down | Dominant (bijkopen) | **€{avg_down_ex}/tranche** (max €{avg_down_max} totaal) |
-| Andere kant > 0.62 | Flip | Andere kant | **€{flip_tranche_ex}/tranche** elke 20s (max €{flip_max_ex}) |
-| Laatste 90s (≥0.78) | Confirm buy | Winnende kant | **€{confirm_ex}** eenmalig |
-| Verliezer ≤ 0.11 | Hedge | Verliezende kant | **€{hedge_eur_ex}** |
+| Prijs daalt > {avg_drop2:.0%} | Averaging down | Dominant (bijkopen) | **€{avg_down_ex}/tranche** (max €{avg_down_max2} totaal) |
+| Andere kant > {flip_trig2} | Flip | Andere kant | **€{flip_tranche_ex}/tranche** elke {flip_int2}s (max €{flip_max_ex}) |
+| Laatste {conf_secs2}s (≥{conf_trig2}) | Confirm buy | Winnende kant | **€{confirm_ex}** eenmalig |
+| Verliezer ≤ {hedge_trig2} | Hedge | Verliezende kant | **€{hedge_eur_ex}** |
 
 *Exit: hold to expiry (€1.00 per winnende share)*
 """)
 
     with st.expander("📋 Strategie regels + Market gate"):
+        _br = _CFG.get("bggdsb", {})
+        _gate_min  = float(_br.get("entry_price_min", 0.10))
+        _gate_max  = float(_br.get("entry_price_max", 0.90))
+        _flip_tr   = float(_br.get("flip_trigger_price", 0.62))
+        _flip_in   = int(_br.get("flip_interval_secs", 20))
+        _conf_tr   = float(_br.get("confirm_trigger_price", 0.78))
+        _conf_sc   = int(_br.get("confirm_secs_remaining", 90))
+        _conf_pc   = float(_br.get("confirm_pct", 1.00))
+        _hedge_tr  = float(_br.get("hedge_price_trigger", 0.11))
+        _hedge_pc  = float(_br.get("hedge_size_pct", 0.10))
+
         rule_col, gate_col = st.columns(2)
         with rule_col:
-            st.markdown("""
+            st.markdown(f"""
 | Regel | Waarde |
 |---|---|
-| Market gate | Beide kanten 0.10 – 0.90 |
+| Market gate | Beide kanten {_gate_min} – {_gate_max} |
 | Richting | OFI + funding rate (conviction) |
 | Initiële entry | Volledig budget op dominante kant |
-| Flip trigger | Andere kant > 0.50 én wint |
-| Flip tranches | €8/tranche elke 3s tot break-even |
-| Confirm buy | €15 op winnaar in laatste 90s (≥ 0.60) |
-| Hedge timing | Verliezer ≤ 0.11 → 5% budget |
+| Flip trigger | Andere kant > {_flip_tr} |
+| Flip tranches | elke {_flip_in}s |
+| Confirm buy | In laatste {_conf_sc}s (≥ {_conf_tr}) |
+| Hedge timing | Verliezer ≤ {_hedge_tr} → {_hedge_pc:.0%} budget |
 | Exit | Hold to expiry (€1.00) |
 | Win-rate (is5 data) | **75.4%** initieel |
 | ROI (is5 data) | **+26.6%** over 3 dagen |
 """)
         with gate_col:
-            saved_budget = int(get_state("bggdsb_window_budget") or 30)
-            dominant_eur = round(saved_budget * 0.89, 2)
-            hedge_eur    = round(saved_budget * 0.11, 2)
-            st.metric("Market gate", "0.10 – 0.90")
-            st.metric("Dominant entry", f"€{dominant_eur}")
-            st.metric("Hedge (bij ≤0.11)", f"€{hedge_eur}")
+            saved_budget = int(get_state("bggdsb_window_budget") or 2)
+            hedge_eur    = round(saved_budget * _hedge_pc, 2)
+            confirm_eur2 = round(saved_budget * _conf_pc, 2)
+            st.metric("Market gate", f"{_gate_min} – {_gate_max}")
+            st.metric("Entry (volledig budget)", f"€{saved_budget:.2f}")
+            st.metric(f"Hedge (bij ≤{_hedge_tr})", f"€{hedge_eur:.2f}")
+            st.metric(f"Confirm (laatste {_conf_sc}s)", f"€{confirm_eur2:.2f}")
             st.metric("Actieve coins", ", ".join(_load_selected_coins()) or "—")
