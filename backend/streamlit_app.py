@@ -132,6 +132,17 @@ div[data-testid="stMetricValue"] { color: #e5e7eb; }
 .chip-trade { background: rgba(30,58,138,0.5); color: #93c5fd; }
 .chip-none  { background: rgba(127,29,29,0.4); color: #fca5a5; }
 .chip-warn  { background: rgba(120,53,15,0.4); color: #fbbf24; }
+@keyframes fadeRefresh {
+  from { opacity: 0.80; }
+  to   { opacity: 1.0;  }
+}
+[data-testid="stVerticalBlockInsideMain"] > div {
+  animation: fadeRefresh 0.35s ease-out;
+}
+[data-testid="stMetricValue"] > div,
+[data-testid="stMetricDelta"] span {
+  transition: color 0.4s ease, opacity 0.25s ease;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -497,6 +508,7 @@ def dashboard() -> None:
         _recent_trades()
 
 
+@st.fragment(run_every=5)
 def dashboard_event_log() -> None:
     st.divider()
     _event_log()
@@ -1132,6 +1144,7 @@ def _learning_panel() -> None:
         c4.empty()
 
 
+@st.fragment(run_every=10)
 def _portfolio_panel() -> None:
     pf = get_portfolio_snapshot()
 

@@ -116,7 +116,7 @@ _MODE_LABELS = ["Alle", "Straddle", "Signal", "Auto Router"]
 _MODE_KEYS   = {"Alle": None, "Straddle": "straddle", "Signal": "signal", "Auto Router": "auto_router"}
 
 
-@st.fragment
+@st.fragment(run_every=60)
 def analytics_panel() -> None:
     # ── Zoekfilter ────────────────────────────────────────────────────────────
     col_coin, col_mode, col_range = st.columns([1.5, 2.5, 2])
