@@ -258,13 +258,13 @@ async def _coin_loop(coin: str) -> None:
             continue
 
         if get_mode() in ("bggdsb_paper", "bggdsb_live"):
-            # Paper mode nooit blokkeren door kill switch — kost geen echt geld
-            is_bggdsb_paper = get_mode() == "bggdsb_paper"
-            if not risk.is_killed() or is_bggdsb_paper:
-                try:
-                    await _bggdsb_coin_tick(coin)
-                except Exception as e:
-                    log.error("bggdsb_loop_error", coin=coin, error=str(e))
+            # BGGDSB always runs — it has its own paper/live toggle as safety.
+            # The global kill is triggered by straddle/signal daily loss limits;
+            # a separate strategy should not be blocked by another mode's kill.
+            try:
+                await _bggdsb_coin_tick(coin)
+            except Exception as e:
+                log.error("bggdsb_loop_error", coin=coin, error=str(e))
             await asyncio.sleep(5)
             continue
 
