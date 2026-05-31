@@ -338,6 +338,12 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     st.divider()
 
     # ── Controls ──────────────────────────────────────────────────────────────
+    if not bggdsb_active:
+        st.info(
+            f"Instellingen zijn uitgeschakeld — bot staat in `{current_mode}` modus. "
+            "Selecteer **🧠 BGGDSB paper** of **🔴 BGGDSB live** in de sidebar om te bewerken.",
+            icon="🔒",
+        )
     col_a, col_c, col_d = st.columns([3, 3, 1])
 
     with col_a:
@@ -347,6 +353,8 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             min_value=2, max_value=200, step=1,
             value=_saved_budget,
             key="bggdsb_budget",
+            disabled=not bggdsb_active,
+            help=None if bggdsb_active else "Activeer eerst BGGDSB modus via de sidebar.",
         )
         avg_down_t   = round(budget * 0.50, 2)
         flip_t       = round(budget * 0.75, 2)
@@ -365,7 +373,9 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             min_value=0, max_value=100, step=10,
             value=int(get_state("bggdsb_is5_signal_weight") or 0),
             key="bggdsb_is5_weight",
+            disabled=not bggdsb_active,
             help=(
+                "Activeer eerst BGGDSB modus via de sidebar." if not bggdsb_active else
                 "0% = is5 nooit gebruikt (puur marktprijs). "
                 "6% ≈ origineel (tiebreaker bij prijsverschil ≤ 3ct). "
                 "50% = is5 tiebreaker tot 25ct verschil. "
@@ -387,6 +397,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
                 coin,
                 value=(coin in saved_coins),
                 key=f"bggdsb_coin_{coin}",
+                disabled=not bggdsb_active,
                 help="is5 handelde vrijwel alleen BTC" if coin == "BTC" else None,
             )
             if checked:
@@ -401,7 +412,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     btn_col, live_col = st.columns([2, 3])
     with btn_col:
         if st.button("💾 Instellingen opslaan (paper)", key="bggdsb_save",
-                     disabled=not selected_coins):
+                     disabled=not selected_coins or not bggdsb_active):
             set_dashboard_state("bggdsb_window_budget", str(budget))
             set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
             set_dashboard_state("bggdsb_paper_mode", "1")   # altijd paper na opslaan

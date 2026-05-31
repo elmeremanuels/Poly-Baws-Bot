@@ -56,14 +56,16 @@ MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learnin
 MODE_LABELS = {
     "paper_hybrid":   "paper_hybrid",
     "paper_auto":     "paper_auto",
-    "live_hybrid":    "live_hybrid",
-    "live_auto":      "live_auto",
-    "live_learning":  "live_learning",
+    "live_hybrid":    "🔴 live_hybrid",
+    "live_auto":      "🔴 live_auto",
+    "live_learning":  "🔴 live_learning",
     "signal_trader":  "signal_trader",
     "auto_router":    "auto_router",
     "bggdsb_paper":   "🧠 BGGDSB paper",
-    "bggdsb_live":    "🧠 BGGDSB live",
+    "bggdsb_live":    "🔴 BGGDSB live",
 }
+# Modes that use real money and require confirmation before switching
+LIVE_MODES = {"live_hybrid", "live_auto", "live_learning", "bggdsb_live"}
 
 st.set_page_config(
     page_title="Poly-Baws-Bot",
@@ -261,6 +263,57 @@ def fmt_time(iso: str | None) -> str:
         return iso[:16]
 
 
+# ── Live mode confirmation dialog ─────────────────────────────────────────────
+
+@st.dialog("⚠️ Live modus activeren — echt geld!")
+def _live_confirm_dialog(new_mode: str) -> None:
+    label = MODE_LABELS.get(new_mode, new_mode)
+    st.error(f"Je staat op het punt **{label}** te activeren.", icon="🔴")
+
+    st.markdown("**Actieve instellingen:**")
+
+    if new_mode == "bggdsb_live":
+        budget = int(get_state("bggdsb_window_budget") or 20)
+        avg_down = round(budget * 4.00, 2)
+        flip     = round(budget * 3.00, 2)
+        confirm  = round(budget * 1.00, 2)
+        max_tot  = round(budget + avg_down + flip + confirm + budget * 0.10, 2)
+        c1, c2 = st.columns(2)
+        c1.metric("Budget per window", f"€{budget}")
+        c2.metric("Max totaal per window", f"€{max_tot}")
+        coins_raw = get_state("bggdsb_coins")
+        try:
+            import json as _json
+            coins = ", ".join(_json.loads(coins_raw)) if coins_raw else "?"
+        except Exception:
+            coins = "?"
+        st.info(f"Coins: **{coins}**")
+    else:
+        saved_eur = get_state("trade_size_eur")
+        trade_size = float(saved_eur) if saved_eur else CONFIG["trading"].get("trade_size_eur", 1.0)
+        saved_sc = get_state("max_scalein_eur")
+        scalein = float(saved_sc) if saved_sc else CONFIG["trading"].get("max_scalein_eur", 0.0)
+        daily_limit = CONFIG.get("risk", {}).get("daily_loss_limit_eur", 10.0)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Trade size", f"€{trade_size:.2f}")
+        c2.metric("Max bijkoop", f"€{scalein:.2f}" if scalein > 0 else "uit")
+        c3.metric("Dagelijkse stop", f"€{daily_limit:.2f}")
+
+    st.divider()
+    col_ok, col_cancel = st.columns(2)
+    if col_ok.button("✅ Ja, ga live", type="primary", use_container_width=True):
+        write_command("set_mode", {"mode": new_mode})
+        st.session_state.pop("_pending_live_mode", None)
+        st.rerun()
+    if col_cancel.button("❌ Annuleren", use_container_width=True):
+        # Reset the radio widget back to the current (paper) mode
+        cur = current_mode()
+        if cur in MODES:
+            st.session_state["sidebar_mode_radio"] = MODES.index(cur)
+        st.session_state.pop("_pending_live_mode", None)
+        st.rerun()
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -276,10 +329,19 @@ with st.sidebar:
         index=mode_idx,
         format_func=lambda m: MODE_LABELS.get(m, m),
         label_visibility="collapsed",
+        key="sidebar_mode_radio",
     )
     if new_mode != mode:
-        write_command("set_mode", {"mode": new_mode})
-        st.rerun()
+        if new_mode in LIVE_MODES:
+            # Show confirmation dialog instead of switching immediately
+            st.session_state["_pending_live_mode"] = new_mode
+        else:
+            write_command("set_mode", {"mode": new_mode})
+            st.rerun()
+
+    # Open live confirmation dialog if pending
+    if "_pending_live_mode" in st.session_state:
+        _live_confirm_dialog(st.session_state["_pending_live_mode"])
 
     if mode == "live_auto":
         completed = get_latest_completed_cycle()
@@ -349,6 +411,7 @@ with st.sidebar:
         if pending is not None and abs(pending - db_eur) < 0.001:
             del st.session_state[_ts_key]
         display_eur = st.session_state.get(_ts_key, db_eur)
+        _ts_disabled = mode in ("bggdsb_paper", "bggdsb_live")
         new_eur = st.number_input(
             "trade_size_input",
             min_value=0.50,
@@ -357,6 +420,8 @@ with st.sidebar:
             step=0.10,
             format="%.2f",
             label_visibility="collapsed",
+            disabled=_ts_disabled,
+            help="Niet van toepassing in BGGDSB modus — pas aan via het 🧠 BGGDSB tabblad." if _ts_disabled else None,
         )
         if abs(new_eur - display_eur) > 0.001:
             write_command("set_trade_size", {"trade_size_eur": new_eur})
@@ -372,6 +437,7 @@ with st.sidebar:
         if pending_sc is not None and abs(pending_sc - db_scalein) < 0.001:
             del st.session_state[_sc_key]
         display_scalein = st.session_state.get(_sc_key, db_scalein)
+        _sc_disabled = mode in ("bggdsb_paper", "bggdsb_live", "signal_trader", "auto_router")
         new_scalein = st.number_input(
             "max_scalein_input",
             min_value=0.0,
@@ -380,6 +446,8 @@ with st.sidebar:
             step=0.10,
             format="%.2f",
             label_visibility="collapsed",
+            disabled=_sc_disabled,
+            help="Niet van toepassing in deze modus." if _sc_disabled else None,
         )
         if abs(new_scalein - display_scalein) > 0.001:
             write_command("set_max_scalein", {"max_scalein_eur": new_scalein})
