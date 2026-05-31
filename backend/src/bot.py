@@ -395,10 +395,12 @@ async def _bggdsb_extra_buy(
             result = await _pt.simulate_market_buy(token, shares)
             filled = result.get("filled", True)
         else:
-            resp = await _ord.place_market_order(token, "BUY", shares)
+            # Limit order op huidige ask — fill nooit duurder dan verwacht bedrag
+            ask_price = round(ws_client.get_best_ask(token) or (buy_eur / max(shares, 0.01)), 2)
+            resp = await _ord.place_limit_order(token, "BUY", ask_price, shares)
             filled = False
             if resp and resp.get("order_id"):
-                for _ in range(3):
+                for _ in range(5):
                     await asyncio.sleep(0.8)
                     order = await _ord.get_order(resp["order_id"])
                     if order and order.get("status") in ("MATCHED", "FILLED"):
@@ -434,8 +436,6 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
     from .db_sync import set_dashboard_state as _sds
     cfg = CONFIG.get("bggdsb", {})
     hedge_price = float(cfg.get("hedge_price_trigger", 0.11))
-    # hedge_size_eur: vaste bedrag (prioriteit boven hedge_size_pct × budget)
-    _hedge_size_eur_cfg = cfg.get("hedge_size_eur")
     hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))
     dashboard_interval = 3.0
 
@@ -538,8 +538,7 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
 
             # ── HEDGE ────────────────────────────────────────────────────────
             if not _at_limit and not hedge_placed and 0 < other_mid <= hedge_price:
-                hedge_eur = round(float(_hedge_size_eur_cfg) if _hedge_size_eur_cfg is not None
-                                  else window_budget * hedge_pct, 2)
+                hedge_eur = round(window_budget * hedge_pct, 2)
                 o_ask     = ws_client.get_best_ask(other_tok) or other_mid
                 shares    = round(hedge_eur / max(o_ask, 0.01), 2)
                 if shares >= 0.1:
