@@ -372,13 +372,9 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
         )
 
     with col_d:
-        paper_mode = st.toggle(
-            "Paper mode",
-            value=bool(int(get_state("bggdsb_paper_mode") or 1)),
-            key="bggdsb_paper",
-            help="Aan = veilig oefenen. Uit = live trades met echt geld.",
-        )
+        st.markdown("&nbsp;", unsafe_allow_html=True)  # vertical align
 
+    # Coins row
     st.markdown("**Coins**")
     saved_coins = _load_selected_coins()
     coin_cols = st.columns(len(_ALL_COINS))
@@ -397,20 +393,52 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     if not selected_coins:
         st.warning("Selecteer minstens één coin.", icon="⚠️")
 
-    if st.button("💾 Instellingen opslaan", key="bggdsb_save", disabled=not selected_coins):
-        set_dashboard_state("bggdsb_window_budget", str(budget))
-        set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
-        set_dashboard_state("bggdsb_paper_mode", "1" if paper_mode else "0")
-        set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
-        mode_to_set = "bggdsb_paper" if paper_mode else "bggdsb_live"
-        write_command("set_mode", {"mode": mode_to_set})
-        coins_str = ", ".join(selected_coins)
-        st.success(
-            f"Opgeslagen — budget €{budget}/window · "
-            f"coins: {coins_str} · is5 {is5_weight}% · modus {'paper' if paper_mode else 'LIVE'}"
-        )
-        _q_is5_live.clear()
-        _q_stats.clear()
+    # Current live status
+    _is_live_now = get_state("bggdsb_paper_mode") == "0"
+
+    btn_col, live_col = st.columns([2, 3])
+    with btn_col:
+        if st.button("💾 Instellingen opslaan (paper)", key="bggdsb_save",
+                     disabled=not selected_coins):
+            set_dashboard_state("bggdsb_window_budget", str(budget))
+            set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
+            set_dashboard_state("bggdsb_paper_mode", "1")   # altijd paper na opslaan
+            set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
+            write_command("set_mode", {"mode": "bggdsb_paper"})
+            coins_str = ", ".join(selected_coins)
+            st.success(
+                f"Opgeslagen in **paper** mode — budget €{budget}/window · coins: {coins_str}"
+            )
+            _q_is5_live.clear()
+            _q_stats.clear()
+
+    with live_col:
+        if _is_live_now:
+            if st.button("⏸ Terug naar paper", key="bggdsb_to_paper", type="secondary"):
+                set_dashboard_state("bggdsb_paper_mode", "1")
+                write_command("set_mode", {"mode": "bggdsb_paper"})
+                st.warning("Teruggeschakeld naar **paper** mode.")
+        else:
+            st.warning(
+                f"⚠️ LIVE modus gebruikt **echt geld** — €{budget} per window. "
+                "Zeker weten?",
+                icon="🔴",
+            )
+            if st.button(
+                f"🔴 Ga LIVE (€{budget}/window, echt geld!)",
+                key="bggdsb_go_live",
+                type="primary",
+                disabled=not selected_coins,
+            ):
+                set_dashboard_state("bggdsb_window_budget", str(budget))
+                set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
+                set_dashboard_state("bggdsb_paper_mode", "0")
+                set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
+                write_command("set_mode", {"mode": "bggdsb_live"})
+                st.error(
+                    f"🔴 LIVE actief — €{budget}/window op {', '.join(selected_coins)}. "
+                    "Klik 'Terug naar paper' om te stoppen."
+                )
 
     st.divider()
 

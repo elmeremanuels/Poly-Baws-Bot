@@ -1136,6 +1136,16 @@ async def _oracle_analysis_loop() -> None:
 
 
 async def run_bot() -> None:
+    # Safety: always start BGGDSB in paper mode after (re)start.
+    # The user must explicitly click "Ga LIVE" on the dashboard to enable live orders.
+    # This prevents unintended live trading when the bot restarts with saved live settings.
+    try:
+        from .db_sync import set_dashboard_state as _sds_startup
+        _sds_startup("bggdsb_paper_mode", "1")
+        log.info("bggdsb_startup_reset_to_paper")
+    except Exception:
+        pass
+
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
     await scanner.refresh_markets()
