@@ -1,7 +1,10 @@
 """Bot process entry point — no HTTP server, no WebSocket push."""
 import asyncio
 import argparse
+import fcntl
+import os
 import sys
+from pathlib import Path
 
 from .logger import init_db, log
 from .state import recover_state, set_mode
@@ -10,6 +13,10 @@ from .config_loader import CONFIG
 from . import risk
 from . import bot as bot_module
 from .commands import command_poll_loop
+
+# PID-lock: slechts één bot-instantie tegelijk
+_PID_FILE = Path(__file__).resolve().parent.parent.parent / "poly-baws-bot.pid"
+_pid_lock_fh = None  # file handle open houden zolang het proces leeft
 
 
 async def _close_stale_recovered_trades() -> None:
@@ -101,7 +108,31 @@ async def _close_stale_recovered_trades() -> None:
             remove_active_trade(trade_id)  # always remove from memory even if DB write fails
 
 
+def _acquire_pid_lock() -> None:
+    """Verkrijg exclusieve bestandslock. Crasht als een ander proces al actief is."""
+    global _pid_lock_fh
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _pid_lock_fh = open(_PID_FILE, "w")
+    try:
+        fcntl.flock(_pid_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Lees huidig PID uit het bestand voor betere foutmelding
+        try:
+            running_pid = _PID_FILE.read_text().strip()
+        except Exception:
+            running_pid = "onbekend"
+        print(
+            f"FOUT: Bot is al actief (PID {running_pid}). "
+            "Slechts één instantie toegestaan. Gebruik 'pkill -f poly-baws-bot' om te stoppen.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    _pid_lock_fh.write(str(os.getpid()))
+    _pid_lock_fh.flush()
+
+
 async def _run() -> None:
+    _acquire_pid_lock()
     log.info("startup_begin")
     await init_db()
 
