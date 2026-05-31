@@ -396,13 +396,17 @@ async def _bggdsb_extra_buy(
             filled = result.get("filled", True)
         else:
             resp = await _ord.place_market_order(token, "BUY", shares)
-            filled = bool(resp and resp.get("order_id"))
-            if filled:
+            filled = False
+            if resp and resp.get("order_id"):
                 for _ in range(3):
                     await asyncio.sleep(0.8)
                     order = await _ord.get_order(resp["order_id"])
                     if order and order.get("status") in ("MATCHED", "FILLED"):
+                        filled = True
                         break
+                if not filled:
+                    log.warning("bggdsb_extra_buy_unfilled", coin=coin, side=side,
+                                order_id=resp["order_id"])
         if filled:
             st = _bggdsb_tranche_state.get(window_key)
             if st:
