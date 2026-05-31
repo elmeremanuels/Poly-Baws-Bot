@@ -361,16 +361,27 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             disabled=not bggdsb_active,
             help=None if bggdsb_active else "Activeer eerst BGGDSB modus via de sidebar.",
         )
+        entry_t      = round(budget * 1.00, 2)
         avg_down_t   = round(budget * 0.50, 2)
+        avg_down_max = round(budget * 4.00, 2)
         flip_t       = round(budget * 0.75, 2)
+        flip_max     = round(budget * 3.00, 2)
         confirm_t    = round(budget * 1.00, 2)
         hedge_t      = round(budget * 0.10, 2)
-        max_possible = round(budget + budget * 4.00 + budget * 3.00 + budget * 1.00 + budget * 0.10, 2)
-        st.caption(
-            f"Avg-down: **€{avg_down_t}**/tranche · Flip: **€{flip_t}**/tranche · "
-            f"Confirm: **€{confirm_t}** (90s) · Hedge: **€{hedge_t}** (≤0.11) · "
-            f"⚠️ Max totaal zonder limiet: **€{max_possible}**"
-        )
+        max_possible = round(budget + avg_down_max + flip_max + confirm_t + hedge_t, 2)
+
+        st.caption("**Bedragen bij dit budget:**")
+        bc1, bc2, bc3, bc4, bc5 = st.columns(5)
+        bc1.metric("🟢 Entry", f"€{entry_t:.2f}", help="Volledige inleg op dominante kant bij window-start")
+        bc2.metric("📉 Avg-down", f"€{avg_down_t:.2f}", f"max €{avg_down_max:.2f}",
+                   help="Per tranche bijkopen als dom. kant > 8¢ daalt (max 4× budget)")
+        bc3.metric("🔄 Flip", f"€{flip_t:.2f}", f"max €{flip_max:.2f}",
+                   help="Per tranche andere kant kopen als die > 0.62 stijgt (max 3× budget)")
+        bc4.metric("✅ Confirm", f"€{confirm_t:.2f}",
+                   help="Eenmalige extra koop in laatste 90s als winnaar ≥ 0.78")
+        bc5.metric("🛡 Hedge", f"€{hedge_t:.2f}",
+                   help="Verliezende kant kopen als prijs ≤ 0.11 (10% van budget)")
+        st.caption(f"⚠️ Max totaal per window zonder limiet: **€{max_possible:.2f}**")
 
     with col_c:
         is5_weight = st.slider(
