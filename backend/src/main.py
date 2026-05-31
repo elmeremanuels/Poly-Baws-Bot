@@ -112,7 +112,20 @@ def _acquire_pid_lock() -> None:
     """Verkrijg exclusieve bestandslock. Crasht als een ander proces al actief is."""
     global _pid_lock_fh
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _pid_lock_fh = open(_PID_FILE, "w")
+    try:
+        _pid_lock_fh = open(_PID_FILE, "w")
+    except PermissionError:
+        try:
+            running_pid = _PID_FILE.read_text().strip()
+        except Exception:
+            running_pid = "onbekend"
+        print(
+            f"FOUT: Kan PID-bestand niet schrijven (geen rechten). "
+            f"Bot draait waarschijnlijk al als andere gebruiker (PID {running_pid}). "
+            "Gebruik 'sudo pkill -f src.main' om te stoppen.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     try:
         fcntl.flock(_pid_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -123,7 +136,7 @@ def _acquire_pid_lock() -> None:
             running_pid = "onbekend"
         print(
             f"FOUT: Bot is al actief (PID {running_pid}). "
-            "Slechts één instantie toegestaan. Gebruik 'pkill -f poly-baws-bot' om te stoppen.",
+            "Slechts één instantie toegestaan. Gebruik 'pkill -f src.main' om te stoppen.",
             file=sys.stderr,
         )
         sys.exit(1)
