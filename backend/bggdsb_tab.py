@@ -247,17 +247,18 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     col_a, col_c, col_d = st.columns([3, 3, 1])
 
     with col_a:
+        _saved_budget = int(get_state("bggdsb_window_budget") or 20)
         budget = st.slider(
             "💶 Budget per window (€)",
-            min_value=20, max_value=50, step=5,
-            value=int(get_state("bggdsb_window_budget") or 30),
+            min_value=2, max_value=200, step=1,
+            value=_saved_budget,
             key="bggdsb_budget",
         )
-        flip_t    = round(budget / 30 * 8, 1)
-        confirm_t = round(budget / 30 * 15, 1)
-        hedge_t   = round(budget * 0.05, 1)
+        avg_down_t = round(budget * 0.50, 1)
+        confirm_t  = round(budget * 1.00, 1)
+        hedge_t    = round(budget * 0.10, 1)
         st.caption(
-            f"Flip: **€{flip_t}**/3s · Confirm: **€{confirm_t}** (90s) · Hedge: €{hedge_t} (≤0.11)"
+            f"Avg-down: **€10**/tranche · Confirm: **€20** (90s) · Hedge: **€{hedge_t}** (≤0.11)"
         )
 
     with col_c:
@@ -317,13 +318,10 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     st.divider()
 
     # ── Documentatie (expanders) ──────────────────────────────────────────────
-    with st.expander("📐 Rekenvoorbeeld — dynamische chase (is5minfixedyet patroon)"):
-        dom_price      = 0.495
-        flip_eur       = 8.0
-        confirm_eur_ex = 15.0
-        hedge_pct      = 0.05
-        dom_shares     = round(budget / dom_price, 1)
-        hedge_eur_ex   = round(budget * hedge_pct, 2)
+    with st.expander("📐 Rekenvoorbeeld — is5minfixedyet strategie"):
+        dom_price  = 0.50
+        dom_shares = round(budget / dom_price, 1)
+        hedge_eur_ex = round(budget * 0.10, 2)
 
         st.markdown(f"""
 **Aankopen per window · budget €{budget}**
@@ -331,17 +329,13 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 | Moment | Actie | Kant | Bedrag |
 |---|---|---|---|
 | Window start | Volledige entry | Dominant | **€{budget}** (~{dom_shares} shares @ {dom_price}) |
-| Als flip nodig | Bijkopen per 3s | Andere kant | **€{flip_eur}/tranche** tot break-even |
-| Na break-even | Extra kopen per 6s | Winnende kant | €{flip_eur}/tranche |
-| Laatste 90s (≥0.60) | Confirm buy | Winnende kant | **€{confirm_eur_ex}** |
-| Verliezer ≤ 0.11 | Hedge | Verliezende kant | €{hedge_eur_ex} |
+| Prijs daalt > 8ct | Averaging down | Dominant (bijkopen) | **€10/tranche** (max €80 totaal) |
+| Andere kant > 0.62 | Flip | Andere kant | **€15/tranche** elke 20s (max €60) |
+| Laatste 90s (≥0.78) | Confirm buy | Winnende kant | **€20** eenmalig |
+| Verliezer ≤ 0.11 | Hedge | Verliezende kant | **€{hedge_eur_ex}** |
 
-**Break-even formule:** flip-spend ÷ flip-prijs ≥ totale spend
+*Exit: hold to expiry (€1.00 per winnende share)*
 """)
-        st.caption(
-            "De bot koopt de dominante kant ook opnieuw bij tijdens de confirm buy in de laatste 90s "
-            "als die kant aan het winnen is (≥ 0.60)."
-        )
 
     with st.expander("📋 Strategie regels + Market gate"):
         rule_col, gate_col = st.columns(2)

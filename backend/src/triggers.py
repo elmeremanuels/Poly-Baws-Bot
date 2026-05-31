@@ -92,18 +92,18 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
 
-    # ── BGGDSB: use pre-computed share counts, skip conviction weighting ─────
-    # Must come before the past_cutoff check: BGGDSB enters DURING the window
-    # (after window_start), so now_utc is always >= cutoff_time for these trades.
+    # ── BGGDSB: single-side entry on dominant side only, no monitoring ──────
+    # Must come before the past_cutoff check: BGGDSB enters DURING the window.
     if trade.get("router_bucket") == "bggdsb":
         _b_yes = trade.get("bggdsb_yes_shares")
         _b_no = trade.get("bggdsb_no_shares")
         if _b_yes is not None and _b_no is not None:
             update_trade_field(trade_id, "yes_size", float(_b_yes))
             update_trade_field(trade_id, "no_size", float(_b_no))
-            update_trade_field(trade_id, "entry_size", round((float(_b_yes) + float(_b_no)) / 2, 2))
-            update_trade_field(trade_id, "entry_type", "straddle")
-            return await _execute_straddle_orders(trade_id, paper, cutoff_time, broadcast_fn)
+            dom_size = float(_b_yes) + float(_b_no)  # only one of them is non-zero
+            update_trade_field(trade_id, "entry_size", round(dom_size, 2))
+            update_trade_field(trade_id, "entry_type", "bggdsb")
+            return await _execute_bggdsb_entry(trade_id, paper)
 
     now_utc = datetime.now(timezone.utc)
     if now_utc >= cutoff_time:
@@ -364,6 +364,74 @@ async def _handle_fill_results(
         remove_active_trade(trade_id)
         await write_event(trade_id, "abort_no_fills", trade["coin"], {})
         log.info("entry_aborted_no_fills", trade_id=trade_id)
+
+
+async def _execute_bggdsb_entry(trade_id: str, paper: bool) -> bool:
+    """Buy only the dominant side for a BGGDSB trade. No monitoring started.
+
+    Fixes the straddle path bug where no_size=0.0 was coerced to entry_size
+    via Python's `or` chain, accidentally buying the non-dominant side.
+    """
+    trade = get_active_trades().get(trade_id)
+    if not trade:
+        return False
+
+    coin = trade["coin"]
+    dominant_side = trade.get("bggdsb_dominant_side") or "YES"
+    yes_token = trade["condition_id_yes"]
+    no_token  = trade["condition_id_no"]
+    dom_token = yes_token if dominant_side == "YES" else no_token
+
+    dom_size = float(
+        trade.get("yes_size") if dominant_side == "YES" else trade.get("no_size") or 0.0
+    )
+    if dom_size <= 0:
+        log.warning("bggdsb_entry_zero_size", trade_id=trade_id, dominant_side=dominant_side)
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "bggdsb_zero_size")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        return False
+
+    update_trade_field(trade_id, "entry_placed_ts", datetime.now(timezone.utc).isoformat())
+    update_trade_field(trade_id, "status", "entry_placed")
+
+    if paper:
+        ask = ws_client.get_best_ask(dom_token) or ENTRY_PRICE
+        result = await paper_trader.simulate_limit_buy(dom_token, ask, dom_size)
+    else:
+        ask = round(ws_client.get_best_ask(dom_token) or ENTRY_PRICE, 2)
+        resp = await orders.place_limit_order(dom_token, "BUY", ask, dom_size)
+        if resp and resp.get("order_id"):
+            cutoff = datetime.now(timezone.utc) + timedelta(seconds=30)
+            result = await _poll_live_fill(resp["order_id"], cutoff)
+        else:
+            result = {"filled": False}
+
+    if result.get("filled"):
+        fill_price = result.get("fill_price") or ask
+        fees = result.get("fees") or 0.0
+        update_trade_field(trade_id, "entry_filled_ts", datetime.now(timezone.utc).isoformat())
+        if dominant_side == "YES":
+            update_trade_field(trade_id, "entry_yes_price", fill_price)
+            update_trade_field(trade_id, "entry_no_price", None)
+        else:
+            update_trade_field(trade_id, "entry_yes_price", None)
+            update_trade_field(trade_id, "entry_no_price", fill_price)
+        update_trade_field(trade_id, "fees_paid", fees)
+        update_trade_field(trade_id, "status", "monitoring")
+        await persist_trade(trade_id)
+        log.info("bggdsb_entry_filled", trade_id=trade_id, coin=coin,
+                 dominant_side=dominant_side, fill_price=round(fill_price, 4),
+                 dom_size=dom_size, paper=paper)
+        return True
+    else:
+        update_trade_field(trade_id, "status", "aborted")
+        update_trade_field(trade_id, "notes", "bggdsb_entry_no_fill")
+        await persist_trade(trade_id)
+        remove_active_trade(trade_id)
+        log.warning("bggdsb_entry_no_fill", trade_id=trade_id)
+        return False
 
 
 async def _execute_straddle_orders(

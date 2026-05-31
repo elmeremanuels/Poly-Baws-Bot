@@ -438,6 +438,7 @@ async def _monitor_trade(trade_id: str, on_trigger_callback) -> None:
         if (trade
                 and trade.get("save_it_executed") != 1
                 and trade_id not in _save_it_in_progress
+                and trade.get("router_bucket") != "bggdsb"  # bggdsb has own flip logic
                 and CONFIG.get("router", {}).get("save_it_enabled", True)):
             _si = _save_it_state.setdefault(trade_id, {"peak_yes": 0.0, "peak_no": 0.0})
             y_mid = ws_client.get_mid_price(yes_token) if yes_token else None
