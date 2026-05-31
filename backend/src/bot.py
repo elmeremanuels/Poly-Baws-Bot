@@ -613,12 +613,42 @@ async def _bggdsb_window_flip_task(window_key: str) -> None:
         _bggdsb_flip_tasks.pop(window_key, None)
         st = _bggdsb_tranche_state.get(window_key)
         if st:
+            yes_spend = round(st.get("yes_spend", 0.0), 4)
+            no_spend  = round(st.get("no_spend",  0.0), 4)
+            total_spend = yes_spend + no_spend
             log.info("bggdsb_window_done", window_key=window_key,
-                     yes_spend=round(st.get("yes_spend", 0), 2),
-                     no_spend=round(st.get("no_spend", 0), 2),
+                     yes_spend=yes_spend, no_spend=no_spend,
                      phase=st.get("phase", "?"))
-            from .state import register_window_trade
-            register_window_trade(coin, st.get("window_ts", ""))
+            from .state import register_window_trade, update_trade_field, persist_trade as _persist
+            register_window_trade(st["coin"], st.get("window_ts", ""))
+
+            # Close the trade with paper P&L based on final mid prices
+            _trade_id = st.get("trade_id")
+            if _trade_id and total_spend > 0:
+                try:
+                    _ym = ws_client.get_mid_price(st["yes_token"])
+                    _nm = ws_client.get_mid_price(st["no_token"])
+                    if _ym is None or _nm is None:
+                        _ym, _nm = (1.0, 0.0) if yes_spend >= no_spend else (0.0, 1.0)
+                    _winner = "YES" if _ym >= _nm else "NO"
+                    _gross  = round(yes_spend * (1.0 if _winner == "YES" else 0.0)
+                                    + no_spend * (1.0 if _winner == "NO" else 0.0)
+                                    - total_spend, 4)
+                    update_trade_field(_trade_id, "winner_side", _winner)
+                    update_trade_field(_trade_id, "actual_winner", _winner)
+                    update_trade_field(_trade_id, "gross_pnl", _gross)
+                    update_trade_field(_trade_id, "net_pnl", _gross)
+                    update_trade_field(_trade_id, "status", "closed")
+                    update_trade_field(_trade_id, "winner_exit_reason", "expiry")
+                    await _persist(_trade_id)
+                    log.info("bggdsb_trade_closed", trade_id=_trade_id,
+                             winner=_winner, net_pnl=_gross,
+                             yes_spend=yes_spend, no_spend=no_spend)
+                    from .state import remove_active_trade
+                    remove_active_trade(_trade_id)
+                except Exception as _ce:
+                    log.error("bggdsb_close_error", trade_id=_trade_id, error=str(_ce))
+
             _bggdsb_tranche_state.pop(window_key, None)
         from .db_sync import set_dashboard_state as _sds2
         _sds2("bggdsb_active_window", "")
@@ -786,6 +816,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     initial_no  = budget_eur if dominant_side == "NO"  else 0.0
     _bggdsb_tranche_state[window_key] = {
         "coin":          coin,
+        "trade_id":      trade["trade_id"],
         "dominant_side": dominant_side,
         "yes_spend":     initial_yes,
         "no_spend":      initial_no,

@@ -199,6 +199,7 @@ async def persist_trade(trade_id: str) -> None:
         "ofi_at_trigger", "funding_rate_at_trigger", "liq_proxy_at_trigger",
         "conviction_at_trigger", "conviction_score_at_trigger",
         "early_loser_side", "early_loser_price", "early_loser_ts", "early_loser_rebought",
+        "router_bucket", "router_conviction_score",
     }
     record = {k: v for k, v in state.items() if k in db_fields}
     await write_trade(record)
