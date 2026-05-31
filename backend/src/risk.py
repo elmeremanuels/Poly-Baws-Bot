@@ -61,10 +61,14 @@ def _enforces_daily_loss_limit(mode: str) -> bool:
         kill here is wrong because get_daily_pnl() sums ALL trades incl. the
         background paper straddle, so a few paper losses trip a €10 kill that
         immediately re-fires after every reset — making Resume appear dead.
+      - bggdsb_live / bggdsb_paper: the €2/window budget means 5 losing windows
+        (25 min) would trip a €10 kill. Portfolio protection (min_capital_eur,
+        max_drawdown_from_start_pct) is the right risk control here.
     """
     return (not _is_paper_like_mode(mode)
             and mode != "live_learning"
-            and mode != "signal_trader")
+            and mode != "signal_trader"
+            and mode not in ("bggdsb_live", "bggdsb_paper"))
 
 
 async def check_daily_loss_limit() -> bool:

@@ -136,6 +136,11 @@ def bggdsb_panel() -> None:
     elif streak_wins == 1:
         st.caption("✅ 1 win op rij")
 
+    # ── Laatste skip-reden (reasoning box) ───────────────────────────────────
+    last_skip = get_state("bggdsb_last_skip_reason") or ""
+    if last_skip:
+        st.info(f"**Laatste skip:** {last_skip}", icon="ℹ️")
+
     # ── Live window status ────────────────────────────────────────────────────
     raw_win = get_state("bggdsb_active_window") or ""
     try:
@@ -447,6 +452,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
                 set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
                 set_dashboard_state("bggdsb_paper_mode", "0")
                 set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
+                write_command("reset_kill")   # clear any active kill switch when explicitly going live
                 write_command("set_mode", {"mode": "bggdsb_live"})
                 st.error(
                     f"🔴 LIVE actief — €{budget}/window op {', '.join(selected_coins)}. "

@@ -715,9 +715,15 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     3. Start window flip task die dynamisch de winnaar achtervolgt
     """
     import json as _json
-    from .db_sync import get_state as _get_state
+    from .db_sync import get_state as _get_state, set_dashboard_state as _sds_tick
     from .state import register_window_trade, create_trade_state, add_active_trade
     from .triggers import execute_entry
+
+    def _set_skip_reason(reason: str) -> None:
+        try:
+            _sds_tick("bggdsb_last_skip_reason", reason)
+        except Exception:
+            pass
 
     bggdsb_cfg = CONFIG.get("bggdsb", {})
 
@@ -733,6 +739,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     market = scanner.get_current_bggdsb_market(coin)
     if not market or not market.get("window_start"):
         log.info("bggdsb_no_market", coin=coin)
+        _set_skip_reason(f"{coin}: geen markt beschikbaar")
         return
 
     window_ts  = market["window_start"].isoformat()
@@ -756,6 +763,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
                  window_ts=window_ts,
                  started_secs_before_boot=round(
                      (_bggdsb_startup_ts - market["window_start"]).total_seconds()))
+        _set_skip_reason(f"{coin}: window gestart vóór bot-start (herstart tussendoor)")
         return
 
     # Timing: genoeg tijd resterend én niet te vroeg (scanner vindt window pas na ~120s)
@@ -765,9 +773,11 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     entry_delay_secs   = float(bggdsb_cfg.get("entry_delay_secs", 10))
     if secs_since_start < entry_delay_secs:
         log.info("bggdsb_too_early", coin=coin, secs=round(secs_since_start, 1))
+        _set_skip_reason(f"{coin}: te vroeg ({secs_since_start:.0f}s na window-start, wacht {entry_delay_secs:.0f}s)")
         return
     if secs_until_end < min_secs_remaining:
         log.info("bggdsb_too_late", coin=coin, secs_left=round(secs_until_end, 1))
+        _set_skip_reason(f"{coin}: te laat — nog {secs_until_end:.0f}s, minimum is {min_secs_remaining:.0f}s")
         return
 
     # Streak skip: skip this window if we just broke a winning streak
@@ -778,6 +788,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         register_window_trade(coin, window_ts)  # mark window used to prevent double-decrement
         log.info("bggdsb_streak_skip_window", coin=coin,
                  skip_remaining=_streak_skip - 1)
+        _set_skip_reason(f"{coin}: streak-pauze — {_streak_skip - 1} windows resterend")
         return
 
     paper_raw   = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
@@ -809,6 +820,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
 
     if yes_ask is None or no_ask is None:
         log.info("bggdsb_no_ask_price", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
+        _set_skip_reason(f"{coin}: geen ask-prijs beschikbaar (orderbook nog leeg?)")
         return
 
     log.debug("bggdsb_prices", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
@@ -818,6 +830,10 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     comp_max = bggdsb_cfg.get("entry_price_max", 0.90)
     if not (comp_min <= yes_ask <= comp_max and comp_min <= no_ask <= comp_max):
         log.info("bggdsb_gate_fail", coin=coin, yes_ask=yes_ask, no_ask=no_ask)
+        _set_skip_reason(
+            f"{coin}: markt niet competitief — YES {yes_ask:.2f} / NO {no_ask:.2f} "
+            f"(vereist {comp_min:.2f}–{comp_max:.2f})"
+        )
         return
 
     # Richting: altijd marktprijs — de kant die al boven 0.50 staat.
@@ -854,6 +870,10 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     if dom_ask_entry > dom_ask_max:
         log.info("bggdsb_dom_price_too_high", coin=coin,
                  dominant=dominant_side, dom_ask=dom_ask_entry, max=dom_ask_max)
+        _set_skip_reason(
+            f"{coin}: {dominant_side} al te hoog ({dom_ask_entry:.2f} > max {dom_ask_max:.2f}) "
+            "— payout te klein"
+        )
         return
 
     conv_score = 0.0  # niet meer gebruikt voor richting, wel gelogd op trade
@@ -913,6 +933,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     }
     task = asyncio.create_task(_bggdsb_window_hold_task(window_key))
     _bggdsb_flip_tasks[window_key] = task
+    _set_skip_reason("")  # clear on successful entry
     log.info("bggdsb_entry_and_hold_started", coin=coin,
              dominant_side=dominant_side, budget=budget_eur,
              dom_shares=dom_shares, dom_ask=dom_ask_entry, paper=force_paper)
