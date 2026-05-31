@@ -69,6 +69,8 @@ def _enforces_daily_loss_limit(mode: str) -> bool:
 
 async def check_daily_loss_limit() -> bool:
     """Returns True if within daily loss limit. Only meaningful for live trades."""
+    if is_killed():
+        return False  # already killed — don't re-log
     daily_pnl = await get_daily_pnl()
     limit = CONFIG["risk"]["daily_loss_limit_eur"]
     if daily_pnl <= -limit:
@@ -164,6 +166,8 @@ async def check_portfolio_protection(current_usdc: float) -> None:
     """Three-layer portfolio protection. Call from portfolio_sync_loop."""
     if current_usdc is None:
         return
+    if is_killed():
+        return  # already killed — don't re-fire every 30s
     from .state import get_mode
     if _is_paper_like_mode(get_mode()):
         return  # paper modes: no real capital at risk
