@@ -627,6 +627,8 @@ def bggdsb_panel() -> None:
             if st.button("⏸ Terug naar paper", key="bggdsb_to_paper", type="secondary"):
                 set_dashboard_state("bggdsb_paper_mode", "1")
                 write_command("set_mode", {"mode": "bggdsb_paper"})
+                # Sync sidebar radio so it doesn't send a phantom set_mode on next full rerun
+                st.session_state["sidebar_mode_radio"] = 7  # bggdsb_paper index in MODES
                 st.warning("Teruggeschakeld naar **paper** mode.")
         else:
             st.warning(
@@ -650,6 +652,8 @@ def bggdsb_panel() -> None:
                     set_dashboard_state(f"bggdsb_halted_{_c}", "0")
                 write_command("reset_kill")   # clear any active kill switch when explicitly going live
                 write_command("set_mode", {"mode": "bggdsb_live"})
+                # Sync sidebar radio so it doesn't send a phantom set_mode on next full rerun
+                st.session_state["sidebar_mode_radio"] = 8  # bggdsb_live index in MODES
                 st.error(
                     f"🔴 LIVE actief — €{budget}/window op {', '.join(selected_coins)}. "
                     "Klik 'Terug naar paper' om te stoppen."

@@ -324,6 +324,20 @@ with st.sidebar:
     st.markdown("**Mode**")
     mode = current_mode()
     mode_idx = MODES.index(mode) if mode in MODES else 0
+    # Sync radio session state when mode was changed externally (e.g. from BGGDSB tab).
+    # Without this, the radio would still show the old mode and send a phantom revert command.
+    _radio_ss = st.session_state.get("sidebar_mode_radio")
+    if _radio_ss is not None and _radio_ss != mode_idx:
+        _radio_mode = MODES[_radio_ss] if 0 <= _radio_ss < len(MODES) else None
+        # Only auto-sync if the session-state mode differs from actual AND it's not a
+        # pending user selection (i.e. the user hasn't already sent a command for it).
+        if _radio_mode not in st.session_state.get("_sidebar_pending_modes", set()):
+            st.session_state["sidebar_mode_radio"] = mode_idx
+    # Clear pending set after mode is confirmed in DB
+    _pending = st.session_state.get("_sidebar_pending_modes", set())
+    if mode in _pending:
+        _pending.discard(mode)
+        st.session_state["_sidebar_pending_modes"] = _pending
     new_mode = st.radio(
         "mode", MODES,
         index=mode_idx,
@@ -336,6 +350,9 @@ with st.sidebar:
             # Show confirmation dialog instead of switching immediately
             st.session_state["_pending_live_mode"] = new_mode
         else:
+            _pm = st.session_state.get("_sidebar_pending_modes", set())
+            _pm.add(new_mode)
+            st.session_state["_sidebar_pending_modes"] = _pm
             write_command("set_mode", {"mode": new_mode})
             st.rerun()
 
