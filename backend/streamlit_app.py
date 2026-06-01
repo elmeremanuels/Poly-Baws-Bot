@@ -324,19 +324,6 @@ with st.sidebar:
     st.markdown("**Mode**")
     mode = current_mode()
     mode_idx = MODES.index(mode) if mode in MODES else 0
-    # Sync radio session state when mode was changed externally (e.g. from BGGDSB tab).
-    # Without this, the radio would still show the old mode and send a phantom revert command.
-    # st.radio stores the selected value (string), not the index.
-    _radio_ss = st.session_state.get("sidebar_mode_radio")
-    if _radio_ss is not None and _radio_ss != mode:
-        # Only auto-sync if the session-state mode is not a pending user selection
-        if _radio_ss not in st.session_state.get("_sidebar_pending_modes", set()):
-            st.session_state["sidebar_mode_radio"] = mode
-    # Clear pending set after mode is confirmed in DB
-    _pending = st.session_state.get("_sidebar_pending_modes", set())
-    if mode in _pending:
-        _pending.discard(mode)
-        st.session_state["_sidebar_pending_modes"] = _pending
     new_mode = st.radio(
         "mode", MODES,
         index=mode_idx,
@@ -345,13 +332,16 @@ with st.sidebar:
         key="sidebar_mode_radio",
     )
     if new_mode != mode:
-        if new_mode in LIVE_MODES:
+        # Ignore bggdsb paper↔live discrepancy: the BGGDSB tab manages this switch.
+        # The radio session state may lag behind an external "Go LIVE" button click;
+        # blocking the revert here prevents the sidebar from undoing it.
+        _bggdsb_modes = {"bggdsb_paper", "bggdsb_live"}
+        if new_mode in _bggdsb_modes and mode in _bggdsb_modes:
+            pass  # don't send command — BGGDSB tab is authoritative for paper↔live
+        elif new_mode in LIVE_MODES:
             # Show confirmation dialog instead of switching immediately
             st.session_state["_pending_live_mode"] = new_mode
         else:
-            _pm = st.session_state.get("_sidebar_pending_modes", set())
-            _pm.add(new_mode)
-            st.session_state["_sidebar_pending_modes"] = _pm
             write_command("set_mode", {"mode": new_mode})
             st.rerun()
 
