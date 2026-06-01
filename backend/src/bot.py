@@ -643,7 +643,9 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
 
             if loop_t - last_dash_t >= dashboard_interval:
                 st2 = _bggdsb_tranche_state.get(window_key)
-                if st2:
+                # Schaduw-munten tonen we NIET als het live window — anders
+                # overschrijven 4 achtergrondmunten de actieve weergave + de piep.
+                if st2 and not st2.get("is_shadow"):
                     _sds("bggdsb_active_window", _json.dumps({
                         "coin":           coin,
                         "window_key":     window_key,
@@ -730,22 +732,26 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     from .state import register_window_trade, create_trade_state, add_active_trade
     from .triggers import execute_entry
 
-    def _set_skip_reason(reason: str) -> None:
-        try:
-            _sds_tick("bggdsb_last_skip_reason", reason)
-        except Exception:
-            pass
-
     bggdsb_cfg = CONFIG.get("bggdsb", {})
 
-    # Coin whitelist
+    # Coin whitelist — bepaalt of dit een ACTIEVE munt is (echte trade in onze
+    # gekozen mode) of een SCHADUW-munt (achtergrond paper, puur om data te
+    # verzamelen voor het geschiktheidsbord). Schaduw-munten draaien ALTIJD paper.
     _coins_raw = _get_state("bggdsb_coins")
     try:
         allowed_coins = _json.loads(_coins_raw) if _coins_raw else bggdsb_cfg.get("coins", ["BTC"])
     except Exception:
         allowed_coins = bggdsb_cfg.get("coins", ["BTC"])
-    if coin not in allowed_coins:
-        return
+    is_active_coin = coin in allowed_coins
+
+    # Schaduw-munten mogen de skip-reden van de actieve munt niet overschrijven.
+    def _set_skip_reason(reason: str) -> None:
+        if not is_active_coin:
+            return
+        try:
+            _sds_tick("bggdsb_last_skip_reason", reason)
+        except Exception:
+            pass
 
     market = scanner.get_current_bggdsb_market(coin)
     if not market or not market.get("window_start"):
@@ -791,9 +797,11 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         _set_skip_reason(f"{coin}: te laat — nog {secs_until_end:.0f}s, minimum is {min_secs_remaining:.0f}s")
         return
 
-    # Streak skip: skip this window if we just broke a winning streak
+    # Streak skip: skip this window if we just broke a winning streak.
+    # Geldt alleen voor actieve munten — schaduw-munten traden ALTIJD door zodat
+    # we onafgebroken geschiktheidsdata blijven verzamelen.
     _streak_skip = int(_get_state("bggdsb_streak_skip") or 0)
-    if _streak_skip > 0:
+    if is_active_coin and _streak_skip > 0:
         from .db_sync import set_dashboard_state as _sds_streak
         _sds_streak("bggdsb_streak_skip", str(_streak_skip - 1))
         register_window_trade(coin, window_ts)  # mark window used to prevent double-decrement
@@ -803,7 +811,8 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         return
 
     paper_raw   = _get_state("bggdsb_paper_mode") or ("1" if bggdsb_cfg.get("paper_mode", True) else "0")
-    force_paper = bool(int(paper_raw))
+    # Schaduw-munten ALTIJD paper, ongeacht de mode — geen echt geld.
+    force_paper = bool(int(paper_raw)) or (not is_active_coin)
 
     yes_token = market.get("yes_token", "")
     no_token  = market.get("no_token", "")
@@ -909,7 +918,8 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     market["_router_bucket"]           = "bggdsb"
     market["_router_conviction_score"] = conv_score
 
-    trade = create_trade_state(coin, market, mode, triggered_by="bggdsb")
+    _trig_by = "bggdsb" if is_active_coin else "bggdsb_shadow"
+    trade = create_trade_state(coin, market, mode, triggered_by=_trig_by)
     add_active_trade(trade, skip_window_register=True)
     ok = await execute_entry(trade["trade_id"])
     if not ok:
@@ -949,6 +959,7 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         "phase":          "holding",
         "hedge_placed":   False,
         "dom_entry_price": dom_ask_entry,
+        "is_shadow":      not is_active_coin,
     }
     task = asyncio.create_task(_bggdsb_window_hold_task(window_key))
     _bggdsb_flip_tasks[window_key] = task

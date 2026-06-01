@@ -1561,7 +1561,10 @@ def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
         return {}
     try:
         with _conn() as conn:
-            where = "router_bucket = 'bggdsb' AND status IN ('closed', 'resolved')"
+            # Schaduw-trades (achtergrond paper op niet-actieve munten) tellen NIET
+            # mee in de zichtbare stats — die zijn alleen voor het geschiktheidsbord.
+            where = ("router_bucket = 'bggdsb' AND status IN ('closed', 'resolved') "
+                     "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
             params: list = []
             if mode_filter:
                 where += " AND mode = ?"
@@ -1593,7 +1596,8 @@ def get_bggdsb_trades(limit: int = 100, mode_filter: str | None = None) -> list[
         return []
     try:
         with _conn() as conn:
-            where = "router_bucket = 'bggdsb'"
+            where = ("router_bucket = 'bggdsb' "
+                     "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
             params: list = []
             if mode_filter:
                 where += " AND mode = ?"
@@ -1614,3 +1618,55 @@ def get_bggdsb_trades(limit: int = 100, mode_filter: str | None = None) -> list[
         return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+def get_bggdsb_coin_scoreboard(coins: list[str], lookback: int = 15) -> dict[str, dict]:
+    """Geschiktheid per munt op basis van recente BGGDSB-uitkomsten.
+
+    Combineert actieve (triggered_by='bggdsb') én schaduw paper-trades
+    (triggered_by='bggdsb_shadow') zodat ELKE munt een score krijgt — ook de
+    munten waar we live niet in zitten.
+
+    Recency-weging: de laatste 2–3 trades wegen het zwaarst (exponentieel
+    verval met halfwaarde ~3 trades). suitability_pct = gewogen win%.
+
+    Returns {coin: {n, suitability_pct (0-100 of None), recent_pnl}}.
+    """
+    out: dict[str, dict] = {c: {"n": 0, "suitability_pct": None, "recent_pnl": None}
+                            for c in coins}
+    if not _db_path.exists():
+        return out
+    try:
+        with _conn() as conn:
+            for coin in coins:
+                rows = conn.execute(
+                    """
+                    SELECT net_pnl FROM trades
+                    WHERE router_bucket = 'bggdsb'
+                      AND COALESCE(triggered_by, '') IN ('bggdsb', 'bggdsb_shadow')
+                      AND status IN ('closed', 'resolved')
+                      AND coin = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (coin, lookback),
+                ).fetchall()
+                if not rows:
+                    continue
+                num = den = 0.0
+                recent_pnl = 0.0
+                for i, r in enumerate(rows):
+                    pnl = float(r["net_pnl"] or 0.0)
+                    w = 0.5 ** (i / 3.0)          # newest=1.0, i=3→0.5, i=6→0.25
+                    num += w * (1.0 if pnl > 0 else 0.0)
+                    den += w
+                    if i < 3:
+                        recent_pnl += pnl
+                out[coin] = {
+                    "n": len(rows),
+                    "suitability_pct": round(100.0 * num / den, 1) if den else None,
+                    "recent_pnl": round(recent_pnl, 2),
+                }
+        return out
+    except Exception:
+        return out
