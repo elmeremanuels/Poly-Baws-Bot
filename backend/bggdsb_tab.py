@@ -602,6 +602,33 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     )
     if _reverse_entry:
         st.warning("🔄 **Reverse mode aan** — bot koopt de ONDERKANT van elke markt.", icon="🔄")
+        # Advies-signaal: wanneer is reverse instappen zinvol?
+        _rev_score_raw = get_state("bggdsb_reverse_entry_advice")
+        _bggdsb_stats_all = _q_stats()
+        _n_rev = int(_bggdsb_stats_all.get("total", 0))
+        _win_rev = float(_bggdsb_stats_all.get("win_pct") or 0)
+        if _n_rev >= 10:
+            _inv_win = round(100 - _win_rev, 1)
+            if _inv_win >= 65:
+                st.success(
+                    f"✅ **Goed moment voor reverse** — normaal win%: {_win_rev:.0f}% "
+                    f"→ inverse verwacht {_inv_win:.0f}% (n={_n_rev})",
+                    icon="📈",
+                )
+            elif _inv_win >= 50:
+                st.info(
+                    f"⚪ **Twijfelachtig** — normaal win%: {_win_rev:.0f}% "
+                    f"→ inverse verwacht {_inv_win:.0f}% (breakevenzone, n={_n_rev})",
+                    icon="📊",
+                )
+            else:
+                st.error(
+                    f"❌ **Niet aanbevolen** — normaal win%: {_win_rev:.0f}% "
+                    f"→ inverse zou slechts {_inv_win:.0f}% halen (n={_n_rev})",
+                    icon="📉",
+                )
+        else:
+            st.caption(f"📊 Te weinig data voor advies (n={_n_rev}, minimum 10 trades nodig)")
 
     # Current live status
     _is_live_now = get_state("bggdsb_paper_mode") == "0"

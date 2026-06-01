@@ -1552,6 +1552,55 @@ def get_is5_recent_side(coin: str, minutes: int = 15) -> str | None:
         return None
 
 
+def recalculate_bggdsb_pnl() -> int:
+    """Retroactieve P&L-correctie voor alle gesloten BGGDSB-trades.
+
+    Correcte formule: gross_pnl = winner_shares × 1.00 - total_invested
+                      net_pnl   = gross_pnl - fees_paid
+
+    Voor trades waarbij gross_pnl al correct was opgeslagen (hold-task liep
+    netjes af): alleen net_pnl bijwerken (= gross_pnl - fees_paid).
+    Voor trades waarbij gross_pnl NULL is (bot crash mid-window): herbereken
+    uit de DB-kolommen (initiële entry only — extra buys niet bekend).
+
+    Geeft het aantal bijgewerkte rijen terug.
+    """
+    if not _db_path.exists():
+        return 0
+    with _conn() as conn:
+        # Stap 1: vul gross_pnl in voor trades waar het nog NULL is
+        # formule: winner_shares × 1.00 − (entry_yes_price × yes_size + entry_no_price × no_size)
+        conn.execute("""
+            UPDATE trades
+            SET gross_pnl = ROUND(
+                CASE winner_side
+                  WHEN 'YES' THEN COALESCE(yes_size, 0) * 1.0
+                               - (COALESCE(entry_yes_price, 0) * COALESCE(yes_size, 0)
+                                + COALESCE(entry_no_price,  0) * COALESCE(no_size,  0))
+                  WHEN 'NO'  THEN COALESCE(no_size,  0) * 1.0
+                               - (COALESCE(entry_yes_price, 0) * COALESCE(yes_size, 0)
+                                + COALESCE(entry_no_price,  0) * COALESCE(no_size,  0))
+                  ELSE NULL
+                END, 4)
+            WHERE router_bucket = 'bggdsb'
+              AND COALESCE(triggered_by, '') NOT IN ('bggdsb_shadow')
+              AND status IN ('closed', 'resolved')
+              AND gross_pnl IS NULL
+              AND winner_side IS NOT NULL
+        """)
+        # Stap 2: net_pnl = gross_pnl − fees_paid voor alle bggdsb trades
+        cur = conn.execute("""
+            UPDATE trades
+            SET net_pnl = ROUND(COALESCE(gross_pnl, 0) - COALESCE(fees_paid, 0), 4)
+            WHERE router_bucket = 'bggdsb'
+              AND COALESCE(triggered_by, '') NOT IN ('bggdsb_shadow')
+              AND status IN ('closed', 'resolved')
+              AND gross_pnl IS NOT NULL
+        """)
+        updated = cur.rowcount
+    return updated
+
+
 def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
     """Performance stats for trades with router_bucket = 'bggdsb'.
 

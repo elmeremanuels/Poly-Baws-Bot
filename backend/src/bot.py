@@ -694,7 +694,8 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             from .state import register_window_trade, update_trade_field, persist_trade as _persist
             register_window_trade(st["coin"], st.get("window_ts", ""))
 
-            # Fix 1: P&L = winner_shares × €1.00 - total_spend (correct uitbetalingsformule)
+            # P&L = winner_shares × €1.00 - total_spend (correct uitbetalingsformule).
+            # net_pnl = gross_pnl - fees_paid (fees apart bijgehouden in trade state).
             _trade_id = st.get("trade_id")
             if _trade_id and total_spend > 0:
                 try:
@@ -705,16 +706,18 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                     _winner = "YES" if _ym >= _nm else "NO"
                     _winner_shares = yes_shares if _winner == "YES" else no_shares
                     _gross = round(_winner_shares - total_spend, 4)
+                    _fees  = float(get_active_trades().get(_trade_id, {}).get("fees_paid") or 0.0)
+                    _net   = round(_gross - _fees, 4)
                     update_trade_field(_trade_id, "winner_side", _winner)
                     update_trade_field(_trade_id, "actual_winner", _winner)
                     update_trade_field(_trade_id, "gross_pnl", _gross)
-                    update_trade_field(_trade_id, "net_pnl", _gross)
+                    update_trade_field(_trade_id, "net_pnl", _net)
                     update_trade_field(_trade_id, "status", "closed")
                     update_trade_field(_trade_id, "winner_exit_reason", "expiry")
                     await _persist(_trade_id)
                     log.info("bggdsb_trade_closed", trade_id=_trade_id,
-                             winner=_winner, net_pnl=_gross,
-                             yes_shares=yes_shares, no_shares=no_shares,
+                             winner=_winner, gross_pnl=_gross, net_pnl=_net,
+                             fees=_fees, yes_shares=yes_shares, no_shares=no_shares,
                              yes_spend=yes_spend, no_spend=no_spend)
                     from .state import remove_active_trade
                     remove_active_trade(_trade_id)
@@ -1297,6 +1300,16 @@ async def run_bot() -> None:
         pass
 
     log.info("bot_starting", mode=get_mode(), coins=COINS)
+
+    # Retroactieve P&L-correctie: net_pnl = gross_pnl - fees_paid voor alle
+    # gesloten BGGDSB-trades. Loopt in < 1ms, veilig om bij elke start te draaien.
+    try:
+        from .db_sync import recalculate_bggdsb_pnl as _recalc_pnl
+        _n_fixed = _recalc_pnl()
+        if _n_fixed:
+            log.info("bggdsb_pnl_recalculated", rows_updated=_n_fixed)
+    except Exception as _e:
+        log.warning("bggdsb_pnl_recalc_error", error=str(_e))
 
     await scanner.refresh_markets()
 
