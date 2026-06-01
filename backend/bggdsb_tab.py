@@ -71,6 +71,40 @@ def _suitability_color(pct: float | None) -> str:
     return "#ef5350"                     # rood
 
 
+def _render_coin_suitability(coin: str, board: dict, current_mode: str,
+                             active_coins: list[str]) -> None:
+    """Compacte geschiktheids-weergave onder een coin-checkbox: % + regime + status."""
+    info = board.get(coin, {}) or {}
+    pct = info.get("suitability_pct")
+    n = info.get("n", 0)
+    color = _suitability_color(pct)
+    pct_txt = f"{pct:.0f}%" if pct is not None else "—"
+
+    # Regime label uit dashboard_state (door bot gezet in _regime_sync_loop)
+    reg_label, reg_help = "⬛ Unknown", ""
+    raw_reg = get_state(f"regime_{coin}")
+    if raw_reg:
+        try:
+            reg = (json.loads(raw_reg) or {}).get("regime", "UNKNOWN")
+            reg_label, reg_help = _REGIME_META.get(reg, (reg, ""))
+        except Exception:
+            pass
+
+    if coin in active_coins:
+        status = "🔴 live" if current_mode == "bggdsb_live" else "🟡 actief"
+    else:
+        status = "👁 schaduw"
+    tip = f"{reg_help} · recency-gewogen win% over laatste {n} trades"
+    st.markdown(
+        f"<div title='{tip}' style='line-height:1.25;margin-top:-4px'>"
+        f"<span style='font-size:1.4em;font-weight:bold;color:{color}'>{pct_txt}</span>"
+        f"<div style='font-size:0.72em'>{reg_label}</div>"
+        f"<div style='font-size:0.66em;color:rgba(120,120,120,0.9)'>{status} · n={n}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _load_selected_coins() -> list[str]:
     raw = get_state("bggdsb_coins")
     if raw:
@@ -158,46 +192,6 @@ def bggdsb_panel() -> None:
         m4.metric("Gem. P&L", f"€{stats.get('avg_pnl', 0):+.4f}")
     else:
         st.caption("📊 Nog geen afgeronde BGGDSB trades — metrics verschijnen na het eerste window.")
-
-    # ── Munt-geschiktheid ─────────────────────────────────────────────────────
-    # Elke munt draait op de achtergrond mee in paper (schaduw) — ook munten waar
-    # we live niet in zitten. De score is een recency-gewogen win% (laatste 2–3
-    # trades wegen het zwaarst). Groen ≥70% · oranje 40–69% · rood <40%.
-    st.markdown("**🎯 Munt-geschiktheid** — welke munten aan/uit zetten")
-    _board = _q_scoreboard()
-    _active_coins = _load_selected_coins()
-    _cols = st.columns(len(_ALL_COINS))
-    for _col, _coin in zip(_cols, _ALL_COINS):
-        _info = _board.get(_coin, {}) or {}
-        _pct = _info.get("suitability_pct")
-        _n   = _info.get("n", 0)
-        _color = _suitability_color(_pct)
-        _pct_txt = f"{_pct:.0f}%" if _pct is not None else "—"
-
-        # Regime label uit dashboard_state (door bot gezet in _regime_sync_loop)
-        _reg_label, _reg_help = "⬛ Unknown", ""
-        _raw_reg = get_state(f"regime_{_coin}")
-        if _raw_reg:
-            try:
-                _reg = (json.loads(_raw_reg) or {}).get("regime", "UNKNOWN")
-                _reg_label, _reg_help = _REGIME_META.get(_reg, (_reg, ""))
-            except Exception:
-                pass
-
-        _live_dot = "🔴 live" if _coin in _active_coins and current_mode == "bggdsb_live" else (
-            "🟡 actief" if _coin in _active_coins else "👁 schaduw")
-        _tip = f"{_reg_help} · recency-gewogen win% over laatste {_n} trades"
-        with _col:
-            st.markdown(
-                f"<div title='{_tip}' style='text-align:center;line-height:1.3'>"
-                f"<div style='font-weight:bold;font-size:1.05em'>{_coin}</div>"
-                f"<div style='font-size:1.7em;font-weight:bold;color:{_color};margin:2px 0'>{_pct_txt}</div>"
-                f"<div style='font-size:0.78em'>{_reg_label}</div>"
-                f"<div style='font-size:0.7em;color:rgba(120,120,120,0.9)'>{_live_dot} · n={_n}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-    st.caption("Schaduw-munten draaien continu paper mee zodat je ziet welke markt nu het best bij de strategie past.")
 
     # ── Streak status ─────────────────────────────────────────────────────────
     streak_wins = int(get_state("bggdsb_streak_wins") or 0)
@@ -520,9 +514,12 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
     with col_d:
         st.markdown("&nbsp;", unsafe_allow_html=True)  # vertical align
 
-    # Coins row
-    st.markdown("**Coins**")
+    # Coins row — checkbox + geschiktheid (recency-gewogen win%) per munt.
+    # Elke munt draait op de achtergrond mee in paper (schaduw) — ook munten waar
+    # we live niet in zitten. Groen ≥70% · oranje 40–69% · rood <40%.
+    st.markdown("**Coins** — geschiktheid: 🟢 ≥70% · 🟠 40–69% · 🔴 <40%")
     saved_coins = _load_selected_coins()
+    _board = _q_scoreboard()
     coin_cols = st.columns(len(_ALL_COINS))
     selected_coins = []
     for i, coin in enumerate(_ALL_COINS):
@@ -536,9 +533,14 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             )
             if checked:
                 selected_coins.append(coin)
+            _render_coin_suitability(coin, _board, current_mode, saved_coins)
 
     if not selected_coins:
         st.warning("Selecteer minstens één coin.", icon="⚠️")
+    st.caption(
+        "Schaduw-munten draaien continu paper mee zodat je ziet welke markt nu "
+        "het best bij de strategie past — ook als je live niet in die munt zit."
+    )
 
     # Current live status
     _is_live_now = get_state("bggdsb_paper_mode") == "0"
