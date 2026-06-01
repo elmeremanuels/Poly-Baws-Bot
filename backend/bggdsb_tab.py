@@ -237,18 +237,21 @@ def bggdsb_panel() -> None:
     if last_skip:
         st.info(f"**Laatste skip:** {last_skip}", icon="ℹ️")
 
-    # ── Live window status ────────────────────────────────────────────────────
-    raw_win = get_state("bggdsb_active_window") or ""
+    # ── Live window status — één kaartje per actieve munt ────────────────────
     try:
-        win = _json.loads(raw_win) if raw_win else None
+        _wins_raw = get_state("bggdsb_active_windows") or "{}"
+        _all_wins = _json.loads(_wins_raw) if _wins_raw else {}
     except Exception:
-        win = None
+        _all_wins = {}
+    active_wins = [w for w in _all_wins.values() if w.get("secs_left", 0) > 0]
 
-    # Piep bij nieuwe live trade (window_key veranderd)
-    if win and win.get("secs_left", 0) > 0 and current_mode == "bggdsb_live":
-        _wk = win.get("window_key", "")
-        if _wk and _wk != st.session_state.get("bggdsb_last_window_key"):
-            st.session_state["bggdsb_last_window_key"] = _wk
+    # Piep bij elke NIEUWE window_key over alle actieve munten
+    if current_mode == "bggdsb_live":
+        _cur_keys = {w.get("window_key", "") for w in active_wins}
+        _prev_keys = set(st.session_state.get("bggdsb_seen_window_keys") or [])
+        _new_keys = _cur_keys - _prev_keys
+        if _new_keys:
+            st.session_state["bggdsb_seen_window_keys"] = list(_cur_keys)
             st.components.v1.html(
                 """<script>
 (function(){
@@ -270,7 +273,8 @@ def bggdsb_panel() -> None:
                 height=0,
             )
 
-    if win and win.get("secs_left", 0) > 0:
+    def _render_window_card(win: dict) -> None:
+        """Rendert één trade-kaartje voor een actieve munt."""
         coin_w  = win.get("coin", "?")
         phase   = win.get("phase", "monitoring")
         dom     = win.get("dominant_side", "?")
@@ -288,21 +292,18 @@ def bggdsb_panel() -> None:
         other_mid  = no_mid if other_side == "NO" else yes_mid
         other_sh   = no_sh  if other_side == "NO" else yes_sh
 
-        # Breakeven — computed from actual shares held
         be_ok   = tot_sp > 0 and other_sh >= tot_sp
         be_need = max(0.0, round((tot_sp - other_sh) * max(other_mid, 0.01), 2))
 
-        # Virtual P&L — mark-to-market: waarde beide posities bij huidige marktprijzen
-        # (yes_shares × yes_mid) + (no_shares × no_mid) − totaal uitgegeven
         current_value = yes_sh * yes_mid + no_sh * no_mid
         virtual_pnl = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
 
         if abs(virtual_pnl) < 1.0:
-            pnl_color = "#ff9800"   # orange — < €1 margin either way
+            pnl_color = "#ff9800"
         elif virtual_pnl > 0:
-            pnl_color = "#00c853"   # green
+            pnl_color = "#00c853"
         else:
-            pnl_color = "#ef5350"   # red
+            pnl_color = "#ef5350"
 
         phase_labels = {
             "monitoring": "🔍 Monitoring",
@@ -312,7 +313,6 @@ def bggdsb_panel() -> None:
         }
         phase_label = phase_labels.get(phase, phase)
 
-        # Row 1: identity + prices + time + virtual P&L
         r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns([2, 1, 1, 1, 1.5])
         r1c1.metric(f"**{coin_w}**", phase_label)
         r1c2.metric("YES mid", f"{yes_mid:.3f}")
@@ -327,7 +327,6 @@ def bggdsb_panel() -> None:
                 unsafe_allow_html=True,
             )
 
-        # Row 2: spend + shares per side + total
         r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
         r2c1.metric("YES €", f"€{yes_sp:.2f}")
         r2c2.metric("YES shares", f"{yes_sh:.2f}")
@@ -350,7 +349,7 @@ def bggdsb_panel() -> None:
             else:
                 st.info("**Monitoring** — markt onbeslist, bot wacht op flip-signaal (andere kant > 0.50)")
 
-        with st.expander("📋 Handmatige instructies (als bot niet reageert)"):
+        with st.expander(f"📋 Handmatige instructies {coin_w}"):
             if phase == "flipping" or (other_mid > 0.50 and other_mid > (yes_mid if dom == "YES" else no_mid)):
                 other_ask = other_mid * 1.02
                 st.markdown(f"""
@@ -381,8 +380,15 @@ Confirm buy (€15) volgt automatisch in de laatste 90s als winnaar ≥ 0.60.
 Bot wacht tot {other_side} boven 0.50 stijgt. Jij doet: NIETS.
 Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
                 """)
+
+    if active_wins:
+        for _win in active_wins:
+            _render_window_card(_win)
+            if len(active_wins) > 1:
+                st.divider()
     else:
-        st.caption("⏳ Geen actief window — bot zoekt volgende BTC window (~elke 5 min)")
+        _coins_label = ", ".join(selected_coins) if selected_coins else "munten"
+        st.caption(f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)")
 
     st.divider()
 

@@ -652,7 +652,7 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                 # Schaduw-munten tonen we NIET als het live window — anders
                 # overschrijven 4 achtergrondmunten de actieve weergave + de piep.
                 if st2 and not st2.get("is_shadow"):
-                    _sds("bggdsb_active_window", _json.dumps({
+                    _win_entry = {
                         "coin":           coin,
                         "window_key":     window_key,
                         "phase":          "holding",
@@ -669,7 +669,15 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                         "flip_spend":     round(flip_spend, 2),
                         "flip_active":    flip_active,
                         "confirm_done":   confirm_done,
-                    }))
+                    }
+                    # Meerdere coins kunnen tegelijk een window hebben — sla
+                    # per-coin op in één dict zodat de tab alle kaartjes toont.
+                    try:
+                        _all_wins = _json.loads(_gs_tick("bggdsb_active_windows") or "{}")
+                    except Exception:
+                        _all_wins = {}
+                    _all_wins[coin] = _win_entry
+                    _sds("bggdsb_active_windows", _json.dumps(_all_wins))
                 last_dash_t = loop_t
 
             await asyncio.sleep(1.5)
@@ -725,8 +733,14 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                     log.error("bggdsb_close_error", trade_id=_trade_id, error=str(_ce))
 
             _bggdsb_tranche_state.pop(window_key, None)
-        from .db_sync import set_dashboard_state as _sds2
-        _sds2("bggdsb_active_window", "")
+        from .db_sync import set_dashboard_state as _sds2, get_state as _gs2
+        import json as _json2
+        try:
+            _all_wins2 = _json2.loads(_gs2("bggdsb_active_windows") or "{}")
+        except Exception:
+            _all_wins2 = {}
+        _all_wins2.pop(coin, None)
+        _sds2("bggdsb_active_windows", _json2.dumps(_all_wins2) if _all_wins2 else "")
 
 
 async def _bggdsb_coin_tick(coin: str, shadow_only: bool = False) -> None:
