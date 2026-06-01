@@ -564,6 +564,20 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
              "lopen altijd door. Uit: munten traden continu door.",
     )
 
+    # Reverse entry experiment: koop de tegenkant van wat de markt dominant vindt.
+    # Als de bot 90% van de time de verkeerde kant kiest, is de inverse winstgevend.
+    _reverse_entry = st.checkbox(
+        "🔄 Reverse initial buy — koop de tegenkant (experimenteel)",
+        value=(get_state("bggdsb_reverse_entry") == "1"),
+        key="bggdsb_reverse_cb",
+        disabled=not bggdsb_active,
+        help="Normaal koopt de bot de dominante kant (bijv. YES 0.62). "
+             "Reverse koopt de onderkant (bijv. NO 0.38). "
+             "Test of de inverse beslissing winstgevend is.",
+    )
+    if _reverse_entry:
+        st.warning("🔄 **Reverse mode aan** — bot koopt de ONDERKANT van elke markt.", icon="🔄")
+
     # Current live status
     _is_live_now = get_state("bggdsb_paper_mode") == "0"
 
@@ -576,6 +590,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             set_dashboard_state("bggdsb_paper_mode", "1")   # altijd paper na opslaan
             set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
             set_dashboard_state("bggdsb_stop_on_loss", "1" if _stop_on_loss else "0")
+            set_dashboard_state("bggdsb_reverse_entry", "1" if _reverse_entry else "0")
             for _c in _ALL_COINS:                            # verse start: hef pauzes op
                 set_dashboard_state(f"bggdsb_halted_{_c}", "0")
             write_command("set_mode", {"mode": "bggdsb_paper"})
@@ -609,6 +624,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
                 set_dashboard_state("bggdsb_paper_mode", "0")
                 set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
                 set_dashboard_state("bggdsb_stop_on_loss", "1" if _stop_on_loss else "0")
+                set_dashboard_state("bggdsb_reverse_entry", "1" if _reverse_entry else "0")
                 for _c in _ALL_COINS:                        # verse start: hef pauzes op
                     set_dashboard_state(f"bggdsb_halted_{_c}", "0")
                 write_command("reset_kill")   # clear any active kill switch when explicitly going live

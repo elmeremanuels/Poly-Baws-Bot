@@ -911,6 +911,15 @@ async def _bggdsb_coin_tick(coin: str, shadow_only: bool = False) -> None:
         log.info("bggdsb_direction_price", coin=coin,
                  dominant=dominant_side, yes_ask=yes_ask, no_ask=no_ask)
 
+    # Reverse-entry experiment: koop de onderkant i.p.v. de dominante kant.
+    # De dom_ask_max gate werkt daarna correct — de goedkope kant zit altijd
+    # ruim onder de grens, dus markten die normaal geblokkeerd zouden zijn
+    # zijn nu juist interessant (hoge payout bij winst).
+    if _get_state("bggdsb_reverse_entry") == "1":
+        dominant_side = "NO" if dominant_side == "YES" else "YES"
+        log.info("bggdsb_entry_reversed", coin=coin, reversed_to=dominant_side,
+                 yes_ask=yes_ask, no_ask=no_ask)
+
     # Bovengrens gate: als dominant kant al te ver is gelopen, payout te klein.
     dom_ask_entry = yes_ask if dominant_side == "YES" else no_ask
     if dom_ask_entry > dom_ask_max:
