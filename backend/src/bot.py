@@ -516,10 +516,16 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             if not st:
                 break
 
-            # Re-check paper flag on every tick — user may switch mid-window
-            from .db_sync import get_state as _gs_tick
-            _paper_raw_tick = _gs_tick("bggdsb_paper_mode")
-            is_paper = bool(int(_paper_raw_tick)) if _paper_raw_tick is not None else is_paper
+            # Re-check paper flag on every tick — user may switch live/paper mid-window.
+            # MAAR: schaduw-trades (munten waar we live NIET in zitten) blijven ALTIJD
+            # paper, ongeacht de globale live-vlag. Zonder deze guard zou het
+            # hedge/flip/avg-down/confirm-deel van de hold-task echt geld uitgeven op
+            # een munt die puur schaduw zou moeten zijn — terwijl de initiële entry
+            # wél paper was. Dit veroorzaakte live posities op niet-geselecteerde munten.
+            if not st.get("is_shadow"):
+                from .db_sync import get_state as _gs_tick
+                _paper_raw_tick = _gs_tick("bggdsb_paper_mode")
+                is_paper = bool(int(_paper_raw_tick)) if _paper_raw_tick is not None else is_paper
 
             yes_mid = ws_client.get_mid_price(yes_token)
             no_mid  = ws_client.get_mid_price(no_token)
