@@ -159,16 +159,88 @@ def _bot_status() -> tuple[bool, str]:
         return False, "onbekend"
 
 
-# ── Main panel ────────────────────────────────────────────────────────────────
+# ── Live section (nested inner fragment) ──────────────────────────────────────
+
+
+def _build_card_html(win: dict) -> str:
+    """Returns HTML for one compact trade card (flexbox-safe, no st.columns)."""
+    coin_w  = win.get("coin", "?")
+    phase   = win.get("phase", "monitoring")
+    dom     = win.get("dominant_side", "?")
+    yes_sp  = float(win.get("yes_spend", 0))
+    no_sp   = float(win.get("no_spend", 0))
+    tot_sp  = yes_sp + no_sp
+    yes_mid = float(win.get("yes_mid", 0))
+    no_mid  = float(win.get("no_mid", 0))
+    secs    = int(win.get("secs_left", 0))
+    yes_sh  = float(win.get("yes_shares", 0))
+    no_sh   = float(win.get("no_shares", 0))
+
+    other_side = "NO" if dom == "YES" else "YES"
+    other_sh   = no_sh  if other_side == "NO" else yes_sh
+    be_ok      = tot_sp > 0 and other_sh >= tot_sp
+    be_need    = max(0.0, round((tot_sp - other_sh) * max(
+        (no_mid if other_side == "NO" else yes_mid), 0.01), 2))
+
+    current_value = yes_sh * yes_mid + no_sh * no_mid
+    virtual_pnl   = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
+
+    pnl_color = "#ff9800" if abs(virtual_pnl) < 1.0 else ("#00c853" if virtual_pnl > 0 else "#ef5350")
+
+    phase_icon = {"monitoring": "🔍", "flipping": "🔄", "confirmed": "✅", "done": "✔"}.get(phase, "⏳")
+    phase_txt  = {"monitoring": "Monitoring", "flipping": "Flipping",
+                  "confirmed": "Break-even", "done": "Done"}.get(phase, phase)
+
+    winner     = "YES" if yes_mid >= no_mid else "NO"
+    winner_mid = max(yes_mid, no_mid)
+    if be_ok:
+        status_color = "#00c853"
+        status_txt   = "✅ Break-even bereikt"
+    elif phase == "flipping":
+        status_color = "#ff9800"
+        status_txt   = f"🔄 Flipping → {other_side} (nog €{be_need:.2f})"
+    elif winner_mid >= 0.55:
+        status_color = "#448aff"
+        status_txt   = f"📈 {winner} dominant ({winner_mid:.2f})"
+    else:
+        status_color = "rgba(120,120,120,0.8)"
+        status_txt   = "⏳ Onbeslist"
+
+    mins = secs // 60
+    secs_rem = secs % 60
+    time_txt = f"{mins}:{secs_rem:02d}"
+
+    return (
+        f"<div style='flex:1 1 28%;min-width:200px;border:1px solid rgba(120,120,120,0.25);"
+        f"border-radius:10px;padding:12px 14px;line-height:1.45;background:rgba(0,0,0,0.05)'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>"
+        f"<span style='font-size:1.15em;font-weight:700'>{coin_w}</span>"
+        f"<span style='font-size:0.8em;color:rgba(160,160,160,0.9)'>{phase_icon} {phase_txt}</span>"
+        f"</div>"
+        f"<div style='font-size:1.5em;font-weight:bold;color:{pnl_color};margin-bottom:4px'>"
+        f"€{virtual_pnl:+.2f}</div>"
+        f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:0.8em;margin-bottom:6px'>"
+        f"<span>YES <b>{yes_mid:.3f}</b> · {yes_sh:.1f}sh · €{yes_sp:.2f}</span>"
+        f"<span>NO <b>{no_mid:.3f}</b> · {no_sh:.1f}sh · €{no_sp:.2f}</span>"
+        f"<span>💶 Totaal <b>€{tot_sp:.2f}</b></span>"
+        f"<span>⏱ <b>{time_txt}</b></span>"
+        f"</div>"
+        f"<div style='font-size:0.78em;color:{status_color};font-weight:500'>{status_txt}</div>"
+        f"</div>"
+    )
+
 
 @st.fragment(run_every=5)
-def bggdsb_panel() -> None:
+def _bggdsb_live_section() -> None:
+    """Bot/is5 status + active trade cards — auto-refreshes every 5s.
+
+    Kept as a nested inner fragment so the outer bggdsb_panel does NOT need
+    run_every, which would conflict with Streamlit's tab reconciliation when
+    the toggle changes the number of visible tabs.
+    """
     import json as _json
 
-    st.subheader("🧠 BGGDSB")
-    st.caption("*Beter Goed Gejat Dan Slecht Bedacht* — is5minfixedyet strategie 1:1")
-
-    # ── Bot + is5 status ──────────────────────────────────────────────────────
+    # Bot / is5 / mode status
     bot_online, bot_age = _bot_status()
     status = _q_is5_live()
     live = status.get("live", False)
@@ -187,15 +259,77 @@ def bggdsb_panel() -> None:
         else:
             st.info(f"⚫ **is5** offline — {last_seen}", icon="📡")
     with mode_col:
-        current_mode = get_state("mode") or "onbekend"
-        bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
-        if bggdsb_active:
-            label = "🟡 Paper" if current_mode == "bggdsb_paper" else "💸 Live"
-            st.success(f"**BGGDSB** — {label}", icon="🧠")
+        _cur_mode = get_state("mode") or "onbekend"
+        _bggdsb_on = _cur_mode in ("bggdsb_paper", "bggdsb_live")
+        if _bggdsb_on:
+            _label = "🟡 Paper" if _cur_mode == "bggdsb_paper" else "💸 Live"
+            st.success(f"**BGGDSB** — {_label}", icon="🧠")
         else:
-            st.warning(f"Modus: `{current_mode}`", icon="⚠️")
+            st.warning(f"Modus: `{_cur_mode}`", icon="⚠️")
+
+    # Active trade cards
+    try:
+        _wins_raw = get_state("bggdsb_active_windows") or "{}"
+        _all_wins = _json.loads(_wins_raw) if _wins_raw else {}
+    except Exception:
+        _all_wins = {}
+    active_wins = [w for w in _all_wins.values() if w.get("secs_left", 0) > 0]
+
+    # Sound alert for new windows in live mode
+    if _cur_mode == "bggdsb_live":
+        _cur_keys = {w.get("window_key", "") for w in active_wins}
+        _prev_keys = set(st.session_state.get("bggdsb_seen_window_keys") or [])
+        _new_keys = _cur_keys - _prev_keys
+        if _new_keys:
+            st.session_state["bggdsb_seen_window_keys"] = list(_cur_keys)
+            st.components.v1.html(
+                """<script>
+(function(){
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.3);
+  } catch(e) {}
+})();
+</script>""",
+                height=0,
+            )
+
+    if active_wins:
+        _cards_inner = "".join(_build_card_html(w) for w in active_wins)
+    else:
+        _coins_label = ", ".join(_load_selected_coins()) or "munten"
+        _cards_inner = (
+            f"<span style='color:rgba(150,150,150,0.8);font-size:0.9em'>"
+            f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)</span>"
+        )
+    st.markdown(
+        f"<div style='display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px'>{_cards_inner}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ── Main panel ────────────────────────────────────────────────────────────────
+
+@st.fragment  # no run_every — inner _bggdsb_live_section handles 5s auto-refresh
+def bggdsb_panel() -> None:
+    st.subheader("🧠 BGGDSB")
+    st.caption("*Beter Goed Gejat Dan Slecht Bedacht* — is5minfixedyet strategie 1:1")
+
+    _bggdsb_live_section()
 
     st.divider()
+
+    current_mode = get_state("mode") or "onbekend"
+    bggdsb_active = current_mode in ("bggdsb_paper", "bggdsb_live")
 
     # ── Mode filter voor stats + tabel ───────────────────────────────────────
     _mode_options = {"💸 Alleen live": "bggdsb_live", "🟡 Alleen paper": "bggdsb_paper", "📊 Alle": None}
@@ -236,122 +370,6 @@ def bggdsb_panel() -> None:
     last_skip = get_state("bggdsb_last_skip_reason") or ""
     if last_skip:
         st.info(f"**Laatste skip:** {last_skip}", icon="ℹ️")
-
-    # ── Live window status — één kaartje per actieve munt ────────────────────
-    try:
-        _wins_raw = get_state("bggdsb_active_windows") or "{}"
-        _all_wins = _json.loads(_wins_raw) if _wins_raw else {}
-    except Exception:
-        _all_wins = {}
-    active_wins = [w for w in _all_wins.values() if w.get("secs_left", 0) > 0]
-
-    # Piep bij elke NIEUWE window_key over alle actieve munten
-    if current_mode == "bggdsb_live":
-        _cur_keys = {w.get("window_key", "") for w in active_wins}
-        _prev_keys = set(st.session_state.get("bggdsb_seen_window_keys") or [])
-        _new_keys = _cur_keys - _prev_keys
-        if _new_keys:
-            st.session_state["bggdsb_seen_window_keys"] = list(_cur_keys)
-            st.components.v1.html(
-                """<script>
-(function(){
-  try {
-    var ctx = new (window.AudioContext || window.webkitAudioContext)();
-    var osc = ctx.createOscillator();
-    var gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(880, ctx.currentTime);
-    gain.gain.setValueAtTime(0.25, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.3);
-  } catch(e) {}
-})();
-</script>""",
-                height=0,
-            )
-
-    def _build_card_html(win: dict) -> str:
-        """Returns HTML string for one compact trade card (flexbox-safe, no st.columns)."""
-        coin_w  = win.get("coin", "?")
-        phase   = win.get("phase", "monitoring")
-        dom     = win.get("dominant_side", "?")
-        yes_sp  = float(win.get("yes_spend", 0))
-        no_sp   = float(win.get("no_spend", 0))
-        tot_sp  = yes_sp + no_sp
-        yes_mid = float(win.get("yes_mid", 0))
-        no_mid  = float(win.get("no_mid", 0))
-        secs    = int(win.get("secs_left", 0))
-        yes_sh  = float(win.get("yes_shares", 0))
-        no_sh   = float(win.get("no_shares", 0))
-
-        other_side = "NO" if dom == "YES" else "YES"
-        other_sh   = no_sh  if other_side == "NO" else yes_sh
-        be_ok      = tot_sp > 0 and other_sh >= tot_sp
-        be_need    = max(0.0, round((tot_sp - other_sh) * max(
-            (no_mid if other_side == "NO" else yes_mid), 0.01), 2))
-
-        current_value = yes_sh * yes_mid + no_sh * no_mid
-        virtual_pnl   = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
-
-        pnl_color = "#ff9800" if abs(virtual_pnl) < 1.0 else ("#00c853" if virtual_pnl > 0 else "#ef5350")
-
-        phase_icon = {"monitoring": "🔍", "flipping": "🔄", "confirmed": "✅", "done": "✔"}.get(phase, "⏳")
-        phase_txt  = {"monitoring": "Monitoring", "flipping": "Flipping",
-                      "confirmed": "Break-even", "done": "Done"}.get(phase, phase)
-
-        winner     = "YES" if yes_mid >= no_mid else "NO"
-        winner_mid = max(yes_mid, no_mid)
-        if be_ok:
-            status_color = "#00c853"
-            status_txt   = "✅ Break-even bereikt"
-        elif phase == "flipping":
-            status_color = "#ff9800"
-            status_txt   = f"🔄 Flipping → {other_side} (nog €{be_need:.2f})"
-        elif winner_mid >= 0.55:
-            status_color = "#448aff"
-            status_txt   = f"📈 {winner} dominant ({winner_mid:.2f})"
-        else:
-            status_color = "rgba(120,120,120,0.8)"
-            status_txt   = "⏳ Onbeslist"
-
-        mins = secs // 60
-        secs_rem = secs % 60
-        time_txt = f"{mins}:{secs_rem:02d}"
-
-        return (
-            f"<div style='flex:1 1 28%;min-width:200px;border:1px solid rgba(120,120,120,0.25);"
-            f"border-radius:10px;padding:12px 14px;line-height:1.45;background:rgba(0,0,0,0.05)'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>"
-            f"<span style='font-size:1.15em;font-weight:700'>{coin_w}</span>"
-            f"<span style='font-size:0.8em;color:rgba(160,160,160,0.9)'>{phase_icon} {phase_txt}</span>"
-            f"</div>"
-            f"<div style='font-size:1.5em;font-weight:bold;color:{pnl_color};margin-bottom:4px'>"
-            f"€{virtual_pnl:+.2f}</div>"
-            f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:0.8em;margin-bottom:6px'>"
-            f"<span>YES <b>{yes_mid:.3f}</b> · {yes_sh:.1f}sh · €{yes_sp:.2f}</span>"
-            f"<span>NO <b>{no_mid:.3f}</b> · {no_sh:.1f}sh · €{no_sp:.2f}</span>"
-            f"<span>💶 Totaal <b>€{tot_sp:.2f}</b></span>"
-            f"<span>⏱ <b>{time_txt}</b></span>"
-            f"</div>"
-            f"<div style='font-size:0.78em;color:{status_color};font-weight:500'>{status_txt}</div>"
-            f"</div>"
-        )
-
-    if active_wins:
-        _cards_inner = "".join(_build_card_html(w) for w in active_wins)
-    else:
-        _coins_label = ", ".join(_load_selected_coins()) or "munten"
-        _cards_inner = (
-            f"<span style='color:rgba(150,150,150,0.8);font-size:0.9em'>"
-            f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)</span>"
-        )
-    st.markdown(
-        f"<div style='display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px'>{_cards_inner}</div>",
-        unsafe_allow_html=True,
-    )
 
     st.divider()
 
