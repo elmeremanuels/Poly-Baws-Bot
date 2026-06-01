@@ -2589,7 +2589,9 @@ with st.sidebar:
 _base_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging"]
 _adv_tab_names  = ["📊 Analytics", "💼 Portfolio", "🐋 Whales"]
 
-_all_tab_names = _base_tab_names + (_adv_tab_names if show_advanced else [])
+# Always render all tabs — variable tab count + @st.fragment(run_every=5) causes DOM
+# reconciliation failures that break the toggle. Content is gated by show_advanced instead.
+_all_tab_names = _base_tab_names + _adv_tab_names
 _all_tabs = st.tabs(_all_tab_names)
 
 # Map tab objects by name
@@ -2640,28 +2642,38 @@ with tab_learning:
 with tab_guard:
     coin_protection_panel()
 
-if show_advanced:
-    tab_analytics = _tab_map["📊 Analytics"]
-    tab_portfolio = _tab_map["💼 Portfolio"]
-    tab_whale     = _tab_map["🐋 Whales"]
+tab_analytics = _tab_map["📊 Analytics"]
+tab_portfolio = _tab_map["💼 Portfolio"]
+tab_whale     = _tab_map["🐋 Whales"]
 
-    with tab_analytics:
+_adv_hint = "Zet **🔬 Toon geavanceerde tabs** aan in de sidebar om deze inhoud te zien."
+
+with tab_analytics:
+    if show_advanced:
         if _tabs_ready:
             analytics_panel()
         else:
             _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
+    else:
+        st.caption(_adv_hint)
 
-    with tab_portfolio:
+with tab_portfolio:
+    if show_advanced:
         if _tabs_ready:
             _portfolio_panel()
         else:
             _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
+    else:
+        st.caption(_adv_hint)
 
-    with tab_whale:
+with tab_whale:
+    if show_advanced:
         if _tabs_ready:
             _whale_panel()
         else:
             _tab_loading("🐋 Whales", "Whale data wordt geladen…")
+    else:
+        st.caption(_adv_hint)
 
 # ── Auto-advance naar volledig dashboard ───────────────────────────────────────
 # Na render 2 (skeleton pass) → trigger render 3 (volledig).
