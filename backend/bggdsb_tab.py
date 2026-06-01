@@ -273,8 +273,8 @@ def bggdsb_panel() -> None:
                 height=0,
             )
 
-    def _render_window_card(win: dict) -> None:
-        """Rendert één trade-kaartje voor een actieve munt."""
+    def _render_window_card(container, win: dict) -> None:
+        """Compacte trade-kaart in een Streamlit column-container."""
         coin_w  = win.get("coin", "?")
         phase   = win.get("phase", "monitoring")
         dom     = win.get("dominant_side", "?")
@@ -288,104 +288,65 @@ def bggdsb_panel() -> None:
         no_sh   = float(win.get("no_shares", 0))
 
         other_side = "NO" if dom == "YES" else "YES"
-        other_sp   = no_sp  if other_side == "NO" else yes_sp
-        other_mid  = no_mid if other_side == "NO" else yes_mid
         other_sh   = no_sh  if other_side == "NO" else yes_sh
-
-        be_ok   = tot_sp > 0 and other_sh >= tot_sp
-        be_need = max(0.0, round((tot_sp - other_sh) * max(other_mid, 0.01), 2))
+        be_ok      = tot_sp > 0 and other_sh >= tot_sp
+        be_need    = max(0.0, round((tot_sp - other_sh) * max(
+            (no_mid if other_side == "NO" else yes_mid), 0.01), 2))
 
         current_value = yes_sh * yes_mid + no_sh * no_mid
-        virtual_pnl = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
+        virtual_pnl   = round(current_value - tot_sp, 2) if tot_sp > 0 else 0.0
 
-        if abs(virtual_pnl) < 1.0:
-            pnl_color = "#ff9800"
-        elif virtual_pnl > 0:
-            pnl_color = "#00c853"
-        else:
-            pnl_color = "#ef5350"
+        pnl_color = "#ff9800" if abs(virtual_pnl) < 1.0 else ("#00c853" if virtual_pnl > 0 else "#ef5350")
 
-        phase_labels = {
-            "monitoring": "🔍 Monitoring",
-            "flipping":   "🔄 Flipping",
-            "confirmed":  "✅ Break-even",
-            "done":       "✔ Done",
-        }
-        phase_label = phase_labels.get(phase, phase)
+        phase_icon = {"monitoring": "🔍", "flipping": "🔄", "confirmed": "✅", "done": "✔"}.get(phase, "⏳")
+        phase_txt  = {"monitoring": "Monitoring", "flipping": "Flipping",
+                      "confirmed": "Break-even", "done": "Done"}.get(phase, phase)
 
-        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns([2, 1, 1, 1, 1.5])
-        r1c1.metric(f"**{coin_w}**", phase_label)
-        r1c2.metric("YES mid", f"{yes_mid:.3f}")
-        r1c3.metric("NO mid", f"{no_mid:.3f}")
-        r1c4.metric("⏱ Resterend", f"{secs}s")
-        with r1c5:
-            st.markdown(
-                "<p style='font-size:0.85em;color:rgba(49,51,63,0.6);margin:0 0 4px 0;'>"
-                "Virtuele P&amp;L</p>"
-                f"<p style='font-size:1.6em;font-weight:bold;color:{pnl_color};margin:0;'>"
-                f"€{virtual_pnl:+.2f}</p>",
-                unsafe_allow_html=True,
-            )
-
-        r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
-        r2c1.metric("YES €", f"€{yes_sp:.2f}")
-        r2c2.metric("YES shares", f"{yes_sh:.2f}")
-        r2c3.metric("NO €", f"€{no_sp:.2f}")
-        r2c4.metric("NO shares", f"{no_sh:.2f}")
-        r2c5.metric("Totaal €", f"€{tot_sp:.2f}")
-
+        winner     = "YES" if yes_mid >= no_mid else "NO"
+        winner_mid = max(yes_mid, no_mid)
         if be_ok:
-            st.success(f"**BREAK-EVEN BEREIKT** — bot koopt extra {other_side} voor maximale winst")
+            status_color = "#00c853"
+            status_txt   = f"✅ Break-even bereikt"
         elif phase == "flipping":
-            st.warning(
-                f"**FLIPPING → {other_side}** — nog €{be_need:.2f} nodig voor break-even "
-                f"(bot koopt automatisch in tranches)"
-            )
+            status_color = "#ff9800"
+            status_txt   = f"🔄 Flipping → {other_side} (nog €{be_need:.2f})"
+        elif winner_mid >= 0.55:
+            status_color = "#448aff"
+            status_txt   = f"📈 {winner} dominant ({winner_mid:.2f})"
         else:
-            winner_mid = max(yes_mid, no_mid)
-            winner = "YES" if yes_mid >= no_mid else "NO"
-            if winner_mid >= 0.55:
-                st.info(f"**{dom} dominant** — winnaar lijkt {winner} ({winner_mid:.2f}), bot monitort")
-            else:
-                st.info("**Monitoring** — markt onbeslist, bot wacht op flip-signaal (andere kant > 0.50)")
+            status_color = "rgba(120,120,120,0.8)"
+            status_txt   = "⏳ Onbeslist"
 
-        with st.expander(f"📋 Handmatige instructies {coin_w}"):
-            if phase == "flipping" or (other_mid > 0.50 and other_mid > (yes_mid if dom == "YES" else no_mid)):
-                other_ask = other_mid * 1.02
-                st.markdown(f"""
-**BOT IS AAN HET FLIPPEN — {other_side} is nu de favoriet**
+        mins = secs // 60
+        secs_rem = secs % 60
+        time_txt = f"{mins}:{secs_rem:02d}"
 
-Wat de bot doet: elke ~3s een tranche op {other_side} kopen
-
-Als de bot stokt:
-1. Open Polymarket → zoek actief {coin_w} window
-2. Koop **{other_side}** voor **€{min(be_need + 5, 20):.0f}** (ask ~{other_ask:.3f})
-3. Herhaal tot "BREAK-EVEN BEREIKT" verschijnt
-
-Huidige stand: €{other_sp:.1f} op {other_side} / €{be_need:.1f} nog nodig
-                """)
-            elif phase == "confirmed" or be_ok:
-                winner = "YES" if yes_mid >= no_mid else "NO"
-                winner_mid_v = max(yes_mid, no_mid)
-                st.markdown(f"""
-**BREAK-EVEN BEREIKT — winnaar is {winner} ({winner_mid_v:.2f})**
-
-Bot koopt nog extra {winner} voor meer winst.
-Confirm buy (€15) volgt automatisch in de laatste 90s als winnaar ≥ 0.60.
-                """)
-            else:
-                st.markdown(f"""
-**MONITORING — markt onbeslist**
-
-Bot wacht tot {other_side} boven 0.50 stijgt. Jij doet: NIETS.
-Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
-                """)
+        container.markdown(
+            f"""<div style="border:1px solid rgba(120,120,120,0.25);border-radius:10px;
+                padding:12px 14px;line-height:1.45;background:rgba(0,0,0,0.05)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <span style="font-size:1.15em;font-weight:700">{coin_w}</span>
+    <span style="font-size:0.8em;color:rgba(160,160,160,0.9)">{phase_icon} {phase_txt}</span>
+  </div>
+  <div style="font-size:1.5em;font-weight:bold;color:{pnl_color};margin-bottom:4px">
+    €{virtual_pnl:+.2f}
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:0.8em;margin-bottom:6px">
+    <span>YES <b>{yes_mid:.3f}</b> · {yes_sh:.1f}sh · €{yes_sp:.2f}</span>
+    <span>NO <b>{no_mid:.3f}</b> · {no_sh:.1f}sh · €{no_sp:.2f}</span>
+    <span>💶 Totaal <b>€{tot_sp:.2f}</b></span>
+    <span>⏱ <b>{time_txt}</b></span>
+  </div>
+  <div style="font-size:0.78em;color:{status_color};font-weight:500">{status_txt}</div>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
     if active_wins:
-        for _win in active_wins:
-            _render_window_card(_win)
-            if len(active_wins) > 1:
-                st.divider()
+        # 3 kaartjes per rij
+        cols = st.columns(min(len(active_wins), 3))
+        for i, _win in enumerate(active_wins):
+            _render_window_card(cols[i % 3], _win)
     else:
         _coins_label = ", ".join(_load_selected_coins()) or "munten"
         st.caption(f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)")
