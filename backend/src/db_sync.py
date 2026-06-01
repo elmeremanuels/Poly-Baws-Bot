@@ -1552,14 +1552,22 @@ def get_is5_recent_side(coin: str, minutes: int = 15) -> str | None:
         return None
 
 
-def get_bggdsb_stats() -> dict:
-    """Performance stats for trades with router_bucket = 'bggdsb'."""
+def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
+    """Performance stats for trades with router_bucket = 'bggdsb'.
+
+    mode_filter: 'bggdsb_live', 'bggdsb_paper', or None (alle modes).
+    """
     if not _db_path.exists():
         return {}
     try:
         with _conn() as conn:
+            where = "router_bucket = 'bggdsb' AND status IN ('closed', 'resolved')"
+            params: list = []
+            if mode_filter:
+                where += " AND mode = ?"
+                params.append(mode_filter)
             row = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS n,
                     ROUND(AVG(CASE WHEN net_pnl > 0 THEN 1.0 ELSE 0.0 END)*100, 1) AS win_pct,
@@ -1567,32 +1575,41 @@ def get_bggdsb_stats() -> dict:
                     ROUND(AVG(net_pnl), 4) AS avg_pnl,
                     ROUND(AVG(entry_yes_price), 3) AS gem_entry_prijs
                 FROM trades
-                WHERE router_bucket = 'bggdsb'
-                  AND status IN ('closed', 'resolved')
-                """
+                WHERE {where}
+                """,
+                params,
             ).fetchone()
         return dict(row) if row else {}
     except Exception:
         return {}
 
 
-def get_bggdsb_trades(limit: int = 100) -> list[dict]:
-    """Recent bggdsb trades ordered by creation time."""
+def get_bggdsb_trades(limit: int = 100, mode_filter: str | None = None) -> list[dict]:
+    """Recent bggdsb trades ordered by creation time.
+
+    mode_filter: 'bggdsb_live', 'bggdsb_paper', or None (alle modes).
+    """
     if not _db_path.exists():
         return []
     try:
         with _conn() as conn:
+            where = "router_bucket = 'bggdsb'"
+            params: list = []
+            if mode_filter:
+                where += " AND mode = ?"
+                params.append(mode_filter)
+            params.append(limit)
             rows = conn.execute(
-                """
-                SELECT trade_id, created_at, coin, winner_side,
+                f"""
+                SELECT trade_id, created_at, coin, mode, winner_side,
                        entry_yes_price, entry_no_price, yes_size, no_size,
                        winner_exit_reason, net_pnl, status
                 FROM trades
-                WHERE router_bucket = 'bggdsb'
+                WHERE {where}
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
         return [dict(r) for r in rows]
     except Exception:

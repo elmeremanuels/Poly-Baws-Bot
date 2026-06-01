@@ -37,12 +37,12 @@ def _q_is5_live() -> dict:
     return is5_live_status()
 
 @st.cache_data(ttl=60)
-def _q_stats() -> dict:
-    return get_bggdsb_stats()
+def _q_stats(mode_filter: str | None = None) -> dict:
+    return get_bggdsb_stats(mode_filter=mode_filter)
 
 @st.cache_data(ttl=30)
-def _q_trades(limit: int = 100) -> list[dict]:
-    return get_bggdsb_trades(limit=limit)
+def _q_trades(limit: int = 100, mode_filter: str | None = None) -> list[dict]:
+    return get_bggdsb_trades(limit=limit, mode_filter=mode_filter)
 
 
 def _load_selected_coins() -> list[str]:
@@ -112,8 +112,18 @@ def bggdsb_panel() -> None:
 
     st.divider()
 
+    # ── Mode filter voor stats + tabel ───────────────────────────────────────
+    _mode_options = {"💸 Alleen live": "bggdsb_live", "🟡 Alleen paper": "bggdsb_paper", "📊 Alle": None}
+    _default_mode_label = "💸 Alleen live" if current_mode == "bggdsb_live" else "🟡 Alleen paper" if current_mode == "bggdsb_paper" else "📊 Alle"
+    _selected_mode_label = st.radio(
+        "Toon trades van", list(_mode_options.keys()),
+        index=list(_mode_options.keys()).index(_default_mode_label),
+        horizontal=True, key="bggdsb_mode_filter",
+    )
+    _mode_filter = _mode_options[_selected_mode_label]
+
     # ── Performance metrics ───────────────────────────────────────────────────
-    stats = _q_stats()
+    stats = _q_stats(mode_filter=_mode_filter)
     if stats and stats.get("n", 0) > 0:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Trades", stats["n"])
@@ -267,7 +277,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
 
     # ── Recente trades ────────────────────────────────────────────────────────
     st.markdown("**Recente trades**")
-    trades = _q_trades()
+    trades = _q_trades(mode_filter=_mode_filter)
     if not trades:
         st.caption("Geen BGGDSB trades gevonden.")
     else:
