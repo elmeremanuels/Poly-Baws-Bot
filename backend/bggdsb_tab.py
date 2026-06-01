@@ -159,6 +159,32 @@ def bggdsb_panel() -> None:
     except Exception:
         win = None
 
+    # Piep bij nieuwe live trade (window_key veranderd)
+    if win and win.get("secs_left", 0) > 0 and current_mode == "bggdsb_live":
+        _wk = win.get("window_key", "")
+        if _wk and _wk != st.session_state.get("bggdsb_last_window_key"):
+            st.session_state["bggdsb_last_window_key"] = _wk
+            st.components.v1.html(
+                """<script>
+(function(){
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.3);
+  } catch(e) {}
+})();
+</script>""",
+                height=0,
+            )
+
     if win and win.get("secs_left", 0) > 0:
         coin_w  = win.get("coin", "?")
         phase   = win.get("phase", "monitoring")
