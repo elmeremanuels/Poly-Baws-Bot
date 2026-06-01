@@ -720,12 +720,16 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
         _sds2("bggdsb_active_window", "")
 
 
-async def _bggdsb_coin_tick(coin: str) -> None:
+async def _bggdsb_coin_tick(coin: str, shadow_only: bool = False) -> None:
     """
     is5minfixedyet strategie 1:1:
     1. Market competitive gate (0.10-0.90 beide kanten)
     2. Conviction entry: koop dominant kant voor volledig budget
     3. Start window flip task die dynamisch de winnaar achtervolgt
+
+    shadow_only=True forceert ALLE munten als schaduw paper-trade — gebruikt
+    door de altijd-aan _bggdsb_shadow_loop zodat geschiktheidsdata blijft stromen
+    ook als we niet in een BGGDSB-modus staan.
     """
     import json as _json
     from .db_sync import get_state as _get_state, set_dashboard_state as _sds_tick
@@ -742,7 +746,8 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         allowed_coins = _json.loads(_coins_raw) if _coins_raw else bggdsb_cfg.get("coins", ["BTC"])
     except Exception:
         allowed_coins = bggdsb_cfg.get("coins", ["BTC"])
-    is_active_coin = coin in allowed_coins
+    # shadow_only (altijd-aan loop): geen enkele munt is "actief" → alles paper.
+    is_active_coin = (coin in allowed_coins) and not shadow_only
 
     # Schaduw-munten mogen de skip-reden van de actieve munt niet overschrijven.
     def _set_skip_reason(reason: str) -> None:
@@ -768,14 +773,19 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         log.debug("bggdsb_flip_already_running", coin=coin, window_key=window_key)
         return
 
-    if has_traded_window(coin, window_ts):
+    # Schaduw-ticks negeren de GLOBALE window-registry: die is gedeeld met andere
+    # strategieën (signal_trader/straddle). Anders zou een window dat een andere
+    # modus al claimde de schaduw blokkeren — en andersom. De flip-task guard
+    # hierboven + de timing-gates hieronder voorkomen dubbele entry binnen één window.
+    if not shadow_only and has_traded_window(coin, window_ts):
         log.debug("bggdsb_window_already_traded", coin=coin, window_ts=window_ts)
         return
 
     # Skip windows that started before this bot process — prevents mid-window re-entry
     # after a restart where tranche state is lost and conviction may have reversed.
     if _bggdsb_startup_ts and market["window_start"] < _bggdsb_startup_ts:
-        register_window_trade(coin, window_ts)
+        if not shadow_only:
+            register_window_trade(coin, window_ts)
         log.info("bggdsb_skip_preboot_window", coin=coin,
                  window_ts=window_ts,
                  started_secs_before_boot=round(
@@ -927,7 +937,9 @@ async def _bggdsb_coin_tick(coin: str) -> None:
         remove_active_trade(trade["trade_id"])
         return
 
-    register_window_trade(coin, window_ts)
+    # Schaduw-ticks registreren NIET in de globale registry (zie toelichting boven).
+    if not shadow_only:
+        register_window_trade(coin, window_ts)
 
     # Start window hold task (Optie B: hold dominant side to expiry, tiny hedge only)
     # Gebruik werkelijke fill-prijs voor spend (niet dom_ask_entry die kan afwijken bij fill)
@@ -1067,6 +1079,29 @@ async def _heartbeat_loop() -> None:
             await save_dashboard_state("heartbeat", datetime.now(timezone.utc).isoformat())
         except Exception as e:
             log.warning("heartbeat_write_failed", error=str(e))
+        await asyncio.sleep(5)
+
+
+async def _bggdsb_shadow_loop() -> None:
+    """Altijd-aan achtergrond paper-shadow van ALLE munten voor het geschiktheidsbord.
+
+    Draait ongeacht de modus zodat de munt-geschiktheid blijft updaten ook als de
+    bot niet in een BGGDSB-modus staat of de strategie 'uit' is. Puur paper —
+    kost nooit echt geld. Slaat over wanneer we al in een BGGDSB-modus zitten,
+    want dan handelt _coin_loop de BGGDSB-ticks (actief + schaduw) al af.
+    """
+    # Korte startvertraging zodat scanner + WS eerst markten/orderbooks laden.
+    await asyncio.sleep(20)
+    while True:
+        try:
+            if get_mode() not in ("bggdsb_paper", "bggdsb_live"):
+                for coin in COINS:
+                    try:
+                        await _bggdsb_coin_tick(coin, shadow_only=True)
+                    except Exception as e:
+                        log.error("bggdsb_shadow_loop_error", coin=coin, error=str(e))
+        except Exception as e:
+            log.error("bggdsb_shadow_loop_outer_error", error=str(e))
         await asyncio.sleep(5)
 
 
@@ -1263,6 +1298,7 @@ async def run_bot() -> None:
         asyncio.create_task(_heartbeat_loop()),
         asyncio.create_task(_portfolio_sync_loop()),
         asyncio.create_task(_regime_sync_loop()),
+        asyncio.create_task(_bggdsb_shadow_loop()),
         asyncio.create_task(_oracle_temperature_loop()),
         asyncio.create_task(_oracle_per_coin_loop()),
         asyncio.create_task(asset_price_feed.run()),
