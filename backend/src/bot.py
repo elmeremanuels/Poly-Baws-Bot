@@ -758,6 +758,16 @@ async def _bggdsb_coin_tick(coin: str, shadow_only: bool = False) -> None:
         except Exception:
             pass
 
+    # Stop-bij-verlies: na een verlies gaat deze munt niet meer LIVE de markt in.
+    # We demoten 'm naar schaduw (paper) i.p.v. helemaal stoppen, zodat de
+    # geschiktheidsscore blijft updaten — handig om te zien wanneer je kunt
+    # hervatten. Geen echt geld meer op deze munt tot handmatige hervatting.
+    if (is_active_coin
+            and _get_state("bggdsb_stop_on_loss") == "1"
+            and _get_state(f"bggdsb_halted_{coin}") == "1"):
+        is_active_coin = False
+        log.debug("bggdsb_coin_halted_demoted_to_shadow", coin=coin)
+
     market = scanner.get_current_bggdsb_market(coin)
     if not market or not market.get("window_start"):
         log.info("bggdsb_no_market", coin=coin)

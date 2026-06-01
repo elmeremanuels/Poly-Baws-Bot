@@ -534,12 +534,34 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             if checked:
                 selected_coins.append(coin)
             _render_coin_suitability(coin, _board, current_mode, saved_coins)
+            # Stop-bij-verlies: gepauzeerd na een verlies → toon hervat-knop
+            if get_state(f"bggdsb_halted_{coin}") == "1":
+                st.markdown(
+                    "<div style='color:#ef5350;font-size:0.72em;font-weight:bold'>"
+                    "⏸ gepauzeerd na verlies</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("▶ Hervat", key=f"bggdsb_resume_{coin}"):
+                    set_dashboard_state(f"bggdsb_halted_{coin}", "0")
+                    st.rerun()
 
     if not selected_coins:
         st.warning("Selecteer minstens één coin.", icon="⚠️")
     st.caption(
         "Schaduw-munten draaien continu paper mee zodat je ziet welke markt nu "
         "het best bij de strategie past — ook als je live niet in die munt zit."
+    )
+
+    # Stop-bij-verlies toggle: na een verlies gaat die munt niet de volgende
+    # markt in. Wint 'ie, dan gewoon door. Per munt, handmatig hervatten.
+    _stop_on_loss = st.checkbox(
+        "🛑 Stop bij verlies — pauzeer een munt na elk verlies (per munt)",
+        value=(get_state("bggdsb_stop_on_loss") == "1"),
+        key="bggdsb_stop_on_loss_cb",
+        disabled=not bggdsb_active,
+        help="Aan: verliest een munt een window, dan stopt die munt met nieuwe "
+             "entries tot je 'Hervat' klikt. Winst → gewoon door. Schaduw-trades "
+             "lopen altijd door. Uit: munten traden continu door.",
     )
 
     # Current live status
@@ -553,6 +575,9 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
             set_dashboard_state("bggdsb_paper_mode", "1")   # altijd paper na opslaan
             set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
+            set_dashboard_state("bggdsb_stop_on_loss", "1" if _stop_on_loss else "0")
+            for _c in _ALL_COINS:                            # verse start: hef pauzes op
+                set_dashboard_state(f"bggdsb_halted_{_c}", "0")
             write_command("set_mode", {"mode": "bggdsb_paper"})
             coins_str = ", ".join(selected_coins)
             st.success(
@@ -583,6 +608,9 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
                 set_dashboard_state("bggdsb_is5_signal_weight", str(is5_weight))
                 set_dashboard_state("bggdsb_paper_mode", "0")
                 set_dashboard_state("bggdsb_coins", json.dumps(selected_coins))
+                set_dashboard_state("bggdsb_stop_on_loss", "1" if _stop_on_loss else "0")
+                for _c in _ALL_COINS:                        # verse start: hef pauzes op
+                    set_dashboard_state(f"bggdsb_halted_{_c}", "0")
                 write_command("reset_kill")   # clear any active kill switch when explicitly going live
                 write_command("set_mode", {"mode": "bggdsb_live"})
                 st.error(

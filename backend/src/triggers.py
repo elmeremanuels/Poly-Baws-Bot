@@ -1617,6 +1617,21 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     except Exception:
         pass
 
+    # BGGDSB stop-bij-verlies (per munt): pauzeer nieuwe entries voor deze munt
+    # na een verlies. Schaduw-trades tellen niet mee — alleen echte/actieve trades.
+    try:
+        if (trade.get("router_bucket") == "bggdsb"
+                and trade.get("triggered_by") != "bggdsb_shadow"
+                and net_pnl <= 0):
+            from .db_sync import get_state as _gs2, set_dashboard_state as _sds2
+            if _gs2("bggdsb_stop_on_loss") == "1":
+                _lc = trade.get("coin", "")
+                if _lc:
+                    _sds2(f"bggdsb_halted_{_lc}", "1")
+                    log.info("bggdsb_halted_after_loss", coin=_lc, net_pnl=net_pnl)
+    except Exception:
+        pass
+
     await persist_trade(trade_id)
     await write_event(trade_id, "trade_closed", trade["coin"], {
         "reason": reason, "net_pnl": net_pnl, "fill_price": fill_price
