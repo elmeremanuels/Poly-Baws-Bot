@@ -273,8 +273,8 @@ def bggdsb_panel() -> None:
                 height=0,
             )
 
-    def _render_window_card(container, win: dict) -> None:
-        """Compacte trade-kaart in een Streamlit column-container."""
+    def _build_card_html(win: dict) -> str:
+        """Returns HTML string for one compact trade card (flexbox-safe, no st.columns)."""
         coin_w  = win.get("coin", "?")
         phase   = win.get("phase", "monitoring")
         dom     = win.get("dominant_side", "?")
@@ -306,7 +306,7 @@ def bggdsb_panel() -> None:
         winner_mid = max(yes_mid, no_mid)
         if be_ok:
             status_color = "#00c853"
-            status_txt   = f"✅ Break-even bereikt"
+            status_txt   = "✅ Break-even bereikt"
         elif phase == "flipping":
             status_color = "#ff9800"
             status_txt   = f"🔄 Flipping → {other_side} (nog €{be_need:.2f})"
@@ -321,35 +321,37 @@ def bggdsb_panel() -> None:
         secs_rem = secs % 60
         time_txt = f"{mins}:{secs_rem:02d}"
 
-        container.markdown(
-            f"""<div style="border:1px solid rgba(120,120,120,0.25);border-radius:10px;
-                padding:12px 14px;line-height:1.45;background:rgba(0,0,0,0.05)">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <span style="font-size:1.15em;font-weight:700">{coin_w}</span>
-    <span style="font-size:0.8em;color:rgba(160,160,160,0.9)">{phase_icon} {phase_txt}</span>
-  </div>
-  <div style="font-size:1.5em;font-weight:bold;color:{pnl_color};margin-bottom:4px">
-    €{virtual_pnl:+.2f}
-  </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:0.8em;margin-bottom:6px">
-    <span>YES <b>{yes_mid:.3f}</b> · {yes_sh:.1f}sh · €{yes_sp:.2f}</span>
-    <span>NO <b>{no_mid:.3f}</b> · {no_sh:.1f}sh · €{no_sp:.2f}</span>
-    <span>💶 Totaal <b>€{tot_sp:.2f}</b></span>
-    <span>⏱ <b>{time_txt}</b></span>
-  </div>
-  <div style="font-size:0.78em;color:{status_color};font-weight:500">{status_txt}</div>
-</div>""",
-            unsafe_allow_html=True,
+        return (
+            f"<div style='flex:1 1 28%;min-width:200px;border:1px solid rgba(120,120,120,0.25);"
+            f"border-radius:10px;padding:12px 14px;line-height:1.45;background:rgba(0,0,0,0.05)'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>"
+            f"<span style='font-size:1.15em;font-weight:700'>{coin_w}</span>"
+            f"<span style='font-size:0.8em;color:rgba(160,160,160,0.9)'>{phase_icon} {phase_txt}</span>"
+            f"</div>"
+            f"<div style='font-size:1.5em;font-weight:bold;color:{pnl_color};margin-bottom:4px'>"
+            f"€{virtual_pnl:+.2f}</div>"
+            f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:0.8em;margin-bottom:6px'>"
+            f"<span>YES <b>{yes_mid:.3f}</b> · {yes_sh:.1f}sh · €{yes_sp:.2f}</span>"
+            f"<span>NO <b>{no_mid:.3f}</b> · {no_sh:.1f}sh · €{no_sp:.2f}</span>"
+            f"<span>💶 Totaal <b>€{tot_sp:.2f}</b></span>"
+            f"<span>⏱ <b>{time_txt}</b></span>"
+            f"</div>"
+            f"<div style='font-size:0.78em;color:{status_color};font-weight:500'>{status_txt}</div>"
+            f"</div>"
         )
 
     if active_wins:
-        # 3 kaartjes per rij
-        cols = st.columns(min(len(active_wins), 3))
-        for i, _win in enumerate(active_wins):
-            _render_window_card(cols[i % 3], _win)
+        _cards_inner = "".join(_build_card_html(w) for w in active_wins)
     else:
         _coins_label = ", ".join(_load_selected_coins()) or "munten"
-        st.caption(f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)")
+        _cards_inner = (
+            f"<span style='color:rgba(150,150,150,0.8);font-size:0.9em'>"
+            f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)</span>"
+        )
+    st.markdown(
+        f"<div style='display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px'>{_cards_inner}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
