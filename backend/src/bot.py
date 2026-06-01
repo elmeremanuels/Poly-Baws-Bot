@@ -392,7 +392,10 @@ async def _bggdsb_extra_buy(
     from . import paper_trader as _pt, orders as _ord
     try:
         if is_paper:
-            result = await _pt.simulate_market_buy(token, shares)
+            ask_price = round(ws_client.get_best_ask(token) or (buy_eur / max(shares, 0.01)), 2)
+            actual_shares = round(buy_eur / max(ask_price, 0.01), 2)
+            result = await _pt.simulate_market_buy(token, actual_shares)
+            shares = actual_shares
             filled = result.get("filled", True)
         else:
             # Bereken shares op basis van ask_price hier, niet op trigger-time prijs
@@ -917,8 +920,16 @@ async def _bggdsb_coin_tick(coin: str) -> None:
     register_window_trade(coin, window_ts)
 
     # Start window hold task (Optie B: hold dominant side to expiry, tiny hedge only)
-    initial_yes_spend  = budget_eur if dominant_side == "YES" else 0.0
-    initial_no_spend   = budget_eur if dominant_side == "NO"  else 0.0
+    # Gebruik werkelijke fill-prijs voor spend (niet dom_ask_entry die kan afwijken bij fill)
+    from .state import get_active_trades as _gat
+    _filled_trade = _gat().get(trade["trade_id"], {})
+    _fill_price = (
+        _filled_trade.get("entry_yes_price") if dominant_side == "YES"
+        else _filled_trade.get("entry_no_price")
+    ) or dom_ask_entry
+    _actual_spend = round(dom_shares * float(_fill_price), 4)
+    initial_yes_spend  = _actual_spend if dominant_side == "YES" else 0.0
+    initial_no_spend   = _actual_spend if dominant_side == "NO"  else 0.0
     initial_yes_shares = dom_shares  if dominant_side == "YES" else 0.0
     initial_no_shares  = dom_shares  if dominant_side == "NO"  else 0.0
     _bggdsb_tranche_state[window_key] = {
