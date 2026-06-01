@@ -387,7 +387,7 @@ Prijzen: YES={yes_mid:.3f} | NO={no_mid:.3f}
             if len(active_wins) > 1:
                 st.divider()
     else:
-        _coins_label = ", ".join(selected_coins) if selected_coins else "munten"
+        _coins_label = ", ".join(_load_selected_coins()) or "munten"
         st.caption(f"⏳ Geen actief window — bot zoekt volgende {_coins_label} window (~elke 5 min)")
 
     st.divider()
