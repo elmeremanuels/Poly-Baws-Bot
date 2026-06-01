@@ -61,14 +61,33 @@ _REGIME_META = {
 }
 
 
-def _suitability_color(pct: float | None) -> str:
+# Per-regime minimale geschiktheidsscore om GROEN (= instapbaar) te tonen.
+# Onder de drempel: oranje (dichtbij) of rood. Choppy nooit groen, ongeacht score.
+# Unknown/te weinig data: grijs (geen oordeel).
+_REGIME_GREEN_MIN: dict[str, int | None] = {
+    "RANGING":  65,    # ideaal 70%+
+    "TRENDING": 72,    # ideaal 78%+
+    "BREAKOUT": 75,    # ideaal 80%+ — voorzichtig
+    "NORMAL":   72,    # neutraal → behandel als trending
+    "CHOPPY":   None,  # nooit instappen
+    "UNKNOWN":  None,  # te weinig regime-data
+}
+_MIN_N_FOR_GREEN = 5   # < 5 trades → score onbetrouwbaar, nooit groen
+
+
+def _suitability_color(pct: float | None, regime: str = "UNKNOWN", n: int = 0) -> str:
     if pct is None:
         return "rgba(150,150,150,0.6)"   # grijs — geen data
-    if pct >= 70:
-        return "#00c853"                 # groen
-    if pct >= 40:
-        return "#ff9800"                 # oranje
-    return "#ef5350"                     # rood
+    if regime == "CHOPPY":
+        return "#ef5350"                 # rood — nooit instappen, ongeacht score
+    green_min = _REGIME_GREEN_MIN.get(regime)
+    if green_min is None or n < _MIN_N_FOR_GREEN:
+        return "rgba(150,150,150,0.6)"   # grijs — onbetrouwbaar / te weinig data
+    if pct >= green_min:
+        return "#00c853"                 # groen — instapbaar volgens tabel
+    if pct >= green_min - 12:
+        return "#ff9800"                 # oranje — dichtbij drempel
+    return "#ef5350"                     # rood — te laag
 
 
 def _render_coin_suitability(coin: str, board: dict, current_mode: str,
@@ -77,10 +96,10 @@ def _render_coin_suitability(coin: str, board: dict, current_mode: str,
     info = board.get(coin, {}) or {}
     pct = info.get("suitability_pct")
     n = info.get("n", 0)
-    color = _suitability_color(pct)
     pct_txt = f"{pct:.0f}%" if pct is not None else "—"
 
     # Regime label uit dashboard_state (door bot gezet in _regime_sync_loop)
+    reg = "UNKNOWN"
     reg_label, reg_help = "⬛ Unknown", ""
     raw_reg = get_state(f"regime_{coin}")
     if raw_reg:
@@ -90,11 +109,17 @@ def _render_coin_suitability(coin: str, board: dict, current_mode: str,
         except Exception:
             pass
 
+    # Kleur is regime-bewust: alleen groen als score ≥ drempel voor dit regime
+    # én n ≥ 5 (zie tabel). Choppy nooit groen, Unknown/te weinig data → grijs.
+    color = _suitability_color(pct, reg, n)
+    _gmin = _REGIME_GREEN_MIN.get(reg)
+    _thr_txt = f"instap-drempel {_gmin}%" if _gmin is not None else "geen instap (regime)"
+
     if coin in active_coins:
         status = "🔴 live" if current_mode == "bggdsb_live" else "🟡 actief"
     else:
         status = "👁 schaduw"
-    tip = f"{reg_help} · recency-gewogen win% over laatste {n} trades"
+    tip = f"{reg_help} · {_thr_txt} · recency-gewogen win% over laatste {n} trades"
     st.markdown(
         f"<div title='{tip}' style='line-height:1.25;margin-top:-4px'>"
         f"<span style='font-size:1.4em;font-weight:bold;color:{color}'>{pct_txt}</span>"
