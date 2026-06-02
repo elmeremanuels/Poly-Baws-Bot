@@ -440,8 +440,10 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
     import json as _json
     from .db_sync import set_dashboard_state as _sds
     cfg = CONFIG.get("bggdsb", {})
-    hedge_price = float(cfg.get("hedge_price_trigger", 0.11))
-    hedge_pct   = float(cfg.get("hedge_size_pct", 0.10))
+    hedge_price    = float(cfg.get("hedge_price_trigger", 0.11))
+    hedge_pct      = float(cfg.get("hedge_size_pct", 0.10))
+    hedge_max_pct  = float(cfg.get("hedge_max_pct", 0.30))
+    hedge_interval = float(cfg.get("hedge_interval_secs", 6))
     dashboard_interval = 3.0
 
     # Averaging down — bedragen proportioneel aan window_budget
@@ -485,8 +487,14 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
         # Harde totaallimiet — 0 = onbeperkt
         max_total = float(cfg.get("max_window_total_eur", 0))
 
-        hedge_placed = False
-        last_dash_t  = 0.0
+        # Hedge — proportioneel aan budget, mag meerdere keren vuren (is5 ladder-koopt
+        # goedkope insurance op de verliezerskant; een eenmalige hedge mist dat vangnet)
+        hedge_eur_per   = round(window_budget * hedge_pct, 2)
+        hedge_max_eur   = round(window_budget * hedge_max_pct, 2)
+        hedge_spend     = 0.0
+        hedge_placed    = False   # behouden voor dashboard-weergave (eerste hedge)
+        hedge_last_t    = 0.0
+        last_dash_t     = 0.0
 
         # Avg-down state — reference price starts at entry price
         avg_down_spend      = 0.0
@@ -547,9 +555,12 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             _tot_spent = _cur_st.get("yes_spend", 0.0) + _cur_st.get("no_spend", 0.0)
             _at_limit  = max_total > 0 and _tot_spent >= max_total
 
-            # ── HEDGE ────────────────────────────────────────────────────────
-            if not _at_limit and not hedge_placed and 0 < other_mid <= hedge_price:
-                hedge_eur = round(window_budget * hedge_pct, 2)
+            # ── HEDGE (mag meerdere keren vuren, tot hedge_max_eur) ───────────
+            if (not _at_limit
+                    and hedge_spend < hedge_max_eur
+                    and 0 < other_mid <= hedge_price
+                    and (hedge_last_t == 0 or loop_t - hedge_last_t >= hedge_interval)):
+                hedge_eur = round(min(hedge_eur_per, hedge_max_eur - hedge_spend), 2)
                 o_ask     = ws_client.get_best_ask(other_tok) or other_mid
                 shares    = round(hedge_eur / max(o_ask, 0.01), 2)
                 if shares >= 0.1:
@@ -558,10 +569,13 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                         shares, hedge_eur, is_paper, window_key
                     )
                     if ok:
+                        hedge_spend += hedge_eur
+                        hedge_last_t = loop_t
                         hedge_placed = True
                         log.info("bggdsb_hedge_placed", coin=coin,
                                  loser_mid=round(other_mid, 4),
-                                 eur=hedge_eur, shares=shares)
+                                 eur=hedge_eur, shares=shares,
+                                 hedge_total=round(hedge_spend, 2))
 
             # ── AVERAGING DOWN ───────────────────────────────────────────────
             if (not _at_limit

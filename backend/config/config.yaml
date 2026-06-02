@@ -314,13 +314,15 @@ bggdsb:
   entry_delay_secs: 2               # minimaal 2s na window-start zodat WS orderbook gevuld is
   min_secs_remaining: 30            # alleen instappen als window nog minimaal X seconden duurt
   is5_tiebreak_threshold: 0.03      # als |yes_ask - no_ask| <= dit, gebruik is5 als tiebreaker
-  hedge_price_trigger: 0.11         # koop tiny hedge als verliezende kant ≤ dit
-  hedge_size_pct: 0.10              # hedge = 10% van window_budget
+  hedge_price_trigger: 0.15         # koop tiny hedge als verliezende kant ≤ dit (is5: 84% van hedges ≤0.11, vang ook ondiepere)
+  hedge_size_pct: 0.05              # hedge = 5% van window_budget per koop (kleiner maar mag nu meerdere keren vuren)
+  hedge_max_pct: 0.30               # max totaal hedge = 30% van window_budget (is5 ladder-koopt cheap insurance)
+  hedge_interval_secs: 6            # min seconden tussen twee hedge buys
   max_window_total_eur: 0            # HARDE TOTAALLIMIET per window (0 = onbeperkt). Stel in op b.v. 10 om nooit meer dan €10 te spenderen, inclusief alle avg-down/flip/confirm buys.
   avg_down_enabled: true
   avg_down_tranche_pct: 0.50        # 50% van window_budget per avg-down tranche (€1 bij €2, €10 bij €20)
-  avg_down_min_drop: 0.08           # buy again als dom prijs > 8ct gezakt is tov laatste koop
-  avg_down_interval_secs: 25        # min seconden tussen twee avg-down buys
+  avg_down_min_drop: 0.04           # buy again als dom prijs > 4ct gezakt is (is5: mediaan drop 4.2ct)
+  avg_down_interval_secs: 6         # min seconden tussen twee avg-down buys (is5: mediaan ~5s)
   avg_down_max_pct: 4.00            # max 4× budget aan avg-down totaal (€8 bij €2, €80 bij €20)
   flip_enabled: true
   flip_trigger_price: 0.62          # koop andere kant als die boven dit stijgt
