@@ -512,10 +512,12 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
         log.info("bggdsb_hold_task_start", coin=coin, window_key=window_key,
                  dominant_side=dominant_side, budget=window_budget)
 
+        _normal_exit = False
         while True:
             now = datetime.now(timezone.utc)
             secs_left = (window_end_dt - now).total_seconds()
             if secs_left <= 1:
+                _normal_exit = True
                 break
 
             loop_t = asyncio.get_event_loop().time()
@@ -696,6 +698,24 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
 
             await asyncio.sleep(1.5)
 
+        # After normal window expiry: poll for oracle resolution so winner_side
+        # reflects the actual binary outcome rather than pre-resolution market prices.
+        # Polymarket settles is5minfixedyet within seconds; winning token → ~1.0.
+        if _normal_exit:
+            _st_res = _bggdsb_tranche_state.get(window_key)
+            if _st_res:
+                for _res_attempt in range(30):  # max 45s (30 × 1.5s)
+                    _ry = ws_client.get_mid_price(_st_res["yes_token"])
+                    _rn = ws_client.get_mid_price(_st_res["no_token"])
+                    if _ry is not None and _rn is not None and max(_ry, _rn) >= 0.92:
+                        _st_res["_resolved_ym"] = _ry
+                        _st_res["_resolved_nm"] = _rn
+                        log.info("bggdsb_resolution_detected", window_key=window_key,
+                                 yes_price=round(_ry, 4), no_price=round(_rn, 4),
+                                 attempt=_res_attempt)
+                        break
+                    await asyncio.sleep(1.5)  # CancelledError propagates to outer handler
+
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -721,10 +741,22 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
             _trade_id = st.get("trade_id")
             if _trade_id and total_spend > 0:
                 try:
-                    _ym = ws_client.get_mid_price(st["yes_token"])
-                    _nm = ws_client.get_mid_price(st["no_token"])
-                    if _ym is None or _nm is None:
-                        _ym, _nm = (1.0, 0.0) if yes_spend >= no_spend else (0.0, 1.0)
+                    # Prefer resolution-polled prices (stored by the resolution loop above);
+                    # fall back to live WS prices; never assume we won.
+                    # Use `is not None` (not `or`) — a resolved price of 0.0 is valid!
+                    _res_ym = st.get("_resolved_ym")
+                    _res_nm = st.get("_resolved_nm")
+                    _ym = _res_ym if _res_ym is not None else ws_client.get_mid_price(st["yes_token"])
+                    _nm = _res_nm if _res_nm is not None else ws_client.get_mid_price(st["no_token"])
+                    if _ym is None and _nm is None:
+                        # No price data at all — leave winner unknown, record as break-even
+                        log.warning("bggdsb_no_resolution_price", trade_id=_trade_id,
+                                    window_key=window_key)
+                        _ym, _nm = 0.5, 0.5  # treat as unknown, not as "we won"
+                    elif _ym is None:
+                        _ym = 1.0 - _nm
+                    elif _nm is None:
+                        _nm = 1.0 - _ym
                     _winner = "YES" if _ym >= _nm else "NO"
                     _winner_shares = yes_shares if _winner == "YES" else no_shares
                     _gross = round(_winner_shares - total_spend, 4)
