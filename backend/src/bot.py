@@ -977,7 +977,10 @@ async def _bggdsb_coin_tick(coin: str, shadow_only: bool = False) -> None:
     yes_shares = dom_shares if dominant_side == "YES" else 0.0
     no_shares  = 0.0        if dominant_side == "YES" else dom_shares
 
-    mode = "paper" if force_paper else get_mode()
+    # Store the semantic BGGDSB mode so the dashboard filter matches.
+    # force_paper=True (paper mode OR shadow coin) → bggdsb_paper (paper execution);
+    # force_paper=False (live mode AND active coin) → bggdsb_live (real orders).
+    mode = "bggdsb_paper" if force_paper else "bggdsb_live"
     market["_bggdsb_yes_shares"]       = yes_shares
     market["_bggdsb_no_shares"]        = no_shares
     market["_bggdsb_dominant_side"]    = dominant_side

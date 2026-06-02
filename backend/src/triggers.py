@@ -23,6 +23,14 @@ _scalein_state: dict[str, dict] = {}  # trade_id -> {count, ref_high, cycle_low}
 _take_it_executed: set[str] = set()  # trade_ids where Take it already fired
 
 
+def _is_paper_trade(mode: str) -> bool:
+    """True if a trade's stored mode is a paper-execution mode.
+
+    Covers 'paper', 'paper_auto', etc. and suffix modes like 'bggdsb_paper'.
+    """
+    return mode.startswith("paper") or mode.endswith("_paper")
+
+
 def _get_trigger_threshold(coin: str) -> float:
     from . import regime as _regime
     return _regime.get_effective_trigger_threshold(coin)
@@ -87,7 +95,8 @@ async def execute_entry(trade_id: str, broadcast_fn=None) -> bool:
         from . import learning as _learning
         paper = _learning.get_orchestrator().get_trading_mode().startswith("paper")
     else:
-        paper = trade_mode.startswith("paper")
+        # bggdsb_paper is a paper-execution mode despite not starting with "paper"
+        paper = trade_mode.startswith("paper") or trade_mode == "bggdsb_paper"
 
     window_start = datetime.fromisoformat(trade["window_start_ts"]).astimezone(timezone.utc)
     cutoff_time = window_start - timedelta(minutes=CUTOFF_MIN)
@@ -1585,7 +1594,7 @@ async def _close_trade(trade_id: str, fill_price: float | None, reason: str, bro
     try:
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
-        _paper = trade.get("mode", "").startswith("paper")
+        _paper = _is_paper_trade(trade.get("mode", ""))
         _daily = _sync_daily_pnl(coin)
         _new_state = await _cg.record_result(coin, net_pnl, _daily, paper=_paper)
         if _new_state == "disabled":
@@ -1762,7 +1771,7 @@ def _directional_coin_guard(trade_id, coin, net_pnl, trade, broadcast_fn) -> Non
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
         from .logger import save_dashboard_state as _save_state
-        _paper = trade.get("mode", "").startswith("paper")
+        _paper = _is_paper_trade(trade.get("mode", ""))
         _daily = _sync_daily_pnl(coin)
         asyncio.create_task(_run_directional_guard(coin, net_pnl, _daily, _paper, broadcast_fn))
     except Exception:
@@ -1848,7 +1857,7 @@ async def _handle_resolution(trade_id: str, broadcast_fn) -> None:
         from . import coin_guard as _cg
         from .db_sync import get_daily_pnl as _sync_daily_pnl
         from . import risk as _risk
-        _paper = trade.get("mode", "").startswith("paper")
+        _paper = _is_paper_trade(trade.get("mode", ""))
         coin = trade.get("coin", "")
         if coin:
             _risk.record_global_result(net_pnl > 0)

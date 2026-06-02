@@ -1601,6 +1601,21 @@ def recalculate_bggdsb_pnl() -> int:
     return updated
 
 
+def _bggdsb_mode_clause(mode_filter: str | None) -> tuple[str, list]:
+    """SQL clause + params for a BGGDSB mode filter.
+
+    Includes legacy mode values: pre-fix paper trades were stored as 'paper'
+    (not 'bggdsb_paper') and live as 'live', so match both for backward compat.
+    """
+    if not mode_filter:
+        return "", []
+    if mode_filter == "bggdsb_paper":
+        return " AND mode IN ('bggdsb_paper', 'paper')", []
+    if mode_filter == "bggdsb_live":
+        return " AND mode IN ('bggdsb_live', 'live')", []
+    return " AND mode = ?", [mode_filter]
+
+
 def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
     """Performance stats for trades with router_bucket = 'bggdsb'.
 
@@ -1614,10 +1629,8 @@ def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
             # mee in de zichtbare stats — die zijn alleen voor het geschiktheidsbord.
             where = ("router_bucket = 'bggdsb' AND status IN ('closed', 'resolved') "
                      "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
-            params: list = []
-            if mode_filter:
-                where += " AND mode = ?"
-                params.append(mode_filter)
+            _mode_sql, params = _bggdsb_mode_clause(mode_filter)
+            where += _mode_sql
             row = conn.execute(
                 f"""
                 SELECT
@@ -1647,10 +1660,8 @@ def get_bggdsb_trades(limit: int = 100, mode_filter: str | None = None) -> list[
         with _conn() as conn:
             where = ("router_bucket = 'bggdsb' "
                      "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
-            params: list = []
-            if mode_filter:
-                where += " AND mode = ?"
-                params.append(mode_filter)
+            _mode_sql, params = _bggdsb_mode_clause(mode_filter)
+            where += _mode_sql
             params.append(limit)
             rows = conn.execute(
                 f"""
