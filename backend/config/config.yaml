@@ -304,6 +304,7 @@ whale_tracker:
   addresses:
     adelgranadol: "0xb305d384400e3d7a15780216a55368ea677eca4e"
     is5minfixedyet: "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
+    whale_2c5a: "0x2c5aad8f0a9fb039bf4417250b52a62c3b95ef11"
 
 bggdsb:
   coins: ["BTC"]                    # is5minfixedyet handelde vrijwel alleen BTC
