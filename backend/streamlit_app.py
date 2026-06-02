@@ -389,6 +389,9 @@ with st.sidebar:
             st.error("❌ BOT NOOIT GESTART")
         st.caption("Check: sudo systemctl status poly-baws-bot")
     elif killed:
+        _kill_reason = risk.get_kill_reason()
+        if _kill_reason:
+            st.error(f"⛔ Gestopt: `{_kill_reason}`")
         st.warning("⏸ BOT GEPAUZEERD — draait maar handelt niet")
         if st.button("▶ RESUME TRADING", use_container_width=True, type="primary"):
             # Delete kill flag directly (instant) AND queue command for bot's in-memory flag

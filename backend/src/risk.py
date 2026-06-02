@@ -31,9 +31,10 @@ def kill(reason: str = "manual") -> None:
 
 
 def reset_kill() -> None:
-    global _killed, _kill_reason
+    global _killed, _kill_reason, _portfolio_peak
     _killed = False
     _kill_reason = ""
+    _portfolio_peak = 0.0  # recalibrate drawdown-from-peak after manual resume
     if KILL_FLAG_PATH.exists():
         KILL_FLAG_PATH.unlink()
     log.info("kill_switch_reset")
@@ -166,6 +167,16 @@ async def _get_or_update_portfolio_peak(current: float) -> float:
     return _portfolio_peak
 
 
+def _enforces_portfolio_protection(mode: str) -> bool:
+    """Whether portfolio protection applies to this mode.
+
+    Same exemptions as _enforces_daily_loss_limit: paper modes and live_learning
+    simulate without risking real capital. bggdsb_live is real money so it IS
+    subject to protection (use bggdsb_paper to trade without real-money risk gates).
+    """
+    return not _is_paper_like_mode(mode) and mode not in ("live_learning",)
+
+
 async def check_portfolio_protection(current_usdc: float) -> None:
     """Three-layer portfolio protection. Call from portfolio_sync_loop."""
     if current_usdc is None:
@@ -173,8 +184,8 @@ async def check_portfolio_protection(current_usdc: float) -> None:
     if is_killed():
         return  # already killed — don't re-fire every 30s
     from .state import get_mode
-    if _is_paper_like_mode(get_mode()):
-        return  # paper modes: no real capital at risk
+    if not _enforces_portfolio_protection(get_mode()):
+        return  # paper / live_learning: no real capital at risk
     cfg = CONFIG.get("risk", {})
 
     # Layer 1: absolute capital floor

@@ -1588,14 +1588,15 @@ def recalculate_bggdsb_pnl() -> int:
               AND gross_pnl IS NULL
               AND winner_side IS NOT NULL
         """)
-        # Stap 2: net_pnl = gross_pnl − fees_paid voor alle bggdsb trades
+        # Stap 2: net_pnl = gross_pnl − fees_paid voor alle bggdsb trades.
+        # Geen `AND gross_pnl IS NOT NULL` guard: COALESCE(gross_pnl, 0) behandelt
+        # NULL-gross als 0 zodat elke gesloten trade een net_pnl krijgt.
         cur = conn.execute("""
             UPDATE trades
             SET net_pnl = ROUND(COALESCE(gross_pnl, 0) - COALESCE(fees_paid, 0), 4)
             WHERE router_bucket = 'bggdsb'
               AND COALESCE(triggered_by, '') NOT IN ('bggdsb_shadow')
               AND status IN ('closed', 'resolved')
-              AND gross_pnl IS NOT NULL
         """)
         updated = cur.rowcount
     return updated
@@ -1723,7 +1724,11 @@ def get_bggdsb_coin_scoreboard(coins: list[str], lookback: int = 15) -> dict[str
                 num = den = 0.0
                 recent_pnl = 0.0
                 for i, r in enumerate(rows):
-                    pnl = float(r["net_pnl"] or 0.0)
+                    if r["net_pnl"] is None:
+                        # Incomplete trade (logging failed) — skip rather than
+                        # counting as a loss; would wrongly zero out suitability.
+                        continue
+                    pnl = float(r["net_pnl"])
                     w = 0.5 ** (i / 3.0)          # newest=1.0, i=3→0.5, i=6→0.25
                     num += w * (1.0 if pnl > 0 else 0.0)
                     den += w

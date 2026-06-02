@@ -27,7 +27,7 @@ from src.db_sync import (
 )
 from src.commands import write_command
 from src.config_loader import CONFIG as _CFG
-from src.risk import KILL_FLAG_PATH as _KILL_FLAG_PATH
+from src.risk import KILL_FLAG_PATH as _KILL_FLAG_PATH, get_kill_reason as _get_kill_reason
 
 _IS5_ADDRESS = "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
 _ALL_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
@@ -658,6 +658,10 @@ def bggdsb_panel() -> None:
                 st.session_state["sidebar_mode_radio"] = "bggdsb_paper"
                 st.warning("Teruggeschakeld naar **paper** mode.")
         else:
+            if _KILL_FLAG_PATH.exists():
+                _reason = _get_kill_reason()
+                if _reason:
+                    st.error(f"⛔ Bot gestopt: `{_reason}` — klik Resume om te hervatten")
             st.warning(
                 f"⚠️ LIVE modus gebruikt **echt geld** — €{budget} per window. "
                 "Zeker weten?",

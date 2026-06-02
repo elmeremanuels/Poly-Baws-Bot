@@ -768,15 +768,23 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                     update_trade_field(_trade_id, "net_pnl", _net)
                     update_trade_field(_trade_id, "status", "closed")
                     update_trade_field(_trade_id, "winner_exit_reason", "expiry")
-                    await _persist(_trade_id)
+                    # asyncio.shield prevents CancelledError (bot shutdown) from skipping
+                    # the DB write — CancelledError is BaseException so it bypasses
+                    # `except Exception`, but shield ensures the write still completes.
+                    await asyncio.shield(_persist(_trade_id))
                     log.info("bggdsb_trade_closed", trade_id=_trade_id,
                              winner=_winner, gross_pnl=_gross, net_pnl=_net,
                              fees=_fees, yes_shares=yes_shares, no_shares=no_shares,
                              yes_spend=yes_spend, no_spend=no_spend)
-                    from .state import remove_active_trade
-                    remove_active_trade(_trade_id)
                 except Exception as _ce:
                     log.error("bggdsb_close_error", trade_id=_trade_id, error=str(_ce))
+                finally:
+                    # Always remove from active trades — even if persist failed.
+                    try:
+                        from .state import remove_active_trade as _rm_trade
+                        _rm_trade(_trade_id)
+                    except Exception:
+                        pass
 
             _bggdsb_tranche_state.pop(window_key, None)
         from .db_sync import set_dashboard_state as _sds2, get_state as _gs2
