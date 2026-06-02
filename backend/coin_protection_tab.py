@@ -319,6 +319,7 @@ def _herzie_section(coin: str) -> None:
 
 # ── Main panel ─────────────────────────────────────────────────────────────────
 
+@st.fragment
 def coin_protection_panel() -> None:
     st.markdown("## 🛡️ Coin Beveiliging")
     st.caption(

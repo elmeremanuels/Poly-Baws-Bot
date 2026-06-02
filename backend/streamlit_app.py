@@ -910,6 +910,7 @@ def _event_log() -> None:
             st.caption("No events.")
 
 
+@st.fragment
 def _learning_panel() -> None:
     cycle = get_current_cycle()
 
@@ -1160,10 +1161,10 @@ def _learning_panel() -> None:
 
         # Visual alert for poor historical patterns
         bad_coins = [
-            f"{COIN_EMOJI.get(c,'')} {c} ({r.get('match',{}).get('win_pct',0):.1f}%)"
+            f"{COIN_EMOJI.get(c,'')} {c} ({(r.get('match',{}).get('win_pct') or 0):.1f}%)"
             for c, r in pm_results.items()
-            if r.get("match", {}).get("win_pct", 100) < 52
-            and r.get("match", {}).get("n", 0) >= 10
+            if (r.get("match", {}).get("win_pct") or 0) < 52
+            and (r.get("match", {}).get("n") or 0) >= 10
         ]
         if bad_coins:
             st.warning(
@@ -1305,7 +1306,6 @@ def _portfolio_live() -> None:
         st.rerun()
 
 
-@st.fragment
 def _portfolio_panel() -> None:
     _portfolio_live()
 
@@ -2590,9 +2590,9 @@ def _whale_account_card(m: dict, col_key_suffix: str) -> None:
         df_s.columns = [{"coin": "Coin", "outcome_side": "Kant", "trade_type": "Type",
                           "price": "Prijs", "usdc_size": "USDC", "event_ts": "Tijd"}.get(c, c) for c in show]
         if "Prijs" in df_s.columns:
-            df_s["Prijs"] = df_s["Prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+            df_s["Prijs"] = df_s["Prijs"].apply(lambda x: f"{x:.3f}" if x is not None else "")
         if "USDC" in df_s.columns:
-            df_s["USDC"] = df_s["USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+            df_s["USDC"] = df_s["USDC"].apply(lambda x: f"${x:.2f}" if x is not None else "")
         st.dataframe(df_s, hide_index=True, use_container_width=True, height=320)
     else:
         st.caption("Nog geen activiteit geladen.")
@@ -2643,9 +2643,9 @@ def _whale_panel() -> None:
             df_show.columns = [{"name": "Account", "coin": "Coin", "outcome_side": "Kant", "trade_type": "Type",
                                  "price": "Prijs", "usdc_size": "USDC", "question": "Markt", "event_ts": "Tijd"}.get(c, c) for c in show_cols]
             if "Prijs" in df_show.columns:
-                df_show["Prijs"] = df_show["Prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+                df_show["Prijs"] = df_show["Prijs"].apply(lambda x: f"{x:.3f}" if x is not None else "")
             if "USDC" in df_show.columns:
-                df_show["USDC"] = df_show["USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+                df_show["USDC"] = df_show["USDC"].apply(lambda x: f"${x:.2f}" if x is not None else "")
             st.dataframe(df_show, hide_index=True, use_container_width=True)
             st.caption(f"{len(rows)} transacties")
 
@@ -2669,9 +2669,9 @@ def _whale_panel() -> None:
                                   "avg_price": "Gem.prijs", "cur_price": "Nu", "cash_pnl": "P&L $",
                                   "pct_pnl": "P&L %", "question": "Markt"}.get(c, c) for c in show_cols]
                 if "P&L %" in df_a.columns:
-                    df_a["P&L %"] = df_a["P&L %"].apply(lambda x: f"{x:+.1f}%" if x else "")
+                    df_a["P&L %"] = df_a["P&L %"].apply(lambda x: f"{x:+.1f}%" if x is not None else "")
                 if "P&L $" in df_a.columns:
-                    df_a["P&L $"] = df_a["P&L $"].apply(lambda x: f"${x:+.2f}" if x else "")
+                    df_a["P&L $"] = df_a["P&L $"].apply(lambda x: f"${x:+.2f}" if x is not None else "")
                 st.dataframe(df_a, hide_index=True, use_container_width=True)
             if not expired.empty:
                 with st.expander(f"Verlopen posities ({len(expired)}) — redeemable"):
@@ -2692,9 +2692,9 @@ def _whale_panel() -> None:
             if "Bot P&L" in df_show.columns:
                 df_show["Bot P&L"] = df_show["Bot P&L"].apply(lambda x: f"€{x:+.3f}" if x is not None else "")
             if "Whale prijs" in df_show.columns:
-                df_show["Whale prijs"] = df_show["Whale prijs"].apply(lambda x: f"{x:.3f}" if x else "")
+                df_show["Whale prijs"] = df_show["Whale prijs"].apply(lambda x: f"{x:.3f}" if x is not None else "")
             if "Whale USDC" in df_show.columns:
-                df_show["Whale USDC"] = df_show["Whale USDC"].apply(lambda x: f"${x:.2f}" if x else "")
+                df_show["Whale USDC"] = df_show["Whale USDC"].apply(lambda x: f"${x:.2f}" if x is not None else "")
             st.dataframe(df_show, hide_index=True, use_container_width=True)
             st.caption(f"{len(overlap)} overlappende trades")
 

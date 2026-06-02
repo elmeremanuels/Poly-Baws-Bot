@@ -1342,7 +1342,7 @@ def get_whale_meta() -> list[dict]:
     try:
         with _conn() as conn:
             rows = conn.execute(
-                "SELECT address, name, last_synced_at, activity_count, positions_count "
+                "SELECT address, name, last_synced_at, activity_count, positions_count, history_loaded "
                 "FROM whale_meta ORDER BY name"
             ).fetchall()
         return [dict(r) for r in rows]
