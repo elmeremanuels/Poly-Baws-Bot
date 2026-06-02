@@ -1597,6 +1597,7 @@ def recalculate_bggdsb_pnl() -> int:
             WHERE router_bucket = 'bggdsb'
               AND COALESCE(triggered_by, '') NOT IN ('bggdsb_shadow')
               AND status IN ('closed', 'resolved')
+              AND winner_side IS NOT NULL
         """)
         updated = cur.rowcount
     return updated
@@ -1713,6 +1714,7 @@ def get_bggdsb_coin_scoreboard(coins: list[str], lookback: int = 15) -> dict[str
                     WHERE router_bucket = 'bggdsb'
                       AND COALESCE(triggered_by, '') IN ('bggdsb', 'bggdsb_shadow')
                       AND status IN ('closed', 'resolved')
+                      AND winner_side IS NOT NULL
                       AND coin = ?
                     ORDER BY created_at DESC
                     LIMIT ?
