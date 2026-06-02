@@ -44,7 +44,7 @@ from src.db_sync import (
 )
 from src.commands import write_command, delete_hybrid_pending
 from src.db_sync import delete_signal_trades
-from src.risk import KILL_FLAG_PATH
+from src.risk import KILL_FLAG_PATH, get_kill_reason as _get_kill_reason_fn
 from analytics_tab import analytics_panel
 from signal_lab_tab import signal_lab_panel
 from coin_protection_tab import coin_protection_panel
@@ -389,7 +389,7 @@ with st.sidebar:
             st.error("❌ BOT NOOIT GESTART")
         st.caption("Check: sudo systemctl status poly-baws-bot")
     elif killed:
-        _kill_reason = risk.get_kill_reason()
+        _kill_reason = _get_kill_reason_fn()
         if _kill_reason:
             st.error(f"⛔ Gestopt: `{_kill_reason}`")
         st.warning("⏸ BOT GEPAUZEERD — draait maar handelt niet")
