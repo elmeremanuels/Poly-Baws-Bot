@@ -27,6 +27,7 @@ from src.db_sync import (
 )
 from src.commands import write_command
 from src.config_loader import CONFIG as _CFG
+from src.risk import KILL_FLAG_PATH as _KILL_FLAG_PATH
 
 _IS5_ADDRESS = "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
 _ALL_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
@@ -671,10 +672,15 @@ def bggdsb_panel() -> None:
                 set_dashboard_state("bggdsb_reverse_entry", "1" if _reverse_entry else "0")
                 for _c in _ALL_COINS:                        # verse start: hef pauzes op
                     set_dashboard_state(f"bggdsb_halted_{_c}", "0")
-                write_command("reset_kill")   # clear any active kill switch when explicitly going live
+                # Delete kill flag immediately (Streamlit can access the file directly)
+                # AND queue the command for the bot's in-memory _killed flag.
+                if _KILL_FLAG_PATH.exists():
+                    _KILL_FLAG_PATH.unlink()
+                write_command("reset_kill")
                 write_command("set_mode", {"mode": "bggdsb_live"})
                 # Sync sidebar radio so it doesn't send a phantom set_mode on next full rerun
                 st.session_state["sidebar_mode_radio"] = "bggdsb_live"
+                st.toast("🔴 LIVE geactiveerd — wacht op eerste window", icon="🔴")
                 st.error(
                     f"🔴 LIVE actief — €{budget}/window op {', '.join(selected_coins)}. "
                     "Klik 'Terug naar paper' om te stoppen."

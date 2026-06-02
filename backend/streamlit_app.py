@@ -391,6 +391,9 @@ with st.sidebar:
     elif killed:
         st.warning("⏸ BOT GEPAUZEERD — draait maar handelt niet")
         if st.button("▶ RESUME TRADING", use_container_width=True, type="primary"):
+            # Delete kill flag directly (instant) AND queue command for bot's in-memory flag
+            if KILL_FLAG_PATH.exists():
+                KILL_FLAG_PATH.unlink()
             write_command("reset_kill")
             st.rerun()
     else:
