@@ -1328,6 +1328,9 @@ async def _oracle_discord_task() -> None:
     try:
         from .oracle_discord import start_discord_bot
         await start_discord_bot()
+    except ModuleNotFoundError:
+        log.warning("oracle_discord_not_available",
+                    reason="discord.py not installed; run: pip install discord.py")
     except Exception as exc:
         log.error("oracle_discord_start_error", error=str(exc))
 
