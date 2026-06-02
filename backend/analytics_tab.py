@@ -117,7 +117,9 @@ _MODE_KEYS   = {"Alle": None, "Straddle": "straddle", "Signal": "signal", "Auto 
 
 
 @st.fragment(run_every=60)
-def analytics_panel() -> None:
+def _analytics_live() -> None:
+    """Auto-refreshes every 60s. Must be nested inside analytics_panel (@st.fragment)
+    so the run_every auto-rerun doesn't interfere with the outer tab structure."""
     # ── Zoekfilter ────────────────────────────────────────────────────────────
     col_coin, col_mode, col_range = st.columns([1.5, 2.5, 2])
     with col_coin:
@@ -990,3 +992,10 @@ def _claude_analysis_section(df: pd.DataFrame, coin: str | None, days: int | Non
             st.rerun()
         except Exception as exc:
             st.error(f"Opslaan mislukt: {exc}")
+
+
+@st.fragment
+def analytics_panel() -> None:
+    """Outer wrapper (no run_every) so the inner 60s auto-rerun is isolated
+    and doesn't cause DOM reconciliation issues with the surrounding tab structure."""
+    _analytics_live()

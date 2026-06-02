@@ -2595,6 +2595,10 @@ def _whale_panel() -> None:
 # Render 2 (_tabs_ready=False): Learning + Beveiliging direct, andere tabs tonen
 #   een laadindicator. Aan het einde st.rerun() → render 3 volledig dashboard.
 # Render 3+ (_tabs_ready=True): alles normaal.
+# Safety: if _page_loaded was just set (loading screen ran this render), _tabs_ready
+# was explicitly set to False by the loading screen and we skip this default.
+# In all other cases (fresh session after restart, hot-reload), default to True so
+# the app never gets stuck on skeletons indefinitely.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
 # ── Sidebar: toon/verberg geavanceerde tabs ───────────────────────────────────
@@ -2611,8 +2615,8 @@ _base_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto 
 _adv_tab_names  = ["📊 Analytics", "💼 Portfolio", "🐋 Whales"]
 
 # Variable tab count: advanced tabs added only when toggle is on.
-# bggdsb_panel no longer has run_every, so fragment auto-rerun no longer
-# interferes with tab structure changes triggered by the toggle.
+# All run_every fragments are nested inside plain @st.fragment wrappers so their
+# auto-reruns don't interfere with the outer tab structure (DOM reconciliation).
 _all_tab_names = _base_tab_names + (_adv_tab_names if show_advanced else [])
 _all_tabs = st.tabs(_all_tab_names)
 

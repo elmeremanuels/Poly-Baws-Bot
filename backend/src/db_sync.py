@@ -1617,8 +1617,10 @@ def _bggdsb_mode_clause(mode_filter: str | None) -> tuple[str, list]:
 
 
 def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
-    """Performance stats for trades with router_bucket = 'bggdsb'.
+    """Performance stats for BGGDSB trades.
 
+    Matches on router_bucket='bggdsb' (new trades) OR mode IN (bggdsb modes,
+    legacy 'paper'/'live') so old trades stored before mode renaming are included.
     mode_filter: 'bggdsb_live', 'bggdsb_paper', or None (alle modes).
     """
     if not _db_path.exists():
@@ -1627,7 +1629,10 @@ def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
         with _conn() as conn:
             # Schaduw-trades (achtergrond paper op niet-actieve munten) tellen NIET
             # mee in de zichtbare stats — die zijn alleen voor het geschiktheidsbord.
-            where = ("router_bucket = 'bggdsb' AND status IN ('closed', 'resolved') "
+            # OR-condition: router_bucket covers new trades; mode covers legacy trades
+            # that were stored as mode='paper'/'live' before the bggdsb_ prefix was added.
+            where = ("(router_bucket = 'bggdsb' OR mode IN ('bggdsb_paper','bggdsb_live','paper','live'))"
+                     " AND status IN ('closed', 'resolved') "
                      "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
             _mode_sql, params = _bggdsb_mode_clause(mode_filter)
             where += _mode_sql
@@ -1650,16 +1655,18 @@ def get_bggdsb_stats(mode_filter: str | None = None) -> dict:
 
 
 def get_bggdsb_trades(limit: int = 100, mode_filter: str | None = None) -> list[dict]:
-    """Recent bggdsb trades ordered by creation time.
+    """Recent BGGDSB trades ordered by creation time.
 
+    Matches on router_bucket='bggdsb' OR legacy mode values so old trades
+    stored as mode='paper' before the rename are included.
     mode_filter: 'bggdsb_live', 'bggdsb_paper', or None (alle modes).
     """
     if not _db_path.exists():
         return []
     try:
         with _conn() as conn:
-            where = ("router_bucket = 'bggdsb' "
-                     "AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
+            where = ("(router_bucket = 'bggdsb' OR mode IN ('bggdsb_paper','bggdsb_live','paper','live'))"
+                     " AND COALESCE(triggered_by, '') != 'bggdsb_shadow'")
             _mode_sql, params = _bggdsb_mode_clause(mode_filter)
             where += _mode_sql
             params.append(limit)
