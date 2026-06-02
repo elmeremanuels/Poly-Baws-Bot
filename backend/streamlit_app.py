@@ -568,7 +568,7 @@ def _signal_strategy_bar() -> None:
 # ── Main dashboard (auto-refresh every 5s) ────────────────────────────────────
 
 @st.fragment(run_every=5)
-def dashboard() -> None:
+def _dashboard_live() -> None:
     _scanner_alerts()
     _signal_strategy_bar()
     _hybrid_panel()
@@ -582,10 +582,20 @@ def dashboard() -> None:
         _recent_trades()
 
 
+@st.fragment
+def dashboard() -> None:
+    _dashboard_live()
+
+
 @st.fragment(run_every=5)
-def dashboard_event_log() -> None:
+def _event_log_live() -> None:
     st.divider()
     _event_log()
+
+
+@st.fragment
+def dashboard_event_log() -> None:
+    _event_log_live()
 
 
 def _scanner_alerts() -> None:
@@ -1219,7 +1229,7 @@ def _learning_panel() -> None:
 
 
 @st.fragment(run_every=10)
-def _portfolio_panel() -> None:
+def _portfolio_live() -> None:
     pf = get_portfolio_snapshot()
 
     if pf["value"] is None:
@@ -1285,6 +1295,11 @@ def _portfolio_panel() -> None:
         write_command("clear_orphaned_positions")
         st.toast("Opdracht verstuurd — bot verkoopt wees-posities.", icon="🧹")
         st.rerun()
+
+
+@st.fragment
+def _portfolio_panel() -> None:
+    _portfolio_live()
 
 
 # ── Signal Trader Panel ────────────────────────────────────────────────────────
@@ -1646,6 +1661,7 @@ def _oracle_pattern_table() -> None:
             st.caption(f"{len(rows2)} combinaties getoond (min 5 trades)")
 
 
+@st.fragment
 def _auto_router_panel() -> None:
     """Dashboard panel voor de auto_router modus — alle instellingen op één plek."""
     mode      = current_mode()
@@ -1918,7 +1934,7 @@ def _router_trade_cards() -> None:
 
 
 @st.fragment(run_every=15)
-def _signal_trader_panel() -> None:
+def _signal_trader_live() -> None:
     """Dashboard panel voor de signal_trader modus."""
     mode      = current_mode()
     cfg       = _read_st_cfg_from_yaml()   # altijd vers uit YAML, niet de cache
@@ -2321,6 +2337,11 @@ def _signal_trader_panel() -> None:
                 n = delete_signal_trades()
                 st.success(f"✅ {n} trades verwijderd — schone lei!")
                 st.rerun()
+
+
+@st.fragment
+def _signal_trader_panel() -> None:
+    _signal_trader_live()
 
 
 # ── Loading screen (eerste keer dat deze sessie de pagina laadt) ───────────────

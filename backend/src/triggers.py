@@ -399,6 +399,9 @@ async def _execute_bggdsb_entry(trade_id: str, paper: bool) -> bool:
     if paper:
         ask = ws_client.get_best_ask(dom_token) or ENTRY_PRICE
         result = await paper_trader.simulate_limit_buy(dom_token, ask, dom_size)
+        if not result.get("filled"):
+            # WS order book empty (bot startup) — simulate fill at ask price
+            result = {"filled": True, "fill_price": ask, "filled_size": dom_size, "fees": 0.0}
     else:
         ask = round(ws_client.get_best_ask(dom_token) or ENTRY_PRICE, 2)
         resp = await orders.place_limit_order(dom_token, "BUY", ask, dom_size)
@@ -411,7 +414,10 @@ async def _execute_bggdsb_entry(trade_id: str, paper: bool) -> bool:
     if result.get("filled"):
         fill_price = result.get("fill_price") or ask
         fees = result.get("fees") or 0.0
-        update_trade_field(trade_id, "entry_filled_ts", datetime.now(timezone.utc).isoformat())
+        now_ts = datetime.now(timezone.utc).isoformat()
+        update_trade_field(trade_id, "entry_filled_ts", now_ts)
+        update_trade_field(trade_id, "trigger_hit", True)
+        update_trade_field(trade_id, "trigger_ts", now_ts)
         if dominant_side == "YES":
             update_trade_field(trade_id, "entry_yes_price", fill_price)
             update_trade_field(trade_id, "entry_no_price", None)
