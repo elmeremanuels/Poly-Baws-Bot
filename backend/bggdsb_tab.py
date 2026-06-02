@@ -334,9 +334,12 @@ def bggdsb_panel() -> None:
     # ── Mode filter voor stats + tabel ───────────────────────────────────────
     _mode_options = {"💸 Alleen live": "bggdsb_live", "🟡 Alleen paper": "bggdsb_paper", "📊 Alle": None}
     _default_mode_label = "💸 Alleen live" if current_mode == "bggdsb_live" else "🟡 Alleen paper" if current_mode == "bggdsb_paper" else "📊 Alle"
+    # Set session state default only once — don't override after user picks something.
+    # Passing index= on every rerun would reset the selection each time the fragment reruns.
+    if "bggdsb_mode_filter" not in st.session_state:
+        st.session_state["bggdsb_mode_filter"] = _default_mode_label
     _selected_mode_label = st.radio(
         "Toon trades van", list(_mode_options.keys()),
-        index=list(_mode_options.keys()).index(_default_mode_label),
         horizontal=True, key="bggdsb_mode_filter",
     )
     _mode_filter = _mode_options[_selected_mode_label]
