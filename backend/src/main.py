@@ -40,6 +40,22 @@ async def _close_stale_recovered_trades() -> None:
         if status not in ("monitoring", "exiting", "entry_placed", "pending"):
             continue
 
+        # BGGDSB trades can't be resumed: tranche state (_bggdsb_tranche_state) is lost
+        # on restart and start_monitoring/resolution would apply the wrong straddle formula.
+        is_bggdsb = (trade.get("router_bucket") == "bggdsb"
+                     or trade.get("mode", "").startswith("bggdsb"))
+        if is_bggdsb:
+            try:
+                update_trade_field(trade_id, "status", "aborted")
+                update_trade_field(trade_id, "notes", "recovery_bggdsb_tranche_lost")
+                await persist_trade(trade_id)
+            except Exception as e:
+                log.error("recovery_cleanup_failed", trade_id=trade_id, error=str(e))
+            finally:
+                remove_active_trade(trade_id)
+            log.warning("recovery_aborted_bggdsb", trade_id=trade_id, status=status)
+            continue
+
         # Abort recovered trades with suspiciously large entry_size (from old/misconfigured runs).
         entry_size = trade.get("entry_size") or 0
         if entry_size > _max_sane_size:

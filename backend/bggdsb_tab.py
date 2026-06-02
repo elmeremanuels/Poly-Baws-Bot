@@ -384,8 +384,11 @@ def bggdsb_panel() -> None:
         st.caption("Geen BGGDSB trades gevonden.")
     else:
         df = pd.DataFrame(trades)
-        n_aborted = int((df["status"] == "aborted").sum()) if "status" in df.columns else 0
-        df = df[df["status"] != "aborted"].copy() if "status" in df.columns else df
+        n_aborted    = int((df["status"] == "aborted").sum())    if "status" in df.columns else 0
+        n_monitoring = int((df["status"] == "monitoring").sum()) if "status" in df.columns else 0
+        # Only show completed trades — monitoring rows have no winner/P&L yet.
+        if "status" in df.columns:
+            df = df[df["status"].isin(["closed", "resolved"])].copy()
 
         # Afleiding: instaprichting uit yes_size/no_size
         def _dir(row) -> str:
@@ -451,6 +454,8 @@ def bggdsb_panel() -> None:
             caption_parts.append(f"richting {n_correct}/{n_decided} juist ({n_correct/n_decided*100:.0f}%)")
         if n_aborted:
             caption_parts.append(f"{n_aborted} instap-pogingen verborgen")
+        if n_monitoring:
+            caption_parts.append(f"{n_monitoring} in uitvoering (verborgen)")
         st.caption(" · ".join(caption_parts))
 
     st.divider()

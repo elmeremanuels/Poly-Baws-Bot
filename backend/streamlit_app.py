@@ -1216,6 +1216,8 @@ def _learning_panel() -> None:
     if is_killed():
         if c3.button("▶ Hervat", use_container_width=True, type="primary",
                      help="Herstart trading na pauze."):
+            if KILL_FLAG_PATH.exists():
+                KILL_FLAG_PATH.unlink()
             write_command("reset_kill")
             st.rerun()
     else:
