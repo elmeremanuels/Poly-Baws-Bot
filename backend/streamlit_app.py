@@ -2410,6 +2410,81 @@ if not st.session_state.get("_page_loaded"):
     st.rerun()             # → render 2: Beveiliging + Learning direct, rest skeleton
 
 # ── Tab rendering — fase-gebaseerd ─────────────────────────────────────────────
+# ── Whale Tracker helpers (config read/write) ─────────────────────────────────
+
+_WHALE_CONFIG_PATH = Path(__file__).parent / "config" / "config.yaml"
+
+
+def _whale_config_write(name: str, address: str) -> str:
+    """Add whale to config.yaml. Returns error string or '' on success."""
+    try:
+        from ruamel.yaml import YAML
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        with open(_WHALE_CONFIG_PATH) as f:
+            cfg = ryaml.load(f)
+        cfg.setdefault("whale_tracker", {}).setdefault("addresses", {})[name] = address
+        with open(_WHALE_CONFIG_PATH, "w") as f:
+            ryaml.dump(cfg, f)
+        return ""
+    except ImportError:
+        import yaml as _yaml
+        try:
+            with open(_WHALE_CONFIG_PATH) as f:
+                cfg = _yaml.safe_load(f)
+            cfg.setdefault("whale_tracker", {}).setdefault("addresses", {})[name] = address
+            with open(_WHALE_CONFIG_PATH, "w") as f:
+                _yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            return ""
+        except Exception as exc:
+            return str(exc)
+    except Exception as exc:
+        return str(exc)
+
+
+def _whale_config_remove(name: str) -> str:
+    """Remove whale from config.yaml. Returns error string or '' on success."""
+    try:
+        from ruamel.yaml import YAML
+        ryaml = YAML()
+        ryaml.preserve_quotes = True
+        ryaml.width = 4096
+        with open(_WHALE_CONFIG_PATH) as f:
+            cfg = ryaml.load(f)
+        cfg.get("whale_tracker", {}).get("addresses", {}).pop(name, None)
+        with open(_WHALE_CONFIG_PATH, "w") as f:
+            ryaml.dump(cfg, f)
+        return ""
+    except ImportError:
+        import yaml as _yaml
+        try:
+            with open(_WHALE_CONFIG_PATH) as f:
+                cfg = _yaml.safe_load(f)
+            cfg.get("whale_tracker", {}).get("addresses", {}).pop(name, None)
+            with open(_WHALE_CONFIG_PATH, "w") as f:
+                _yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            return ""
+        except Exception as exc:
+            return str(exc)
+    except Exception as exc:
+        return str(exc)
+
+
+def _whale_db_remove(address: str) -> None:
+    """Delete whale data from DB tables."""
+    from src.db_sync import _conn, _db_path
+    if not _db_path.exists():
+        return
+    try:
+        with _conn() as conn:
+            conn.execute("DELETE FROM whale_meta WHERE address = ?", (address,))
+            conn.execute("DELETE FROM whale_activity WHERE address = ?", (address,))
+            conn.execute("DELETE FROM whale_positions WHERE address = ?", (address,))
+    except Exception:
+        pass
+
+
 # ── Whale Tracker panel ───────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
@@ -2479,6 +2554,30 @@ def _whale_account_card(m: dict, col_key_suffix: str) -> None:
                 key=f"wh_csv_{col_key_suffix}",
                 use_container_width=True,
             )
+
+    # Remove button (confirm via session state)
+    _confirm_key = f"wh_del_confirm_{col_key_suffix}"
+    if st.session_state.get(_confirm_key):
+        st.warning(f"Verwijder **{name}** inclusief alle data?")
+        rc1, rc2 = st.columns(2)
+        if rc1.button("✅ Ja, verwijder", key=f"wh_del_yes_{col_key_suffix}", type="primary"):
+            err = _whale_config_remove(name)
+            if not err:
+                _whale_db_remove(address)
+                st.session_state.pop(_confirm_key, None)
+                _q_whale_meta.clear()
+                st.success(f"{name} verwijderd.")
+                st.rerun()
+            else:
+                st.error(f"Fout: {err}")
+        if rc2.button("✗ Annuleer", key=f"wh_del_no_{col_key_suffix}"):
+            st.session_state.pop(_confirm_key, None)
+            st.rerun()
+    else:
+        if st.button("🗑️ Verwijder whale", key=f"wh_del_{col_key_suffix}",
+                     use_container_width=False):
+            st.session_state[_confirm_key] = True
+            st.rerun()
 
     st.divider()
 
@@ -2598,6 +2697,46 @@ def _whale_panel() -> None:
                 df_show["Whale USDC"] = df_show["Whale USDC"].apply(lambda x: f"${x:.2f}" if x else "")
             st.dataframe(df_show, hide_index=True, use_container_width=True)
             st.caption(f"{len(overlap)} overlappende trades")
+
+    # ── Whale toevoegen ──────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("➕ Whale toevoegen", expanded=not meta):
+        st.caption("Voeg een Polymarket-adres toe. De bot synchroniseert de activiteit automatisch (eerste sync ≤5 min).")
+        with st.form("wh_add_form", clear_on_submit=True):
+            wh_name_in = st.text_input(
+                "Naam (intern label)",
+                placeholder="bijv. crypto_whale_1",
+                help="Gebruik alleen letters, cijfers en underscores. Wordt gebruikt als label in de UI.",
+            )
+            wh_addr_in = st.text_input(
+                "Polymarket adres (0x…)",
+                placeholder="0x2c5aad8f0a9fb039bf4417250b52a62c3b95ef11",
+            )
+            submitted = st.form_submit_button("➕ Toevoegen", type="primary", use_container_width=True)
+
+        if submitted:
+            wh_name_clean = wh_name_in.strip().replace(" ", "_")
+            wh_addr_clean = wh_addr_in.strip().lower()
+            if not wh_name_clean:
+                st.error("Vul een naam in.")
+            elif not wh_addr_clean.startswith("0x") or len(wh_addr_clean) != 42:
+                st.error("Ongeldig adres — moet beginnen met 0x en 42 tekens lang zijn.")
+            elif wh_name_clean in [m["name"] for m in (meta or [])]:
+                st.error(f"Naam '{wh_name_clean}' bestaat al.")
+            elif wh_addr_clean in [m["address"].lower() for m in (meta or [])]:
+                st.warning("Dit adres is al toegevoegd.")
+            else:
+                err = _whale_config_write(wh_name_clean, wh_addr_clean)
+                if err:
+                    st.error(f"Config schrijven mislukt: {err}")
+                else:
+                    _q_whale_meta.clear()
+                    st.success(
+                        f"**{wh_name_clean}** toegevoegd. "
+                        "De bot synchroniseert de activiteit bij de volgende sync-cyclus (≤5 min). "
+                        "Klik daarna op 📥 Laad volledige historie voor alle historische data."
+                    )
+                    st.rerun()
 
 
 # Render 2 (_tabs_ready=False): Learning + Beveiliging direct, andere tabs tonen
