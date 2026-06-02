@@ -464,28 +464,31 @@ def _exit_loss_analysis(coin: str | None, days: int | None, only_today: bool = F
     pnl_cols = ["Totaal P&L", "Gem. P&L", "Gem. verlies", "Totaal verlies"]
     available_pnl_cols = [c for c in pnl_cols if c in display.columns]
     st.dataframe(
-        display.style.applymap(_color_pnl, subset=available_pnl_cols),
+        display.style.map(_color_pnl, subset=available_pnl_cols),
         use_container_width=True, hide_index=True,
     )
 
-    chart_data = edf.set_index("exit_reason")[["total_pnl"]].sort_values("total_pnl")
+    edf = edf.sort_values("total_pnl", na_position="last")
+    chart_data = edf.set_index("exit_reason")[["total_pnl"]]
     st.bar_chart(chart_data, use_container_width=True)
 
     worst = edf.iloc[0]
     best = edf.iloc[-1]
     col_w, col_b = st.columns(2)
     with col_w:
+        _pnl_w = float(worst["total_pnl"] or 0)
         st.metric(
             "Grootste verliesbron",
             worst["exit_reason"],
-            f"€{worst['total_pnl']:.2f} ({int(worst['n'])} trades)",
+            f"€{_pnl_w:.2f} ({int(worst['n'] or 0)} trades)",
             delta_color="off",
         )
     with col_b:
+        _pnl_b = float(best["total_pnl"] or 0)
         st.metric(
             "Grootste winstbron",
             best["exit_reason"],
-            f"€{best['total_pnl']:.2f} ({int(best['n'])} trades)",
+            f"€{_pnl_b:.2f} ({int(best['n'] or 0)} trades)",
             delta_color="off",
         )
 
