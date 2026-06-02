@@ -2609,23 +2609,9 @@ def _whale_panel() -> None:
 # the app never gets stuck on skeletons indefinitely.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-# ── Sidebar: toon/verberg geavanceerde tabs ───────────────────────────────────
-with st.sidebar:
-    st.divider()
-    show_advanced = st.toggle(
-        "🔬 Toon geavanceerde tabs",
-        value=st.session_state.get("show_advanced_tabs", False),
-        key="show_advanced_tabs",
-        help="Analytics, Portfolio en Whales tabbladen zichtbaar maken",
-    )
-
-_base_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router", "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging"]
-_adv_tab_names  = ["📊 Analytics", "💼 Portfolio", "🐋 Whales"]
-
-# Variable tab count: advanced tabs added only when toggle is on.
-# All run_every fragments are nested inside plain @st.fragment wrappers so their
-# auto-reruns don't interfere with the outer tab structure (DOM reconciliation).
-_all_tab_names = _base_tab_names + (_adv_tab_names if show_advanced else [])
+_all_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router",
+                  "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging",
+                  "📊 Analytics", "💼 Portfolio", "🐋 Whales"]
 _all_tabs = st.tabs(_all_tab_names)
 
 # Map tab objects by name
@@ -2676,28 +2662,27 @@ with tab_learning:
 with tab_guard:
     coin_protection_panel()
 
-if show_advanced:
-    tab_analytics = _tab_map["📊 Analytics"]
-    tab_portfolio = _tab_map["💼 Portfolio"]
-    tab_whale     = _tab_map["🐋 Whales"]
+tab_analytics = _tab_map["📊 Analytics"]
+tab_portfolio = _tab_map["💼 Portfolio"]
+tab_whale     = _tab_map["🐋 Whales"]
 
-    with tab_analytics:
-        if _tabs_ready:
-            analytics_panel()
-        else:
-            _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
+with tab_analytics:
+    if _tabs_ready:
+        analytics_panel()
+    else:
+        _tab_loading("📊 Analytics", "Handelsanalyse en grafieken worden geladen…")
 
-    with tab_portfolio:
-        if _tabs_ready:
-            _portfolio_panel()
-        else:
-            _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
+with tab_portfolio:
+    if _tabs_ready:
+        _portfolio_panel()
+    else:
+        _tab_loading("💼 Portfolio", "Portfolio snapshot wordt geladen…")
 
-    with tab_whale:
-        if _tabs_ready:
-            _whale_panel()
-        else:
-            _tab_loading("🐋 Whales", "Whale data wordt geladen…")
+with tab_whale:
+    if _tabs_ready:
+        _whale_panel()
+    else:
+        _tab_loading("🐋 Whales", "Whale data wordt geladen…")
 
 # ── Auto-advance naar volledig dashboard ───────────────────────────────────────
 # Na render 2 (skeleton pass) → trigger render 3 (volledig).

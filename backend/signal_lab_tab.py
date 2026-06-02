@@ -195,7 +195,7 @@ def _color_pnl(df: pd.DataFrame) -> pd.io.formats.style.Styler:
                     "background-color: rgba(248,113,113,0.15)" if f < 0 else "")
             except Exception:
                 return ""
-        styler = styler.applymap(_bg, subset=["Netto P&L"])
+        styler = styler.map(_bg, subset=["Netto P&L"])
     return styler
 
 
