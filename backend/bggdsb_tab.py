@@ -601,7 +601,7 @@ def bggdsb_panel() -> None:
         # Advies-signaal: wanneer is reverse instappen zinvol?
         _rev_score_raw = get_state("bggdsb_reverse_entry_advice")
         _bggdsb_stats_all = _q_stats()
-        _n_rev = int(_bggdsb_stats_all.get("total", 0))
+        _n_rev = int(_bggdsb_stats_all.get("n", 0))
         _win_rev = float(_bggdsb_stats_all.get("win_pct") or 0)
         if _n_rev >= 10:
             _inv_win = round(100 - _win_rev, 1)
