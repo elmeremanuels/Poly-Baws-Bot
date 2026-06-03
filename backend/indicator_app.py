@@ -272,20 +272,20 @@ def _wall_message(price: float, supports: list, resistances: list,
     # Op het niveau (< 0.12%)
     if sup_pct < 0.12:
         if direction == "down":
-            return f"🧱 Op support {sup['price']:,.0f} — kans op bounce!", "#f59e0b"
-        return f"🧱 Support {sup['price']:,.0f} — bevestigt stijging", "#22c55e"
+            return f"Op support {sup['price']:,.0f} — kans op bounce!", "#f59e0b"
+        return f"Support {sup['price']:,.0f} — bevestigt stijging", "#22c55e"
 
     if res_pct < 0.12:
         if direction == "up":
-            return f"🧱 Op weerstand {res['price']:,.0f} — kan stagneren", "#f59e0b"
-        return f"🧱 Weerstand {res['price']:,.0f} — bevestigt daling", "#ef4444"
+            return f"Op weerstand {res['price']:,.0f} — kan stagneren", "#f59e0b"
+        return f"Weerstand {res['price']:,.0f} — bevestigt daling", "#ef4444"
 
     # Nadert (< 0.35%)
     if direction == "down" and sup_pct < 0.35:
-        return f"⚠️ Nadert support {sup['price']:,.0f} (${price - sup['price']:,.0f})", "#f59e0b"
+        return f"Nadert support {sup['price']:,.0f} (${price - sup['price']:,.0f})", "#f59e0b"
 
     if direction == "up" and res_pct < 0.35:
-        return f"⚠️ Nadert weerstand {res['price']:,.0f} (${res['price'] - price:,.0f})", "#f59e0b"
+        return f"Nadert weerstand {res['price']:,.0f} (${res['price'] - price:,.0f})", "#f59e0b"
 
     # Neutraal dicht bij niveau (< 0.35%, andere richting)
     if sup_pct < 0.35:
@@ -300,29 +300,27 @@ def _levels_html(price: float, supports: list, resistances: list) -> str:
     """Compacte prijs-niveaus tabel: weerstand boven, support onder."""
     rows: list[str] = []
 
-    def src_icon(s: dict) -> str:
-        if s["src"] == "book":   return "🧱"
-        if s["src"] == "vpoc":   return "📊"
-        return "📍"
+    def src_tag(s: dict) -> str:
+        if s["src"] == "book": return "wall"
+        if s["src"] == "vpoc": return "vol"
+        return s["label"]   # gist.H, dag L, etc.
 
     # Tot 2 weerstanden (verste bovenaan)
     for lvl in reversed(resistances[:2]):
         pct = (lvl["price"] - price) / price * 100
         rows.append(
             f'<tr>'
-            f'<td style="color:#ef4444;padding:1px 3px;">{src_icon(lvl)}</td>'
-            f'<td style="color:#ef4444;font-family:monospace;">{lvl["price"]:,.0f}</td>'
-            f'<td style="color:#555;font-size:9px;">{lvl["label"]}</td>'
-            f'<td style="color:#ef4444;text-align:right;">+{pct:.1f}%</td>'
+            f'<td style="color:#ef4444;font-family:monospace;padding:1px 2px;">{lvl["price"]:,.0f}</td>'
+            f'<td style="color:#666;font-size:9px;padding:1px 3px;">{src_tag(lvl)}</td>'
+            f'<td style="color:#ef4444;text-align:right;padding:1px 2px;">+{pct:.1f}%</td>'
             f'</tr>'
         )
 
-    # Huidige prijs
+    # Huidige prijs — lichtgrijze achtergrond, geen wit-op-transparant probleem
     rows.append(
-        f'<tr style="border-top:1px solid #333;border-bottom:1px solid #333;">'
-        f'<td style="color:#aaa;">▶</td>'
-        f'<td style="color:#fff;font-weight:700;font-family:monospace;">{price:,.0f}</td>'
-        f'<td style="color:#555;font-size:9px;">nu</td>'
+        f'<tr style="background:#222;border-top:1px solid #444;border-bottom:1px solid #444;">'
+        f'<td style="color:#e0e0e0;font-family:monospace;font-weight:700;padding:2px 2px;">{price:,.0f}</td>'
+        f'<td style="color:#888;font-size:9px;padding:2px 3px;">nu</td>'
         f'<td></td>'
         f'</tr>'
     )
@@ -332,10 +330,9 @@ def _levels_html(price: float, supports: list, resistances: list) -> str:
         pct = (price - lvl["price"]) / price * 100
         rows.append(
             f'<tr>'
-            f'<td style="color:#22c55e;padding:1px 3px;">{src_icon(lvl)}</td>'
-            f'<td style="color:#22c55e;font-family:monospace;">{lvl["price"]:,.0f}</td>'
-            f'<td style="color:#555;font-size:9px;">{lvl["label"]}</td>'
-            f'<td style="color:#22c55e;text-align:right;">-{pct:.1f}%</td>'
+            f'<td style="color:#22c55e;font-family:monospace;padding:1px 2px;">{lvl["price"]:,.0f}</td>'
+            f'<td style="color:#666;font-size:9px;padding:1px 3px;">{src_tag(lvl)}</td>'
+            f'<td style="color:#22c55e;text-align:right;padding:1px 2px;">-{pct:.1f}%</td>'
             f'</tr>'
         )
 
@@ -344,8 +341,6 @@ def _levels_html(price: float, supports: list, resistances: list) -> str:
 
     return (
         f'<div style="font-size:10px;margin-top:6px;border-top:1px solid #1e1e1e;padding-top:5px;">'
-        f'<div style="color:#666;font-size:9px;margin-bottom:2px;">'
-        f'🧱 wall &nbsp; 📊 volume &nbsp; 📍 dagpivot</div>'
         f'<table style="width:100%;border-collapse:collapse;">{"".join(rows)}</table>'
         f'</div>'
     )
