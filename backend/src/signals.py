@@ -27,17 +27,29 @@ import httpx
 from .config_loader import CONFIG
 from .logger import log
 
-# ── Symbol mapping ─────────────────────────────────────────────────────────────
+# ── Symbol mapping (Kraken — Binance is geo-blocked in DE/EU) ──────────────────
 
-_COIN_TO_PERP: dict[str, str] = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "XRP": "XRPUSDT",
-    "DOGE": "DOGEUSDT",
+_COIN_TO_KRAKEN: dict[str, str] = {
+    "BTC":  "XBTUSD",
+    "ETH":  "ETHUSD",
+    "SOL":  "SOLUSD",
+    "XRP":  "XRPUSD",
+    "DOGE": "XDGEUSD",
 }
 
-_FAPI_BASE = "https://fapi.binance.com"
+_COIN_TO_KRAKEN_FUT: dict[str, str] = {
+    "BTC":  "PF_XBTUSD",
+    "ETH":  "PF_ETHUSD",
+    "SOL":  "PF_SOLUSD",
+    "XRP":  "PF_XRPUSD",
+    "DOGE": "PF_DOGEUSD",
+}
+
+# Backward-compat alias used elsewhere in this file
+_COIN_TO_PERP = _COIN_TO_KRAKEN
+
+_KRAKEN_REST = "https://api.kraken.com/0/public"
+_KRAKEN_FUT  = "https://futures.kraken.com/derivatives/api/v3"
 
 # ── In-memory buffers ──────────────────────────────────────────────────────────
 
@@ -48,6 +60,10 @@ _TRADE_WINDOW = 300  # keep 5 minutes of aggTrade data
 # Perpetuals aggTrade buffer — separate from spot (same structure)
 _perp_trades: dict[str, deque] = {}
 _perp_last_trade_id: dict[str, int] = {}
+
+# Kraken pagination state (nanosecond timestamps as strings)
+_kraken_last_ts:  dict[str, str] = {}   # spot: "last" value from Kraken Trades API
+_kraken_fut_ts:   dict[str, str] = {}   # perp: ISO timestamp of latest trade
 
 # {coin: latest funding rate float}
 _funding_rates: dict[str, float] = {}
@@ -395,212 +411,164 @@ def get_conviction(
     return direction, round(min(1.0, max_score), 3)
 
 
-# ── aggTrade REST poller (replaces WebSocket stream) ──────────────────────────
+# ── Kraken trade poller (Binance geo-blocked in DE/EU) ────────────────────────
 
-_SPOT_REST = "https://api.binance.com/api/v3"
-_POLL_INTERVAL = 10.0  # seconds between background aggTrade polls (10s is enough for rolling OFI)
+_POLL_INTERVAL = 10.0  # seconds between polls
 
-# Per-coin last seen aggTradeId — shared between background loop and on-demand refresh
-_last_trade_id: dict[str, int] = {}
+
+def _kraken_parse_spot(data: dict, coin: str) -> list:
+    """Extract trades list from Kraken /Trades response."""
+    result = data.get("result", {})
+    trades = next((v for k, v in result.items() if k != "last"), [])
+    return trades
 
 
 async def refresh_ofi(coin: str) -> None:
-    """Fetch the latest aggTrades for one coin right now (on-demand).
+    """Fetch the latest Kraken spot trades for one coin on-demand.
 
-    Called directly before signal stamping at entry and trigger time so the
-    OFI value is always ≤1 second old at the exact moment it matters, regardless
-    of where the background poll cycle is.
+    Called directly before signal stamping so OFI is always fresh at entry time.
     """
-    if coin not in _COIN_TO_PERP:
+    if coin not in _COIN_TO_KRAKEN:
         return
-    symbol = _COIN_TO_PERP[coin]
+    pair = _COIN_TO_KRAKEN[coin]
     try:
-        params: dict = {"symbol": symbol, "limit": 500}
-        last = _last_trade_id.get(coin)
-        if last:
-            params["fromId"] = last + 1
+        params: dict = {"pair": pair, "count": 500}
+        last_ts = _kraken_last_ts.get(coin)
+        if last_ts:
+            params["since"] = last_ts
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{_SPOT_REST}/aggTrades", params=params)
+            resp = await client.get(f"{_KRAKEN_REST}/Trades", params=params)
             resp.raise_for_status()
-            trades = resp.json()
-        if not trades:
-            return
+            data = resp.json()
+        trades = _kraken_parse_spot(data, coin)
         for t in trades:
-            record_trade(coin, float(t["q"]), not bool(t["m"]))
-        _last_trade_id[coin] = int(trades[-1]["a"])
+            record_trade(coin, float(t[1]), t[3] == "b")
+        last = data.get("result", {}).get("last")
+        if last:
+            _kraken_last_ts[coin] = str(last)
     except Exception as e:
         log.warning("ofi_refresh_failed", coin=coin, error=str(e))
 
 
 async def run_trade_poll_loop() -> None:
-    """Poll Binance spot aggTrades REST endpoint every 5s per coin for OFI.
+    """Poll Kraken spot trades + Kraken Futures every 10s per coin for OFI.
 
-    Replaces the WebSocket aggTrade stream which is blocked (HTTP 451) for
-    datacenter IPs.  Tracks the last seen aggTradeId per coin so each trade
-    is recorded exactly once.
+    Binance is geo-blocked in DE/EU (HTTP 451 / CloudFront block).
+    Kraken spot: GET /public/Trades?pair=XBTUSD&since=<nanotime>&count=1000
+    Kraken Futures: GET /derivatives/api/v3/history?symbol=PF_XBTUSD&lastTime=<ISO>
 
-    aggTrade fields:
-      a  — aggregate trade ID (used for fromId pagination)
-      q  — quantity (base asset)
-      m  — is buyer the market maker? True = sell-initiated, False = buy-initiated
+    Kraken rate limit: ~1 req/s public — we add small sleeps between coins.
     """
-    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
-    log.info("trade_poll_loop_starting", coins=coins)
+    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_KRAKEN]
+    log.info("trade_poll_loop_starting", coins=coins, source="kraken")
 
-    # Both clients created once and kept alive for the lifetime of this loop.
-    # Previously perp_client was created inside the while-loop — a new TCP
-    # connection every 10s per coin, exhausting sockets under sustained load.
     async with httpx.AsyncClient(timeout=10) as client, \
-               httpx.AsyncClient(timeout=10) as perp_client:
-        # Seed: fetch last 500 trades per coin to pre-fill the OFI buffer
+               httpx.AsyncClient(timeout=10) as fut_client:
+
+        # Seed spot — last 1000 trades per coin
         for coin in coins:
-            symbol = _COIN_TO_PERP[coin]
+            pair = _COIN_TO_KRAKEN[coin]
             try:
                 resp = await client.get(
-                    f"{_SPOT_REST}/aggTrades",
-                    params={"symbol": symbol, "limit": 500},
-                )
-                resp.raise_for_status()
-                trades = resp.json()
-                for t in trades:
-                    record_trade(coin, float(t["q"]), not bool(t["m"]))
-                if trades:
-                    _last_trade_id[coin] = int(trades[-1]["a"])
-                log.info("trade_poll_seeded", coin=coin, n=len(trades))
-            except Exception as e:
-                log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
-
-        # Seed perp aggTrades buffer (reuse perp_client created above)
-        for coin in coins:
-            symbol = _COIN_TO_PERP[coin]
-            try:
-                resp = await perp_client.get(
-                    f"{_FAPI_BASE}/fapi/v1/aggTrades",
-                    params={"symbol": symbol, "limit": 500},
-                )
-                resp.raise_for_status()
-                trades = resp.json()
-                for t in trades:
-                    record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
-                if trades:
-                    _perp_last_trade_id[coin] = int(trades[-1]["a"])
-                log.info("perp_trade_poll_seeded", coin=coin, n=len(trades))
-            except Exception as e:
-                log.warning("perp_trade_poll_seed_failed", coin=coin, error=str(e))
-
-        # Background polling loop — keeps rolling buffer current between on-demand refreshes
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL)
-            for coin in coins:
-                symbol = _COIN_TO_PERP[coin]
-                try:
-                    params: dict = {"symbol": symbol, "limit": 500}
-                    last = _last_trade_id.get(coin)
-                    if last:
-                        params["fromId"] = last + 1
-                    resp = await client.get(f"{_SPOT_REST}/aggTrades", params=params)
-                    resp.raise_for_status()
-                    trades = resp.json()
-                    if not trades:
-                        continue
-                    for t in trades:
-                        record_trade(coin, float(t["q"]), not bool(t["m"]))
-                    _last_trade_id[coin] = int(trades[-1]["a"])
-                except Exception as e:
-                    log.warning("trade_poll_failed", coin=coin, error=str(e))
-
-            # Poll perp aggTrades — reuse long-lived perp_client (no new client!)
-            for coin in coins:
-                symbol = _COIN_TO_PERP[coin]
-                try:
-                    params: dict = {"symbol": symbol, "limit": 500}
-                    last = _perp_last_trade_id.get(coin)
-                    if last:
-                        params["fromId"] = last + 1
-                    resp = await perp_client.get(
-                        f"{_FAPI_BASE}/fapi/v1/aggTrades", params=params
-                    )
-                    resp.raise_for_status()
-                    trades = resp.json()
-                    if not trades:
-                        continue
-                    for t in trades:
-                        record_perp_trade(coin, float(t["q"]), not bool(t["m"]))
-                    _perp_last_trade_id[coin] = int(trades[-1]["a"])
-                except Exception as e:
-                    log.warning("perp_trade_poll_failed", coin=coin, error=str(e))
-
-
-# ── Funding rate background poller ─────────────────────────────────────────────
-
-async def _fetch_ls_ratio(client: httpx.AsyncClient, coin: str) -> None:
-    """Fetch global long/short account ratio for one coin and cache it."""
-    symbol = _COIN_TO_PERP.get(coin)
-    if not symbol:
-        return
-    try:
-        resp = await client.get(
-            f"{_FAPI_BASE}/futures/data/globalLongShortAccountRatio",
-            params={"symbol": symbol, "period": "5m", "limit": 1},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            ratio = float(data[0]["longShortRatio"])
-            _ls_ratios[coin] = ratio
-            log.debug("ls_ratio_updated", coin=coin, ratio=ratio)
-    except Exception as e:
-        log.warning("ls_ratio_fetch_failed", coin=coin, error=str(e))
-
-
-async def seed_funding_rates() -> None:
-    """Fetch current funding rates and L/S ratios once on startup."""
-    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
-    async with httpx.AsyncClient(timeout=10) as client:
-        for coin in coins:
-            symbol = _COIN_TO_PERP[coin]
-            try:
-                resp = await client.get(
-                    f"{_FAPI_BASE}/fapi/v1/premiumIndex",
-                    params={"symbol": symbol},
+                    f"{_KRAKEN_REST}/Trades",
+                    params={"pair": pair, "count": 1000},
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                rate = float(data.get("lastFundingRate", 0))
-                _funding_rates[coin] = rate
-                log.info("funding_rate_seeded", coin=coin, rate=rate)
+                trades = _kraken_parse_spot(data, coin)
+                for t in trades:
+                    record_trade(coin, float(t[1]), t[3] == "b")
+                last = data.get("result", {}).get("last")
+                if last:
+                    _kraken_last_ts[coin] = str(last)
+                log.info("trade_poll_seeded", coin=coin, n=len(trades), source="kraken")
             except Exception as e:
-                log.warning("funding_rate_seed_failed", coin=coin, error=str(e))
-            await _fetch_ls_ratio(client, coin)
+                log.warning("trade_poll_seed_failed", coin=coin, error=str(e))
+            await asyncio.sleep(0.5)  # respect Kraken public rate limit
+
+        # Seed perp — Kraken Futures history
+        for coin in coins:
+            fut_pair = _COIN_TO_KRAKEN_FUT.get(coin)
+            if not fut_pair:
+                continue
+            try:
+                resp = await fut_client.get(
+                    f"{_KRAKEN_FUT}/history",
+                    params={"symbol": fut_pair},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                trades = data.get("history", [])
+                for t in trades:
+                    record_perp_trade(coin, float(t.get("size", 0)), t.get("side") == "buy")
+                if trades:
+                    _kraken_fut_ts[coin] = trades[0].get("time", "")
+                log.info("perp_trade_poll_seeded", coin=coin, n=len(trades), source="kraken_fut")
+            except Exception as e:
+                log.warning("perp_trade_poll_seed_failed", coin=coin, error=str(e))
+            await asyncio.sleep(1.0)  # Kraken Futures: 1 req/s limit
+
+        # Background polling loop
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+
+            # Spot polling
+            for coin in coins:
+                pair = _COIN_TO_KRAKEN[coin]
+                try:
+                    params: dict = {"pair": pair, "count": 1000}
+                    last_ts = _kraken_last_ts.get(coin)
+                    if last_ts:
+                        params["since"] = last_ts
+                    resp = await client.get(f"{_KRAKEN_REST}/Trades", params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    trades = _kraken_parse_spot(data, coin)
+                    for t in trades:
+                        record_trade(coin, float(t[1]), t[3] == "b")
+                    last = data.get("result", {}).get("last")
+                    if last:
+                        _kraken_last_ts[coin] = str(last)
+                except Exception as e:
+                    log.warning("trade_poll_failed", coin=coin, error=str(e))
+                await asyncio.sleep(0.3)
+
+            # Perp polling
+            for coin in coins:
+                fut_pair = _COIN_TO_KRAKEN_FUT.get(coin)
+                if not fut_pair:
+                    continue
+                try:
+                    params: dict = {"symbol": fut_pair}
+                    last_time = _kraken_fut_ts.get(coin)
+                    if last_time:
+                        params["lastTime"] = last_time
+                    resp = await fut_client.get(f"{_KRAKEN_FUT}/history", params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    trades = data.get("history", [])
+                    for t in trades:
+                        record_perp_trade(coin, float(t.get("size", 0)), t.get("side") == "buy")
+                    if trades:
+                        _kraken_fut_ts[coin] = trades[0].get("time", "")
+                except Exception as e:
+                    log.warning("perp_trade_poll_failed", coin=coin, error=str(e))
+                await asyncio.sleep(0.5)
+
+
+# ── Funding rate / L/S — skipped (Binance blocked in DE/EU) ───────────────────
+# Funding rate was already removed from conviction (always neutral in 3239 trades).
+# L/S ratio: Binance blocked, Bybit blocked (CloudFront). Skipping both.
+# _funding_rates and _ls_ratios stay empty → conviction ignores them gracefully.
+
+async def seed_funding_rates() -> None:
+    log.info("funding_rate_seed_skipped", reason="binance_geo_blocked_DE_EU")
 
 
 async def funding_rate_loop() -> None:
-    """Poll Binance futures funding rates every 30 minutes.
-
-    Funding rates are set at 8-hour intervals (00:00/08:00/16:00 UTC) and barely
-    change between intervals. Polling every 5 min added API load with zero
-    information gain — 30 min is more than sufficient.
-    """
-    await seed_funding_rates()
-    coins = [c for c in CONFIG.get("coins", {}).keys() if c in _COIN_TO_PERP]
+    log.info("funding_rate_loop_skipped", reason="binance_geo_blocked_DE_EU")
     while True:
-        await asyncio.sleep(1800)
-        async with httpx.AsyncClient(timeout=10) as client:
-            for coin in coins:
-                symbol = _COIN_TO_PERP[coin]
-                try:
-                    resp = await client.get(
-                        f"{_FAPI_BASE}/fapi/v1/premiumIndex",
-                        params={"symbol": symbol},
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    rate = float(data.get("lastFundingRate", 0))
-                    _funding_rates[coin] = rate
-                    log.debug("funding_rate_updated", coin=coin, rate=rate)
-                except Exception as e:
-                    log.warning("funding_rate_poll_failed", coin=coin, error=str(e))
-                await _fetch_ls_ratio(client, coin)
+        await asyncio.sleep(3600)  # sleep forever, no-op
 
 
 # ── Pricing Model v1: Black-Scholes binary option ─────────────────────────────
