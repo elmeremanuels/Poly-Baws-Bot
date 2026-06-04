@@ -21,19 +21,18 @@ from .config_loader import CONFIG
 from .logger import log, write_window_tradelog, save_dashboard_state
 from . import scanner, ws_client, risk
 from .state import has_traded_window, register_window_trade, get_mode
-from .stoplicht_signals import get_stoplicht, get_stoplicht_dict
+from .stoplicht_signals import get_stoplicht_dict
 from .position_manager import WindowPositions, get_position_sizes
 from .distance_proxy import get_winning_side
 
 _hold_thresholds: dict[str, float] = {}
 
 
-async def _save_stoplicht_state(coin: str, color: str, direction: str | None, score: float) -> None:
+async def _save_stoplicht_state(coin: str, st_dict: dict) -> None:
+    """Persist full stoplicht state dict to dashboard_state for the UI."""
     try:
         payload = json.dumps({
-            "color": color,
-            "direction": direction,
-            "score": score,
+            **st_dict,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         await save_dashboard_state(f"scalper_stoplicht_{coin}", payload)
@@ -251,9 +250,7 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         try:
             st = await get_stoplicht_dict(coin, yes_token, no_token)
             last_st = st
-            yes_no_dir = ("YES" if st.get("direction") == "UP"
-                          else "NO" if st.get("direction") == "DOWN" else None)
-            await _save_stoplicht_state(coin, st.get("color", "ROOD"), yes_no_dir, st.get("score", 0.0))
+            await _save_stoplicht_state(coin, st)
         except Exception:
             await asyncio.sleep(1.0)
             continue
@@ -328,8 +325,9 @@ async def scalper_loop(coin: str) -> None:
         try:
             # Always evaluate stoplicht so dashboard shows live data in any mode
             try:
-                color, direction, score = await get_stoplicht(coin)
-                await _save_stoplicht_state(coin, color, direction, score)
+                from .stoplicht_signals import get_stoplicht_dashboard as _gsd
+                _dash = await _gsd(coin)
+                await _save_stoplicht_state(coin, _dash)
             except Exception:
                 pass
 

@@ -170,21 +170,32 @@ def scalper_panel() -> None:
 
     state = _q_stoplicht_state(coin)
     if state:
-        color = state.get("color", "ROOD")
-        direction = state.get("direction")
-        score = state.get("score", 0.0)
+        color      = state.get("color", "ROOD")
+        direction  = state.get("direction")
+        score      = state.get("score", 0.0)
         updated_at = state.get("updated_at", "")
+        regime     = state.get("regime", "")
+        ofi        = state.get("ofi")
+        obi        = state.get("obi")
+        mom        = state.get("mom")
+        cvd        = state.get("cvd")
+        sup_price  = state.get("nearest_support")
+        res_price  = state.get("nearest_resistance")
 
         color_hex = {"GROEN": "#4ade80", "ORANJE": "#fb923c", "ROOD": "#f87171"}.get(color, "#888")
         color_bg  = {"GROEN": "#0d2b0d", "ORANJE": "#2b1a0d", "ROOD": "#2b0d0d"}.get(color, "#1a1a1a")
         verdict   = {"GROEN": "✅ Instap mogelijk", "ORANJE": "⏳ Afwachten", "ROOD": "🚫 Geen entry"}.get(color, "—")
+        regime_color = {"RANGING": "#4ade80", "TRENDING": "#60a5fa", "CHOPPY": "#f87171"}.get(regime, "#94a3b8")
 
         st.markdown(
             f'<div style="background:{color_bg};border:2px solid {color_hex};border-radius:12px;'
             f'padding:20px 28px;margin-bottom:12px;">'
             f'<span style="font-size:3em;font-weight:800;color:{color_hex};">{color}</span>'
             f'<span style="font-size:1.1em;color:#94a3b8;margin-left:20px;">{verdict}</span>'
-            f'</div>',
+            + (f'<span style="font-size:0.85em;color:{regime_color};margin-left:14px;'
+               f'background:{regime_color}22;padding:2px 8px;border-radius:4px;">{regime}</span>'
+               if regime else "")
+            + f'</div>',
             unsafe_allow_html=True,
         )
 
@@ -200,16 +211,34 @@ def scalper_panel() -> None:
             except Exception:
                 c4.metric("Bijgewerkt", updated_at[:19])
 
-        # Score breakdown bar
+        # Score progress bar
         bar_pct = min(100, int(score * 100))
-        bar_color = color_hex
         st.markdown(
-            f'<div style="background:#1e2330;border-radius:6px;height:10px;margin:4px 0 12px 0;">'
-            f'<div style="background:{bar_color};width:{bar_pct}%;height:10px;border-radius:6px;"></div>'
+            f'<div style="background:#1e2330;border-radius:6px;height:10px;margin:4px 0 8px 0;">'
+            f'<div style="background:{color_hex};width:{bar_pct}%;height:10px;border-radius:6px;"></div>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.caption(f"Score {score:.3f} / 1.000 — wegingen: OFI 35% · OBI 28% · MOM 20% · Perp 12% · CVD 5%")
+
+        # Signal breakdown
+        def _fmt(v):
+            return f"{v:.3f}" if v is not None else "—"
+
+        sig_parts = [
+            f"OFI {_fmt(ofi)}",
+            f"OBI {_fmt(obi)}",
+            f"MOM {_fmt(mom)}",
+            f"CVD {_fmt(cvd)}",
+        ]
+        st.caption(" · ".join(sig_parts))
+
+        # S/R levels
+        if sup_price or res_price:
+            sr1, sr2 = st.columns(2)
+            if res_price:
+                sr1.metric("Weerstand", f"${res_price:,.0f}", help="Nearest ask wall binnen 1.5%")
+            if sup_price:
+                sr2.metric("Support", f"${sup_price:,.0f}", help="Nearest bid wall binnen 1.5%")
     else:
         st.markdown(
             '<div style="background:#1e2330;border:1px solid #334155;border-radius:12px;'
