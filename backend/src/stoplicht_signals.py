@@ -1,0 +1,211 @@
+"""Stoplicht signals for the Stoplicht Scalper mode.
+
+Three-color signal + direction based on:
+  OFI  — Order Flow Imbalance (spot Kraken trades, via signals.py)
+  OBI  — Order Book Imbalance (top-10 bid/ask depth, Kraken /Depth)
+  MOM  — VWAP momentum (regime._asset_prices deque, 45s window)
+  Perp — Perpetual OFI (Kraken futures, via signals.py)
+
+Signal colors:
+  GROEN  — combined score ≥ green_threshold (default 0.60)
+  ORANJE — combined score ≥ orange_threshold (default 0.35)
+  ROOD   — combined score < orange_threshold or no direction
+
+Direction: "YES" = bullish (bet price UP), "NO" = bearish (bet price DOWN).
+"""
+from __future__ import annotations
+
+import time
+
+import httpx
+
+from .config_loader import CONFIG
+from .logger import log
+
+_KRAKEN_REST = "https://api.kraken.com/0/public"
+
+_COIN_TO_KRAKEN: dict[str, str] = {
+    "BTC":  "XBTUSD",
+    "ETH":  "ETHUSD",
+    "SOL":  "SOLUSD",
+    "XRP":  "XRPUSD",
+    "DOGE": "XDGEUSD",
+}
+
+# Kraken /Depth cache: {coin: (unix_ts, book_dict)}
+_depth_cache: dict[str, tuple[float, dict]] = {}
+_DEPTH_CACHE_TTL = 2.0
+
+
+async def _fetch_kraken_depth(coin: str) -> dict | None:
+    """Fetch top-10 bid/ask levels from Kraken /Depth. Cached for 2 seconds."""
+    cached = _depth_cache.get(coin)
+    if cached and time.time() - cached[0] < _DEPTH_CACHE_TTL:
+        return cached[1]
+
+    pair = _COIN_TO_KRAKEN.get(coin)
+    if not pair:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"{_KRAKEN_REST}/Depth",
+                params={"pair": pair, "count": 10},
+            )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        result = data.get("result", {})
+        book = result.get(pair) or next(iter(result.values()), None)
+        if not book:
+            return None
+        _depth_cache[coin] = (time.time(), book)
+        return book
+    except Exception as exc:
+        log.debug("stoplicht_depth_error", coin=coin, error=str(exc))
+        return None
+
+
+def _compute_obi(book: dict) -> float | None:
+    """Order Book Imbalance = bid_volume / (bid_vol + ask_vol) for top-10 levels.
+
+    0.5 = neutral; > 0.5 = bid-heavy (bullish); < 0.5 = ask-heavy (bearish).
+    """
+    try:
+        bids = book.get("bids", [])[:10]
+        asks = book.get("asks", [])[:10]
+        bid_vol = sum(float(lv[1]) for lv in bids)
+        ask_vol = sum(float(lv[1]) for lv in asks)
+        total = bid_vol + ask_vol
+        if total < 1e-8:
+            return None
+        return bid_vol / total
+    except Exception:
+        return None
+
+
+def _compute_momentum(coin: str, window_secs: float = 45.0) -> float | None:
+    """VWAP momentum from regime._asset_prices.
+
+    Splits window in halves: recent VWAP vs earlier VWAP.
+    Returns -1..+1 where 0.05% drift maps to ±1.0.
+    """
+    from . import regime as _regime
+
+    buf = _regime._asset_prices.get(coin)
+    if not buf:
+        return None
+    now = time.time()
+    cutoff = now - window_secs
+    mid = now - window_secs / 2
+
+    recent = [(p, 1.0) for ts, p in buf if ts >= mid]
+    early = [(p, 1.0) for ts, p in buf if cutoff <= ts < mid]
+
+    if len(recent) < 3 or len(early) < 3:
+        return None
+
+    def vwap(lst: list) -> float:
+        v = sum(q for _, q in lst)
+        return sum(p * q for p, q in lst) / v if v > 1e-10 else 0.0
+
+    r, e = vwap(recent), vwap(early)
+    if e == 0:
+        return None
+    return max(-1.0, min(1.0, (r - e) / e * 100 / 0.05))
+
+
+async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
+    """Compute the stoplicht signal for a coin.
+
+    Returns:
+        (color: "GROEN"/"ORANJE"/"ROOD", direction: "YES"/"NO"/None, score: 0.0–1.0)
+        "YES" = bullish (buy YES token, bet price goes UP)
+        "NO"  = bearish (buy NO token, bet price goes DOWN)
+    """
+    from . import signals as _sig
+
+    cfg = CONFIG.get("stoplicht_scalper", {})
+    green_thr = cfg.get("green_threshold", 0.60)
+    orange_thr = cfg.get("orange_threshold", 0.35)
+
+    ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
+    perp_ofi = _sig.get_perp_order_flow_imbalance(coin, window_secs=60.0)
+    mom = _compute_momentum(coin, window_secs=45.0)
+    book = await _fetch_kraken_depth(coin)
+    obi = _compute_obi(book) if book else None
+
+    bull = 0.0
+    bear = 0.0
+
+    # OFI spot — primary gate (neutral zone 0.45–0.55 contributes nothing)
+    if ofi is not None:
+        if ofi > 0.55:
+            bull += min(0.35, (ofi - 0.55) / 0.45 * 0.35)
+        elif ofi < 0.45:
+            bear += min(0.35, (0.45 - ofi) / 0.45 * 0.35)
+
+    # OBI — strongest sub-minute predictor (Cont et al. 2014)
+    if obi is not None:
+        if obi > 0.55:
+            bull += min(0.28, (obi - 0.55) / 0.45 * 0.28)
+        elif obi < 0.45:
+            bear += min(0.28, (0.45 - obi) / 0.45 * 0.28)
+
+    # VWAP momentum
+    if mom is not None:
+        if mom > 0.1:
+            bull += min(0.20, mom * 0.20)
+        elif mom < -0.1:
+            bear += min(0.20, abs(mom) * 0.20)
+
+    # Perpetual OFI — confirmation
+    if perp_ofi is not None:
+        if perp_ofi > 0.55:
+            bull += min(0.12, (perp_ofi - 0.55) / 0.45 * 0.12)
+        elif perp_ofi < 0.45:
+            bear += min(0.12, (0.45 - perp_ofi) / 0.45 * 0.12)
+
+    score = max(bull, bear)
+
+    if score < 0.01:
+        return "ROOD", None, 0.0
+
+    direction = "YES" if bull >= bear else "NO"
+
+    if score >= green_thr:
+        color = "GROEN"
+    elif score >= orange_thr:
+        color = "ORANJE"
+    else:
+        color = "ROOD"
+
+    log.debug(
+        "stoplicht_computed",
+        coin=coin, color=color, direction=direction, score=round(score, 3),
+        ofi=ofi, obi=round(obi, 3) if obi is not None else None,
+        mom=round(mom, 3) if mom is not None else None,
+    )
+    return color, direction, round(score, 3)
+
+
+async def get_stoplicht_dashboard(coin: str) -> dict:
+    """Stoplicht state dict for dashboard display."""
+    from . import signals as _sig
+    from . import regime as _regime
+
+    color, direction, score = await get_stoplicht(coin)
+    ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
+    mom = _compute_momentum(coin, window_secs=45.0)
+    book = await _fetch_kraken_depth(coin)
+    obi = _compute_obi(book) if book else None
+
+    return {
+        "color": color,
+        "direction": direction,
+        "score": score,
+        "ofi": ofi,
+        "obi": obi,
+        "mom": mom,
+        "regime": _regime.get_current_regime(coin),
+    }

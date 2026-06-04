@@ -152,6 +152,23 @@ CREATE TABLE IF NOT EXISTS learning_cycles (
 
 CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_analytics ON trades(status, trigger_hit, coin, created_at);
+
+CREATE TABLE IF NOT EXISTS window_tradelog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_id TEXT UNIQUE,
+    coin TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT,
+    stoplicht TEXT,
+    direction TEXT,
+    entry_price REAL,
+    exit_price REAL,
+    exit_reason TEXT,
+    pnl_eur REAL,
+    hold_threshold_used REAL,
+    paper INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -426,6 +443,21 @@ async def write_oracle_analysis(
                 reasoning, discord_summary, fear_greed_at_time,
             ),
         )
+        await db.commit()
+
+
+async def write_window_tradelog(entry: dict) -> None:
+    """Insert or replace a window_tradelog record for the Stoplicht Scalper."""
+    async with _db() as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO window_tradelog
+            (window_id, coin, window_start, window_end, stoplicht,
+             direction, entry_price, exit_price, exit_reason,
+             pnl_eur, hold_threshold_used, paper, created_at)
+            VALUES (:window_id, :coin, :window_start, :window_end, :stoplicht,
+                    :direction, :entry_price, :exit_price, :exit_reason,
+                    :pnl_eur, :hold_threshold_used, :paper, datetime('now'))
+        """, entry)
         await db.commit()
 
 

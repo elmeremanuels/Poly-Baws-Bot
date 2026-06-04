@@ -49,10 +49,11 @@ from analytics_tab import analytics_panel
 from signal_lab_tab import signal_lab_panel
 from coin_protection_tab import coin_protection_panel
 from bggdsb_tab import bggdsb_panel
+from scalper_tab import scalper_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
-MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live"]
+MODES = ["paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live", "stoplicht_scalper"]
 MODE_LABELS = {
     "paper_hybrid":   "paper_hybrid",
     "paper_auto":     "paper_auto",
@@ -61,8 +62,9 @@ MODE_LABELS = {
     "live_learning":  "🔴 live_learning",
     "signal_trader":  "signal_trader",
     "auto_router":    "auto_router",
-    "bggdsb_paper":   "🧠 BGGDSB paper",
-    "bggdsb_live":    "🔴 BGGDSB live",
+    "bggdsb_paper":       "🧠 BGGDSB paper",
+    "bggdsb_live":        "🔴 BGGDSB live",
+    "stoplicht_scalper":  "🚦 Stoplicht Scalper",
 }
 # Modes that use real money and require confirmation before switching
 LIVE_MODES = {"live_hybrid", "live_auto", "live_learning", "bggdsb_live"}
@@ -2748,7 +2750,7 @@ def _whale_panel() -> None:
 # the app never gets stuck on skeletons indefinitely.
 _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste keer
 
-_all_tab_names = ["🧠 BGGDSB", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router",
+_all_tab_names = ["🧠 BGGDSB", "🚦 Scalper", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router",
                   "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging",
                   "📊 Analytics", "💼 Portfolio", "🐋 Whales"]
 _all_tabs = st.tabs(_all_tab_names)
@@ -2757,6 +2759,7 @@ _all_tabs = st.tabs(_all_tab_names)
 _tab_map = dict(zip(_all_tab_names, _all_tabs))
 
 tab_bggdsb    = _tab_map["🧠 BGGDSB"]
+tab_scalper   = _tab_map["🚦 Scalper"]
 tab_live      = _tab_map["🔴 Live"]
 tab_st        = _tab_map["🎯 Signal Trader"]
 tab_ar        = _tab_map["🤖 Auto Router"]
@@ -2769,6 +2772,12 @@ with tab_bggdsb:
         bggdsb_panel()
     else:
         _tab_loading("🧠 BGGDSB", "BGGDSB strategie data wordt geladen…")
+
+with tab_scalper:
+    if _tabs_ready:
+        scalper_panel()
+    else:
+        _tab_loading("🚦 Scalper", "Stoplicht Scalper data wordt geladen…")
 
 with tab_live:
     if _tabs_ready:

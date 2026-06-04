@@ -257,6 +257,11 @@ async def _coin_loop(coin: str) -> None:
             await asyncio.sleep(10)
             continue
 
+        if get_mode() == "stoplicht_scalper":
+            # scalper_loop handles its own per-coin logic; _coin_loop just sleeps
+            await asyncio.sleep(10)
+            continue
+
         if get_mode() in ("bggdsb_paper", "bggdsb_live"):
             # Paper mode nooit blokkeren door kill switch — kost geen echt geld.
             # Live mode WEL blokkeren bij kill switch, TENZIJ de effectieve paper-mode aan staat
@@ -1430,6 +1435,11 @@ async def run_bot() -> None:
     from .signal_trader import signal_trader_loop as _st_loop
     for coin in COINS:
         tasks.append(asyncio.create_task(_st_loop(coin)))
+
+    # Stoplicht scalper loops (self-gate on stoplicht_scalper mode)
+    from .stoplicht_scalper import scalper_loop as _scalper_loop
+    for coin in COINS:
+        tasks.append(asyncio.create_task(_scalper_loop(coin)))
 
     # Always spawn the learning loop; it self-gates on live_learning mode so a
     # runtime mode switch (not just a restart-into-live_learning) activates it.

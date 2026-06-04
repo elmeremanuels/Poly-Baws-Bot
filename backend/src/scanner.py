@@ -1,6 +1,7 @@
-"""Multi-coin market scanner — discovers upcoming 5-min windows on Polymarket."""
+"""Multi-coin market scanner — discovers upcoming N-min windows on Polymarket."""
 import asyncio
 import json
+import re
 from datetime import datetime, timezone, timedelta
 import httpx
 
@@ -97,14 +98,18 @@ def _normalize_event_market(coin: str, event: dict, market: dict) -> dict | None
 
     slug = event.get("slug", "")
 
-    # Parse window_start from slug. Pattern: {coin}-updown-5m-{unix_epoch}
+    # Parse window_start and duration from slug.
+    # Pattern: {coin}-updown-{N}m-{unix_epoch}  e.g. btc-updown-15m-1234567890
     window_start = None
     window_end = None
     parts = slug.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit():
         try:
             window_start = datetime.fromtimestamp(int(parts[1]), tz=timezone.utc)
-            window_end = window_start + timedelta(minutes=5)
+            # Extract duration: look for "{N}m" suffix in the prefix part
+            dur_match = re.search(r"-(\d+)m$", parts[0])
+            duration_mins = int(dur_match.group(1)) if dur_match else 5
+            window_end = window_start + timedelta(minutes=duration_mins)
         except (ValueError, OSError):
             pass
 
@@ -246,6 +251,31 @@ def get_tradeable_market(coin: str) -> dict | None:
         if cutoff_before <= minutes_to_start <= start_before:
             return m
     return None
+
+
+async def get_next_scalper_market(coin: str, filter_slug: str) -> dict | None:
+    """Fetch the next upcoming market for the Stoplicht Scalper (uses custom filter_slug).
+
+    This bypasses the per-coin _market_cache so the scalper can use a different
+    duration slug (e.g. 'btc-updown-15m') without affecting the straddle bot.
+    """
+    markets = await _fetch_markets_for_coin(coin, filter_slug)
+    now = datetime.now(timezone.utc)
+    upcoming = [
+        m for m in markets
+        if m.get("window_start") and m["window_start"] > now
+        and m.get("window_end") and m["window_end"] > now
+    ]
+    if not upcoming:
+        return None
+    upcoming.sort(key=lambda m: m["window_start"])
+    market = upcoming[0]
+    # Subscribe tokens so ws_client can provide real-time prices
+    tokens = [t for t in (market.get("yes_token"), market.get("no_token")) if t]
+    if tokens:
+        from . import ws_client as _ws
+        await _ws.subscribe_assets(tokens)
+    return market
 
 
 async def scanner_loop(interval_seconds: int = 60) -> None:

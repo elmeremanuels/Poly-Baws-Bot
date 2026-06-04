@@ -20,7 +20,7 @@ def get_mode() -> str:
 
 def set_mode(mode: str) -> None:
     global _mode
-    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live"}
+    valid = {"paper_hybrid", "paper_auto", "live_hybrid", "live_auto", "live_learning", "signal_trader", "auto_router", "bggdsb_paper", "bggdsb_live", "stoplicht_scalper"}
     if mode not in valid:
         raise ValueError(f"Invalid mode: {mode}. Must be one of {valid}")
     _mode = mode

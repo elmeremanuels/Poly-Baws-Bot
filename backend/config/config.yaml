@@ -306,6 +306,23 @@ whale_tracker:
     is5minfixedyet: "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
     whale_2c5a: "0x2c5aad8f0a9fb039bf4417250b52a62c3b95ef11"
 
+stoplicht_scalper:
+  enabled: false
+  coin: "BTC"                         # welke coin te traden
+  paper_mode: true                    # altijd paper starten
+  market_filter: "btc-updown-15m"     # Polymarket 15-minuten markt
+  trade_size_eur: 1.00
+  entry_start_secs: 600               # start evalueren 10 min voor window-start
+  commit_secs: 120                    # definitieve go/no-go bij T-2min
+  entry_cutoff_secs: 30               # skip window als < 30s resterend
+  phase2_secs: 180                    # schakel naar Phase 2 bij ≤ 3 min resterend
+  hold_threshold_init: 0.88           # mid-prijs winnende kant ≥ dit = hou tot $1
+  trail_activate_cts: 5               # trailing activeert bij +5¢ winst
+  trail_buffer_cts: 2                 # 2¢ onder piek = stop
+  green_threshold: 0.60               # gecombineerde score ≥ 0.60 = GROEN
+  orange_threshold: 0.35              # score 0.35–0.59 = ORANJE
+  poll_interval_secs: 10              # poll interval in seconden
+
 bggdsb:
   coins: ["BTC"]                    # is5minfixedyet handelde vrijwel alleen BTC
   window_budget_eur: 2.0            # volledig budget op dominant kant bij entry
