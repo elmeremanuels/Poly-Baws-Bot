@@ -361,23 +361,23 @@ def _section_signal_trader(cfg: dict) -> None:
 
     col1, col2 = st.columns(2)
     with col1:
-        paper = st.toggle("Paper modus", value=bool(st_cfg.get("paper_mode", True)), key="st_paper")
+        paper = st.toggle("Paper modus", value=bool(st_cfg.get("paper_mode", True)), key="sett_st_paper")
         conviction = st.slider("Conviction drempel", min_value=0.30, max_value=0.90,
                                value=float(st_cfg.get("conviction_threshold", 0.50)),
-                               step=0.01, key="st_conv", format="%.2f")
+                               step=0.01, key="sett_st_conv", format="%.2f")
         size = st.number_input("Trade grootte (€)", min_value=0.1, max_value=500.0,
                                value=float(st_cfg.get("trade_size_eur", 10.0)),
-                               step=1.0, key="st_size")
+                               step=1.0, key="sett_st_size")
     with col2:
         max_loss = st.number_input("Max dagelijks verlies (€)", min_value=0.0, max_value=500.0,
                                    value=float(st_cfg.get("max_daily_loss_eur", 50.0)),
-                                   step=5.0, key="st_maxloss")
+                                   step=5.0, key="sett_st_maxloss")
         max_trades = st.number_input("Max trades per dag", min_value=1, max_value=1000,
                                      value=int(st_cfg.get("max_trades_per_day", 200)),
-                                     step=10, key="st_maxtrades")
+                                     step=10, key="sett_st_maxtrades")
         max_conc = st.number_input("Max gelijktijdige posities", min_value=1, max_value=50,
                                    value=int(st_cfg.get("max_concurrent_positions", 10)),
-                                   step=1, key="st_maxconc")
+                                   step=1, key="sett_st_maxconc")
 
     st.markdown("**Per-coin**")
     st_coins = st_cfg.get("coins", {})
@@ -386,11 +386,11 @@ def _section_signal_trader(cfg: dict) -> None:
     for i, coin in enumerate(COINS):
         c = st_coins.get(coin, {})
         with cc[i]:
-            en = st.toggle(coin, value=bool(c.get("enabled", True)), key=f"st_coin_{coin}")
+            en = st.toggle(coin, value=bool(c.get("enabled", True)), key=f"sett_st_coin_{coin}")
             if en != c.get("enabled", True):
                 coin_changes[coin] = {"enabled": en}
 
-    if st.button("Signal Trader opslaan", key="save_st"):
+    if st.button("Signal Trader opslaan", key="sett_save_st"):
         try:
             from ruamel.yaml import YAML
             ry = YAML()
