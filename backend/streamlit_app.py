@@ -50,6 +50,7 @@ from signal_lab_tab import signal_lab_panel
 from coin_protection_tab import coin_protection_panel
 from bggdsb_tab import bggdsb_panel
 from scalper_tab import scalper_panel
+from settings_tab import settings_panel
 
 COINS = list(CONFIG["coins"].keys())
 COIN_EMOJI = {"BTC": "₿", "ETH": "Ξ", "SOL": "◎", "XRP": "✕", "DOGE": "Ð"}
@@ -2752,7 +2753,7 @@ _tabs_ready = st.session_state.get("_tabs_ready", True)  # True = niet eerste ke
 
 _all_tab_names = ["🧠 BGGDSB", "🚦 Scalper", "🔴 Live", "🎯 Signal Trader", "🤖 Auto Router",
                   "🔬 Signal Lab", "🧠 Learning", "🛡️ Beveiliging",
-                  "📊 Analytics", "💼 Portfolio", "🐋 Whales"]
+                  "📊 Analytics", "💼 Portfolio", "🐋 Whales", "⚙️ Instellingen"]
 _all_tabs = st.tabs(_all_tab_names)
 
 # Map tab objects by name
@@ -2831,6 +2832,10 @@ with tab_whale:
         _whale_panel()
     else:
         _tab_loading("🐋 Whales", "Whale data wordt geladen…")
+
+tab_settings = _tab_map["⚙️ Instellingen"]
+with tab_settings:
+    settings_panel()
 
 # ── Auto-advance naar volledig dashboard ───────────────────────────────────────
 # Na render 2 (skeleton pass) → trigger render 3 (volledig).
