@@ -1,38 +1,40 @@
 """Stoplicht Scalper — 15-minute directional scalper for Polymarket.
 
-Entry rule: stoplicht is GROEN (combined score ≥ 0.60) at T-2min before window.
-Phase 1 (> phase2_secs remaining): trailing stop + MOM reversal gate.
-Phase 2 (≤ phase2_secs remaining): if winning-side mid ≥ hold_threshold → hold to $1.
+Phase 1 (>phase2_secs remaining): active scalping on stoplicht consensus.
+  Multiple round-trips per window: enter on consensus+confirmed,
+  exit on trailing stop or MOM reversal, re-enter when signal re-aligns.
+  Optional contrarian hedge when support/wall detected.
+Phase 2 (≤phase2_secs remaining): anticipation mode.
+  winning_mid ≥ hold_threshold → hold to $1 resolution.
+  Otherwise → take final directional position on consensus.
 
-Paper mode: fills simulated via ws_client bid/ask prices.
-Self-learning hold threshold: recalibrated from window_tradelog resolution rate.
+Paper mode: fills simulated via ws_client bid/ask.
+Self-learning hold threshold via window_tradelog outcomes.
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-
 import json
 
 from .config_loader import CONFIG
 from .logger import log, write_window_tradelog, save_dashboard_state
 from . import scanner, ws_client, risk
 from .state import has_traded_window, register_window_trade, get_mode
-from .stoplicht_signals import get_stoplicht, _compute_momentum
+from .stoplicht_signals import get_stoplicht, get_stoplicht_dict
+from .position_manager import WindowPositions, get_position_sizes
+from .distance_proxy import get_winning_side
 
-# Per-coin self-learning hold threshold
 _hold_thresholds: dict[str, float] = {}
 
 
 async def _save_stoplicht_state(coin: str, color: str, direction: str | None, score: float) -> None:
-    """Persist stoplicht state to dashboard_state so Streamlit can read it."""
     try:
-        from datetime import datetime, timezone as _tz
         payload = json.dumps({
             "color": color,
             "direction": direction,
             "score": score,
-            "updated_at": datetime.now(_tz.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         await save_dashboard_state(f"scalper_stoplicht_{coin}", payload)
     except Exception:
@@ -48,9 +50,8 @@ def _update_hold_threshold(coin: str, value: float) -> None:
     _hold_thresholds[coin] = max(0.75, min(0.95, value))
 
 
-def _paper_entry_price(direction: str, market: dict) -> float | None:
-    """Simulate entry fill: ask price of the direction token + slippage."""
-    token = market.get("yes_token") if direction == "YES" else market.get("no_token")
+def _paper_entry_price(token_direction: str, market: dict) -> float | None:
+    token = market.get("yes_token") if token_direction == "YES" else market.get("no_token")
     if not token:
         return None
     slippage = CONFIG.get("fees", {}).get("paper_slippage_per_share", 0.005)
@@ -61,15 +62,8 @@ def _paper_entry_price(direction: str, market: dict) -> float | None:
     return mid if mid and 0.01 < mid < 0.99 else None
 
 
-def _get_direction_mid(direction: str, market: dict) -> float | None:
-    """Current mid price of the directional token."""
-    token = market.get("yes_token") if direction == "YES" else market.get("no_token")
-    return ws_client.get_mid_price(token) if token else None
-
-
-def _paper_exit_price(direction: str, market: dict) -> float | None:
-    """Simulate exit fill: bid price of the direction token."""
-    token = market.get("yes_token") if direction == "YES" else market.get("no_token")
+def _paper_exit_price(token_direction: str, market: dict) -> float | None:
+    token = market.get("yes_token") if token_direction == "YES" else market.get("no_token")
     if not token:
         return None
     bid = ws_client.get_best_bid(token)
@@ -79,19 +73,25 @@ def _paper_exit_price(direction: str, market: dict) -> float | None:
     return mid if mid and 0.01 < mid < 0.99 else None
 
 
-def _estimate_net_pnl(entry_price: float, exit_price: float, trade_size_eur: float) -> float:
-    """Net P&L after estimated Polymarket taker fees."""
-    if entry_price <= 0:
-        return 0.0
-    shares = trade_size_eur / entry_price
-    gross = (exit_price - entry_price) * shares
-    fee_entry = 0.018 * min(entry_price, 1 - entry_price) / 0.5 * trade_size_eur
-    fee_exit = 0.018 * min(exit_price, 1 - exit_price) / 0.5 * (shares * exit_price) if exit_price < 1.0 else 0.0
-    return round(gross - fee_entry - fee_exit, 4)
+def _get_token_mid(token_direction: str, market: dict) -> float | None:
+    token = market.get("yes_token") if token_direction == "YES" else market.get("no_token")
+    return ws_client.get_mid_price(token) if token else None
+
+
+def _tick_trailing(pos, market, trail_activate: float, trail_buffer: float):
+    """Update trailing state. Returns (should_exit: bool, current_mid: float|None)."""
+    current_mid = _get_token_mid(pos.token_direction, market)
+    if current_mid is None:
+        return False, None
+    if current_mid > pos.peak_price:
+        pos.peak_price = current_mid
+    if not pos.trailing_active and pos.peak_price >= pos.entry_price + trail_activate:
+        pos.trailing_active = True
+    should_exit = pos.trailing_active and current_mid <= pos.peak_price - trail_buffer
+    return should_exit, current_mid
 
 
 async def _recalibrate_hold_threshold(coin: str) -> None:
-    """Adjust hold threshold based on recent held-to-end outcomes."""
     from .logger import _db
     try:
         async with _db() as db:
@@ -99,9 +99,10 @@ async def _recalibrate_hold_threshold(coin: str) -> None:
                 SELECT COUNT(*) AS total,
                        SUM(CASE WHEN pnl_eur > 0 THEN 1 ELSE 0 END) AS wins
                 FROM window_tradelog
-                WHERE coin = ? AND exit_reason = 'held_to_end'
+                WHERE coin = ? AND winning_mid_at_phase2 IS NOT NULL
+                  AND winning_mid_at_phase2 >= ?
                   AND created_at >= datetime('now', '-7 days')
-            """, (coin,)) as cur:
+            """, (coin, _get_hold_threshold(coin) - 0.05)) as cur:
                 row = await cur.fetchone()
         if not row or (row[0] or 0) < 10:
             return
@@ -117,173 +118,215 @@ async def _recalibrate_hold_threshold(coin: str) -> None:
         log.debug("scalper_recalibrate_error", coin=coin, error=str(exc))
 
 
-async def _run_window(
-    coin: str,
-    market: dict,
-    stoplicht_color: str,
-    direction: str,
-    paper: bool,
-) -> None:
-    """Trade one window: enter at start, trail/hold until exit or window end."""
+async def _phase1_tick(coin, market, positions, st, lead, secs_left,
+                       trail_activate, trail_buffer, hedge_enabled, hold_threshold, phase2_secs):
+    """Phase 1 tick: manage open positions + try new entries on full consensus."""
+    sizes = get_position_sizes()
+
+    # ── Manage main position ───────────────────────────────────────────────────
+    if positions.main:
+        pos = positions.main
+        should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
+
+        # MOM reversal: stoplicht flipped to opposite direction with conviction
+        new_dir = st.get("direction")
+        if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
+            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price
+            pnl = positions.close_main(exit_p, "mom_reversal")
+            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left))
+            return
+
+        if should_exit and current_mid:
+            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            pnl = positions.close_main(exit_p, "trail_stop")
+            log.info("scalper_trail_exit", coin=coin, pnl=pnl, secs_left=round(secs_left))
+            return
+
+    # ── Manage hedge position ──────────────────────────────────────────────────
+    if positions.hedge:
+        pos = positions.hedge
+        should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
+        if should_exit and current_mid:
+            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            positions.close_hedge(exit_p, "trail_stop")
+
+    # ── Open main position: full consensus + market confirmation ───────────────
+    if positions.can_open_main() and st.get("consensus") and st.get("confirmed"):
+        direction = st.get("direction")
+        if direction:
+            token_dir = "YES" if direction == "UP" else "NO"
+            entry_p = _paper_entry_price(token_dir, market)
+            if entry_p:
+                positions.open_main(direction, entry_p, sizes["main_eur"])
+                log.info("scalper_entry", coin=coin, direction=direction,
+                         entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left))
+
+    # ── Contrarian hedge: support wall in sight, enough time, market beweeglijk ─
+    if (hedge_enabled
+            and positions.can_open_hedge()
+            and st.get("support_near")
+            and secs_left > phase2_secs + 60
+            and lead and lead["winning_mid"] < hold_threshold):
+        bounce_dir = st.get("support_bounce_direction")
+        if bounce_dir:
+            token_dir = "YES" if bounce_dir == "UP" else "NO"
+            entry_p = _paper_entry_price(token_dir, market)
+            if entry_p:
+                positions.open_hedge(bounce_dir, entry_p, sizes["hedge_eur"])
+                log.info("scalper_hedge_entry", coin=coin, direction=bounce_dir, entry=entry_p)
+
+
+async def _phase2_tick(coin, market, positions, st, lead, secs_left,
+                       trail_activate, trail_buffer, hold_threshold):
+    """Phase 2 tick: hold if winning side strong, else take final position."""
+    sizes = get_position_sizes()
+
+    if lead and lead["winning_mid"] >= hold_threshold:
+        # Hold mode: trailing still active, no MOM exits, no new entries
+        for slot in ("main", "hedge"):
+            pos = getattr(positions, slot)
+            if pos:
+                should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
+                if should_exit and current_mid:
+                    exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                    if slot == "main":
+                        positions.close_main(exit_p, "trail_stop_p2")
+                    else:
+                        positions.close_hedge(exit_p, "trail_stop_p2")
+        return
+
+    # No hold signal — take final directional position if consensus, no current position
+    if positions.can_open_main() and st.get("consensus"):
+        direction = st.get("direction")
+        if direction:
+            token_dir = "YES" if direction == "UP" else "NO"
+            entry_p = _paper_entry_price(token_dir, market)
+            if entry_p:
+                positions.open_main(direction, entry_p, sizes["main_eur"])
+                log.info("scalper_phase2_entry", coin=coin, direction=direction,
+                         entry=entry_p, secs_left=round(secs_left))
+
+    # Continue trailing existing positions
+    for slot in ("main", "hedge"):
+        pos = getattr(positions, slot)
+        if pos:
+            should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
+            if should_exit and current_mid:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                if slot == "main":
+                    positions.close_main(exit_p, "trail_stop_p2")
+                else:
+                    positions.close_hedge(exit_p, "trail_stop_p2")
+
+
+async def _run_window(coin: str, market: dict, paper: bool) -> None:
+    """Full 15-minute window: Phase 1 active scalping + Phase 2 anticipation."""
     cfg = CONFIG.get("stoplicht_scalper", {})
-    trade_size_eur = cfg.get("trade_size_eur", 1.00)
     phase2_secs = cfg.get("phase2_secs", 180)
+    hold_threshold = _get_hold_threshold(coin)
     trail_activate = cfg.get("trail_activate_cts", 5) / 100.0
     trail_buffer = cfg.get("trail_buffer_cts", 2) / 100.0
-    hold_threshold = _get_hold_threshold(coin)
+    hedge_enabled = cfg.get("hedge_enabled", True)
 
     window_start = market["window_start"]
     window_end = market["window_end"]
     window_id = f"{coin}-{int(window_start.timestamp())}"
+    yes_token = market["yes_token"]
+    no_token = market["no_token"]
 
-    # Wait for window start
-    now = datetime.now(timezone.utc)
-    wait_secs = (window_start - now).total_seconds()
-    if wait_secs > 0:
-        await asyncio.sleep(wait_secs)
+    positions = WindowPositions(window_id)
+    winning_mid_at_phase2: float | None = None
+    direction_at_phase2: str | None = None
+    last_st: dict = {}
 
-    # Confirm stoplicht is still valid right before entering
-    try:
-        confirm_color, confirm_dir, _ = await get_stoplicht(coin)
-        if confirm_color == "ROOD" or confirm_dir != direction:
-            log.info("scalper_entry_cancelled", coin=coin, reason="stoplicht_changed",
-                     was=direction, now=confirm_dir, color=confirm_color)
-            await write_window_tradelog({
-                "window_id": window_id, "coin": coin,
-                "window_start": window_start.isoformat(), "window_end": window_end.isoformat(),
-                "stoplicht": stoplicht_color, "direction": direction,
-                "exit_reason": "stoplicht_changed", "pnl_eur": 0.0,
-                "hold_threshold_used": hold_threshold, "paper": 1 if paper else 0,
-            })
-            return
-    except Exception:
-        pass
-
-    # Get entry price
-    entry_price = _paper_entry_price(direction, market)
-    if entry_price is None:
-        log.warning("scalper_no_entry_price", coin=coin, window_id=window_id)
-        await write_window_tradelog({
-            "window_id": window_id, "coin": coin,
-            "window_start": window_start.isoformat(), "window_end": window_end.isoformat(),
-            "stoplicht": stoplicht_color, "direction": direction,
-            "exit_reason": "no_price_data", "pnl_eur": 0.0,
-            "hold_threshold_used": hold_threshold, "paper": 1 if paper else 0,
-        })
-        return
-
-    log.info("scalper_entry", coin=coin, direction=direction, entry_price=entry_price,
-             stoplicht=stoplicht_color, paper=paper, window_id=window_id)
-
-    peak_price = entry_price
-    trailing_active = False
-    exit_price: float | None = None
-    exit_reason: str | None = None
+    log.info("scalper_window_started", coin=coin, window_id=window_id,
+             window_end=str(window_end), paper=paper)
 
     while True:
         now = datetime.now(timezone.utc)
-        secs_remaining = (window_end - now).total_seconds()
-
-        if secs_remaining <= 0:
-            # Window expired — use last known price
-            exit_price = _paper_exit_price(direction, market) or entry_price
-            exit_reason = "force_exit"
+        secs_left = (window_end - now).total_seconds()
+        if secs_left <= 0:
             break
 
-        current_mid = _get_direction_mid(direction, market)
-        if current_mid is None:
-            await asyncio.sleep(0.5)
+        try:
+            st = await get_stoplicht_dict(coin, yes_token, no_token)
+            last_st = st
+            yes_no_dir = ("YES" if st.get("direction") == "UP"
+                          else "NO" if st.get("direction") == "DOWN" else None)
+            await _save_stoplicht_state(coin, st.get("color", "ROOD"), yes_no_dir, st.get("score", 0.0))
+        except Exception:
+            await asyncio.sleep(1.0)
             continue
 
-        if current_mid > peak_price:
-            peak_price = current_mid
+        lead = get_winning_side(yes_token, no_token)
 
-        if not trailing_active and peak_price >= entry_price + trail_activate:
-            trailing_active = True
-            log.debug("scalper_trail_activated", coin=coin, peak=peak_price, entry=entry_price)
+        # Snapshot at Phase 2 boundary
+        if winning_mid_at_phase2 is None and secs_left <= phase2_secs:
+            if lead:
+                winning_mid_at_phase2 = lead["winning_mid"]
+                direction_at_phase2 = lead["direction"]
 
-        if secs_remaining <= phase2_secs:
-            # Phase 2: hold to resolution if strong signal
-            if current_mid >= hold_threshold:
-                exit_price = 1.00  # assume $1 resolution
-                exit_reason = "held_to_end"
-                log.info("scalper_hold_to_end", coin=coin, mid=current_mid,
-                         threshold=hold_threshold, secs_remaining=round(secs_remaining, 0))
-                break
-            # Phase 2 trailing stop
-            if trailing_active and current_mid <= peak_price - trail_buffer:
-                exit_price = _paper_exit_price(direction, market) or current_mid
-                exit_reason = "trail_stop"
-                log.info("scalper_trail_stop_p2", coin=coin, current=current_mid, peak=peak_price)
-                break
+        if secs_left > phase2_secs:
+            await _phase1_tick(coin, market, positions, st, lead, secs_left,
+                               trail_activate, trail_buffer, hedge_enabled,
+                               hold_threshold, phase2_secs)
         else:
-            # Phase 1: MOM reversal gate
-            try:
-                _, new_dir, new_score = await get_stoplicht(coin)
-                if new_dir is not None and new_dir != direction and new_score >= 0.40:
-                    exit_price = _paper_exit_price(direction, market) or current_mid
-                    exit_reason = "mom_reversal"
-                    log.info("scalper_mom_reversal", coin=coin, was=direction, new=new_dir)
-                    break
-            except Exception:
-                pass
+            await _phase2_tick(coin, market, positions, st, lead, secs_left,
+                               trail_activate, trail_buffer, hold_threshold)
 
-            # Phase 1 trailing stop
-            if trailing_active and current_mid <= peak_price - trail_buffer:
-                exit_price = _paper_exit_price(direction, market) or current_mid
-                exit_reason = "trail_stop"
-                log.info("scalper_trail_stop_p1", coin=coin, current=current_mid, peak=peak_price)
-                break
+        await asyncio.sleep(1.0)
 
-        await asyncio.sleep(1.5)
+    # Force close remaining open positions at window end
+    for slot in ("main", "hedge"):
+        pos = getattr(positions, slot)
+        if pos:
+            exit_p = _paper_exit_price(pos.token_direction, market) or pos.entry_price
+            if slot == "main":
+                positions.close_main(exit_p, "force_exit")
+            else:
+                positions.close_hedge(exit_p, "force_exit")
 
-    # Calculate net P&L
-    if exit_price is not None:
-        net_pnl = _estimate_net_pnl(entry_price, exit_price, trade_size_eur)
-    else:
-        net_pnl = 0.0
-
-    log.info("scalper_closed", coin=coin, direction=direction,
-             entry=entry_price, exit=exit_price, reason=exit_reason,
-             pnl=net_pnl, paper=paper)
+    total_pnl = positions.total_pnl
+    log.info("scalper_window_closed", coin=coin, window_id=window_id,
+             pnl=total_pnl, trades=positions.trades_count, paper=paper)
 
     await write_window_tradelog({
-        "window_id": window_id, "coin": coin,
-        "window_start": window_start.isoformat(), "window_end": window_end.isoformat(),
-        "stoplicht": stoplicht_color, "direction": direction,
-        "entry_price": entry_price, "exit_price": exit_price,
-        "exit_reason": exit_reason, "pnl_eur": net_pnl,
-        "hold_threshold_used": hold_threshold, "paper": 1 if paper else 0,
+        "window_id": window_id,
+        "coin": coin,
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "stoplicht": last_st.get("color", "ROOD"),
+        "direction": last_st.get("direction"),
+        "pnl_eur": total_pnl,
+        "hold_threshold_used": hold_threshold,
+        "paper": 1 if paper else 0,
+        "trades_in_window": positions.trades_count,
+        "winning_mid_at_phase2": winning_mid_at_phase2,
+        "direction_at_phase2": direction_at_phase2,
     })
 
     await _recalibrate_hold_threshold(coin)
 
 
 async def scalper_loop(coin: str) -> None:
-    """Per-coin main loop for stoplicht_scalper mode.
-
-    Self-gates on mode: sleeps when not in stoplicht_scalper mode.
-    Evaluates stoplicht in the entry window, commits at T-commit_secs.
+    """Per-coin main loop. Always evaluates stoplicht for dashboard.
+    Only trades when mode == 'stoplicht_scalper'.
     """
     cfg = CONFIG.get("stoplicht_scalper", {})
     scalper_coin = cfg.get("coin", "BTC")
     market_filter = cfg.get("market_filter", "btc-updown-15m")
-    paper = cfg.get("paper_mode", True)
     entry_start_secs = cfg.get("entry_start_secs", 600)
-    commit_secs = cfg.get("commit_secs", 120)
     entry_cutoff_secs = cfg.get("entry_cutoff_secs", 30)
     poll_secs = cfg.get("poll_interval_secs", 10)
 
-    # Only run for the configured coin
     if coin != scalper_coin:
         return
 
-    log.info("scalper_loop_started", coin=coin, filter=market_filter, paper=paper)
+    log.info("scalper_loop_started", coin=coin, filter=market_filter)
 
     while True:
         try:
-            # Always evaluate and save stoplicht state so the dashboard shows live data.
-            # Trading only happens in stoplicht_scalper mode.
+            # Always evaluate stoplicht so dashboard shows live data in any mode
             try:
                 color, direction, score = await get_stoplicht(coin)
                 await _save_stoplicht_state(coin, color, direction, score)
@@ -312,53 +355,30 @@ async def scalper_loop(coin: str) -> None:
 
             now = datetime.now(timezone.utc)
             secs_to_start = (window_start - now).total_seconds()
+            secs_left_total = (market["window_end"] - now).total_seconds()
 
-            # Outside evaluation window
+            # Too far in the future
             if secs_to_start > entry_start_secs:
                 await asyncio.sleep(poll_secs)
                 continue
 
-            # Too late to enter
-            if secs_to_start < entry_cutoff_secs:
+            # Window already passed or almost over
+            if secs_to_start < 0 and secs_left_total < entry_cutoff_secs:
                 register_window_trade(coin, window_ts)
                 await asyncio.sleep(poll_secs)
                 continue
 
-            # Pre-evaluation window (entry_start → commit_secs): log but don't commit
-            if secs_to_start > commit_secs:
-                try:
-                    color, direction, score = await get_stoplicht(coin)
-                    log.debug("scalper_pre_eval", coin=coin, color=color,
-                              score=score, secs=round(secs_to_start, 0))
-                    await _save_stoplicht_state(coin, color, direction, score)
-                except Exception:
-                    pass
-                await asyncio.sleep(poll_secs)
-                continue
-
-            # Commit window: T-commit_secs or closer — make final decision
-            color, direction, score = await get_stoplicht(coin)
-            await _save_stoplicht_state(coin, color, direction, score)
-            log.info("scalper_commit_eval", coin=coin, color=color, direction=direction,
-                     score=score, secs_to_start=round(secs_to_start, 0))
-
-            # Claim the window regardless of result (prevents double-evaluation)
+            # Claim window to prevent double-entry
             register_window_trade(coin, window_ts)
 
-            if color == "GROEN" and direction is not None:
-                await _run_window(coin, market, color, direction, paper)
-            else:
-                window_end = market.get("window_end")
-                await write_window_tradelog({
-                    "window_id": f"{coin}-{int(window_start.timestamp())}",
-                    "coin": coin,
-                    "window_start": window_ts,
-                    "window_end": window_end.isoformat() if window_end else None,
-                    "stoplicht": color, "direction": direction,
-                    "exit_reason": "no_entry_signal", "pnl_eur": 0.0,
-                    "hold_threshold_used": _get_hold_threshold(coin),
-                    "paper": 1 if paper else 0,
-                })
+            # Wait for window start
+            if secs_to_start > 0:
+                log.debug("scalper_waiting_for_window", coin=coin,
+                          secs=round(secs_to_start), window_id=window_ts)
+                await asyncio.sleep(max(0.0, secs_to_start))
+
+            paper = cfg.get("paper_mode", True)
+            await _run_window(coin, market, paper)
 
         except asyncio.CancelledError:
             raise

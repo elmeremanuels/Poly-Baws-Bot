@@ -310,18 +310,26 @@ stoplicht_scalper:
   enabled: false
   coin: "BTC"                         # welke coin te traden
   paper_mode: true                    # altijd paper starten
-  market_filter: "btc-updown-5m"      # Polymarket 5-minuten markt (enige BTC variant)
-  trade_size_eur: 1.00
-  entry_start_secs: 180               # start evalueren 3 min voor window-start
-  commit_secs: 60                     # definitieve go/no-go bij T-60s
-  entry_cutoff_secs: 15               # skip window als < 15s resterend
-  phase2_secs: 90                     # schakel naar Phase 2 bij ≤ 90s resterend (5m window)
+  market_filter: "btc-updown-15m"     # Polymarket 15-minuten markt
+  entry_start_secs: 600               # start evalueren 10 min voor window-start
+  entry_cutoff_secs: 30               # skip window als < 30s resterend
+  phase2_secs: 180                    # schakel naar Phase 2 bij ≤ 3 min resterend
   hold_threshold_init: 0.88           # mid-prijs winnende kant ≥ dit = hou tot $1
   trail_activate_cts: 5               # trailing activeert bij +5¢ winst
   trail_buffer_cts: 2                 # 2¢ onder piek = stop
   green_threshold: 0.60               # gecombineerde score ≥ 0.60 = GROEN
   orange_threshold: 0.35              # score 0.35–0.59 = ORANJE
   poll_interval_secs: 10              # poll interval in seconden
+  hedge_enabled: true                 # contrarian micro-hedge aan/uit
+  sizing:
+    main_pct_per_100: 5.0             # €5 hoofdpositie per €100 portfolio
+    hedge_pct_per_100: 1.0            # €1 hedge per €100 portfolio
+  coins:
+    BTC:  { enabled: true }
+    ETH:  { enabled: true }
+    SOL:  { enabled: true }
+    XRP:  { enabled: false }          # 48% accuracy — uit
+    DOGE: { enabled: true }
 
 bggdsb:
   coins: ["BTC"]                    # is5minfixedyet handelde vrijwel alleen BTC

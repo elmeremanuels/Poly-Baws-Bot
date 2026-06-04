@@ -189,6 +189,74 @@ async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
     return color, direction, round(score, 3)
 
 
+async def get_stoplicht_dict(coin: str, yes_token: str | None = None, no_token: str | None = None) -> dict:
+    """Extended stoplicht state dict for the scalper orchestrator.
+
+    Returns:
+        {
+            "color": "GROEN"/"ORANJE"/"ROOD",
+            "direction": "UP"/"DOWN"/None,
+            "score": float,
+            "consensus": bool,   # True = GROEN (all indicators aligned)
+            "confirmed": bool,   # market price moving in our direction
+            "ofi": float|None,
+            "obi": float|None,
+            "mom": float|None,
+            "support_near": bool,
+            "support_bounce_direction": "UP"/"DOWN"/None,
+        }
+    """
+    from . import signals as _sig
+
+    color, direction, score = await get_stoplicht(coin)
+
+    ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
+    mom = _compute_momentum(coin, window_secs=45.0)
+    book = await _fetch_kraken_depth(coin)
+    obi = _compute_obi(book) if book else None
+
+    consensus = (color == "GROEN")
+
+    # confirmed: Polymarket mid price moving in our direction
+    confirmed = False
+    if direction and yes_token and no_token:
+        from . import ws_client as _ws
+        yes_mid = _ws.get_mid_price(yes_token)
+        no_mid = _ws.get_mid_price(no_token)
+        if yes_mid and no_mid:
+            if direction == "YES" and yes_mid > 0.50:
+                confirmed = True
+            elif direction == "NO" and no_mid > 0.50:
+                confirmed = True
+    elif direction:
+        # No tokens provided — use consensus as proxy for confirmed
+        confirmed = consensus
+
+    # support_near: strong OBI vs opposing momentum = wall/bounce proxy
+    support_near = False
+    support_bounce_direction = None
+    if obi is not None and mom is not None:
+        if obi > 0.65 and mom < -0.3:
+            support_near = True
+            support_bounce_direction = "UP"
+        elif obi < 0.35 and mom > 0.3:
+            support_near = True
+            support_bounce_direction = "DOWN"
+
+    return {
+        "color": color,
+        "direction": "UP" if direction == "YES" else ("DOWN" if direction == "NO" else None),
+        "score": score,
+        "consensus": consensus,
+        "confirmed": confirmed,
+        "ofi": ofi,
+        "obi": obi,
+        "mom": mom,
+        "support_near": support_near,
+        "support_bounce_direction": support_bounce_direction,
+    }
+
+
 async def get_stoplicht_dashboard(coin: str) -> dict:
     """Stoplicht state dict for dashboard display."""
     from . import signals as _sig

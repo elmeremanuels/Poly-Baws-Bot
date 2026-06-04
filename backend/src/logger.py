@@ -167,6 +167,9 @@ CREATE TABLE IF NOT EXISTS window_tradelog (
     pnl_eur REAL,
     hold_threshold_used REAL,
     paper INTEGER DEFAULT 1,
+    trades_in_window INTEGER DEFAULT 0,
+    winning_mid_at_phase2 REAL,
+    direction_at_phase2 TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 """
@@ -392,6 +395,19 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_whale_activity_address ON whale_activity(address, event_ts)"
         )
         await db.commit()
+        # Migration: add new window_tradelog columns if missing
+        async with db.execute("PRAGMA table_info(window_tradelog)") as cur:
+            wtl_cols = {row[1] for row in await cur.fetchall()}
+        for col_name, col_type in [
+            ("trades_in_window", "INTEGER DEFAULT 0"),
+            ("winning_mid_at_phase2", "REAL"),
+            ("direction_at_phase2", "TEXT"),
+        ]:
+            if col_name not in wtl_cols:
+                await db.execute(
+                    f"ALTER TABLE window_tradelog ADD COLUMN {col_name} {col_type}"
+                )
+        await db.commit()
     log.info("database_initialized", path=str(_db_path))
 
 
@@ -448,16 +464,38 @@ async def write_oracle_analysis(
 
 async def write_window_tradelog(entry: dict) -> None:
     """Insert or replace a window_tradelog record for the Stoplicht Scalper."""
+    # Provide defaults for optional new fields so older callers still work
+    record = {
+        "window_id": entry.get("window_id"),
+        "coin": entry.get("coin"),
+        "window_start": entry.get("window_start"),
+        "window_end": entry.get("window_end"),
+        "stoplicht": entry.get("stoplicht"),
+        "direction": entry.get("direction"),
+        "entry_price": entry.get("entry_price"),
+        "exit_price": entry.get("exit_price"),
+        "exit_reason": entry.get("exit_reason"),
+        "pnl_eur": entry.get("pnl_eur", 0.0),
+        "hold_threshold_used": entry.get("hold_threshold_used"),
+        "paper": entry.get("paper", 1),
+        "trades_in_window": entry.get("trades_in_window", 0),
+        "winning_mid_at_phase2": entry.get("winning_mid_at_phase2"),
+        "direction_at_phase2": entry.get("direction_at_phase2"),
+    }
     async with _db() as db:
         await db.execute("""
             INSERT OR REPLACE INTO window_tradelog
             (window_id, coin, window_start, window_end, stoplicht,
              direction, entry_price, exit_price, exit_reason,
-             pnl_eur, hold_threshold_used, paper, created_at)
+             pnl_eur, hold_threshold_used, paper,
+             trades_in_window, winning_mid_at_phase2, direction_at_phase2,
+             created_at)
             VALUES (:window_id, :coin, :window_start, :window_end, :stoplicht,
                     :direction, :entry_price, :exit_price, :exit_reason,
-                    :pnl_eur, :hold_threshold_used, :paper, datetime('now'))
-        """, entry)
+                    :pnl_eur, :hold_threshold_used, :paper,
+                    :trades_in_window, :winning_mid_at_phase2, :direction_at_phase2,
+                    datetime('now'))
+        """, record)
         await db.commit()
 
 
