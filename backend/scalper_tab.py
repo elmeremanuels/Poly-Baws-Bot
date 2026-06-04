@@ -15,6 +15,23 @@ def _get_db_path():
     return Path(__file__).parent / CONFIG["logging"]["db_path"]
 
 
+@st.cache_data(ttl=3)
+def _q_stoplicht_state(coin: str) -> dict:
+    import sqlite3
+    try:
+        con = sqlite3.connect(str(_get_db_path()))
+        row = con.execute(
+            "SELECT value FROM dashboard_state WHERE key = ?",
+            (f"scalper_stoplicht_{coin}",)
+        ).fetchone()
+        con.close()
+        if row and row[0]:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return {}
+
+
 @st.cache_data(ttl=5)
 def _q_recent_windows(coin: str, limit: int = 30) -> list[dict]:
     import sqlite3
@@ -34,24 +51,6 @@ def _q_recent_windows(coin: str, limit: int = 30) -> list[dict]:
         return [dict(r) for r in rows]
     except Exception:
         return []
-
-
-@st.cache_data(ttl=3)
-def _q_stoplicht_state(coin: str) -> dict:
-    """Read last saved stoplicht state from dashboard_state table."""
-    import sqlite3
-    try:
-        con = sqlite3.connect(str(_get_db_path()))
-        row = con.execute(
-            "SELECT value FROM dashboard_state WHERE key = ?",
-            (f"scalper_stoplicht_{coin}",)
-        ).fetchone()
-        con.close()
-        if row and row[0]:
-            return json.loads(row[0])
-    except Exception:
-        pass
-    return {}
 
 
 @st.cache_data(ttl=5)
@@ -91,17 +90,6 @@ def _q_stoplicht_distribution(coin: str) -> dict:
         return {}
 
 
-def _color_exit(val: str) -> str:
-    colors = {
-        "held_to_end": "background-color:#1a3a1a;color:#4ade80",
-        "trail_stop": "background-color:#2a2a1a;color:#facc15",
-        "mom_reversal": "background-color:#3a1a1a;color:#f87171",
-        "force_exit": "background-color:#1a1a2a;color:#94a3b8",
-        "no_entry_signal": "background-color:#111;color:#555",
-    }
-    return colors.get(val, "")
-
-
 def _color_pnl(val) -> str:
     try:
         v = float(val)
@@ -120,43 +108,121 @@ def scalper_panel() -> None:
     paper = cfg.get("paper_mode", True)
     enabled = cfg.get("enabled", False)
 
-    # Header
-    st.subheader(f"Stoplicht Scalper — {coin} 15m {'(paper)' if paper else '(live)'}")
+    from src.state import get_mode
+    current_mode = get_mode()
+    is_active = current_mode == "stoplicht_scalper"
 
-    if not enabled:
-        st.info("Scalper is uitgeschakeld (`stoplicht_scalper.enabled: false` in config.yaml). "
-                "Zet op `true` om te activeren.")
+    # ── Header ─────────────────────────────────────────────────────────────────
+    st.markdown("## 🚦 Stoplicht Scalper")
+    st.caption(
+        "**Strategie**: directionale 15-minuten scalper. Evalueert OFI + orderboek-imbalans + "
+        "VWAP-momentum + perp OFI → kleur GROEN/ORANJE/ROOD. "
+        "Stapt in bij GROEN, trailing stop + momentum-gate tijdens de window, "
+        "houdt vast tot $1.00 als winnende kant ≥ 0.88 in de laatste 3 minuten."
+    )
+    st.caption(
+        "**Verschil met BGGDSB**: BGGDSB koopt beide kanten (straddle, hold to expiry). "
+        "De Scalper koopt slechts **één kant** (directional) en heeft een actieve exit-logica."
+    )
 
-    # Live stoplicht state (written by scalper_loop every poll_interval_secs)
+    st.divider()
+
+    # ── Modus activatie ────────────────────────────────────────────────────────
+    if not is_active:
+        if current_mode in ("bggdsb_paper", "bggdsb_live"):
+            st.warning(
+                f"⚠️ Bot draait nu in **{current_mode}**. Schakel naar "
+                "`stoplicht_scalper` via de ⚙️ Instellingen tab of de sidebar.",
+                icon="🔄",
+            )
+        else:
+            st.info(
+                f"ℹ️ Bot draait nu in **{current_mode}**. "
+                "Schakel naar `stoplicht_scalper` via de sidebar om te starten met traden. "
+                "Het stoplicht hieronder wordt altijd live bijgehouden.",
+            )
+
+    mode_col, _ = st.columns([2, 3])
+    with mode_col:
+        if not is_active:
+            if st.button("▶ Activeer Stoplicht Scalper", type="primary", key="sc_activate"):
+                try:
+                    from src.commands import write_command
+                    write_command("set_mode", {"mode": "stoplicht_scalper"})
+                    st.success("Modus ingesteld op stoplicht_scalper.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+        else:
+            st.success(f"✅ Stoplicht Scalper actief — {coin} {'(paper)' if paper else '(LIVE)'}")
+            if st.button("⏸ Pauzeer (terug naar paper_hybrid)", key="sc_deactivate"):
+                try:
+                    from src.commands import write_command
+                    write_command("set_mode", {"mode": "paper_hybrid"})
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+    st.divider()
+
+    # ── Live stoplicht indicator ────────────────────────────────────────────────
+    st.markdown(f"### Live stoplicht — {coin}")
+
     state = _q_stoplicht_state(coin)
     if state:
         color = state.get("color", "ROOD")
         direction = state.get("direction")
         score = state.get("score", 0.0)
         updated_at = state.get("updated_at", "")
-        color_hex = {"GROEN": "#4ade80", "ORANJE": "#fb923c", "ROOD": "#f87171"}.get(color, "#888")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.markdown(
-            f'<div style="font-size:2em;font-weight:700;color:{color_hex};">{color}</div>',
+        color_hex = {"GROEN": "#4ade80", "ORANJE": "#fb923c", "ROOD": "#f87171"}.get(color, "#888")
+        color_bg  = {"GROEN": "#0d2b0d", "ORANJE": "#2b1a0d", "ROOD": "#2b0d0d"}.get(color, "#1a1a1a")
+        verdict   = {"GROEN": "✅ Instap mogelijk", "ORANJE": "⏳ Afwachten", "ROOD": "🚫 Geen entry"}.get(color, "—")
+
+        st.markdown(
+            f'<div style="background:{color_bg};border:2px solid {color_hex};border-radius:12px;'
+            f'padding:20px 28px;margin-bottom:12px;">'
+            f'<span style="font-size:3em;font-weight:800;color:{color_hex};">{color}</span>'
+            f'<span style="font-size:1.1em;color:#94a3b8;margin-left:20px;">{verdict}</span>'
+            f'</div>',
             unsafe_allow_html=True,
         )
-        col2.metric("Richting", direction or "—")
-        col3.metric("Score", f"{score:.3f}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Richting", direction or "—")
+        c2.metric("Score", f"{score:.3f}")
+        c3.metric("Drempel GROEN", f"{cfg.get('green_threshold', 0.60):.2f}")
         if updated_at:
             try:
                 dt = datetime.fromisoformat(updated_at).astimezone(timezone.utc)
                 secs_ago = (datetime.now(timezone.utc) - dt).total_seconds()
-                col4.metric("Bijgewerkt", f"{int(secs_ago)}s geleden")
+                c4.metric("Bijgewerkt", f"{int(secs_ago)}s geleden")
             except Exception:
-                col4.metric("Bijgewerkt", updated_at[:19])
+                c4.metric("Bijgewerkt", updated_at[:19])
+
+        # Score breakdown bar
+        bar_pct = min(100, int(score * 100))
+        bar_color = color_hex
+        st.markdown(
+            f'<div style="background:#1e2330;border-radius:6px;height:10px;margin:4px 0 12px 0;">'
+            f'<div style="background:{bar_color};width:{bar_pct}%;height:10px;border-radius:6px;"></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(f"Score {score:.3f} / 1.000 — wegingen: OFI 35% · OBI 28% · MOM 20% · Perp 12%")
     else:
-        st.info("Stoplicht nog niet beschikbaar — wacht op eerste scalper evaluatie."
-                " Activeer `stoplicht_scalper` mode om de scalper te starten.")
+        st.markdown(
+            '<div style="background:#1e2330;border:1px solid #334155;border-radius:12px;'
+            'padding:20px 28px;color:#64748b;font-size:1.1em;">'
+            '⏳ Stoplicht wordt geladen — bot evalueert iedere ~10s…'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
-    # Stats
+    # ── Statistieken ───────────────────────────────────────────────────────────
+    st.markdown("### Statistieken")
     stats = _q_stats(coin)
     traded = stats.get("traded") or 0
     wins = stats.get("wins") or 0
@@ -166,39 +232,53 @@ def scalper_panel() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Windows gehandeld", traded)
-    c2.metric("Win rate", f"{win_rate}%")
+    c2.metric("Win rate", f"{win_rate:.1f}%")
     c3.metric("Totaal P&L", f"€{total_pnl:+.4f}")
-    c4.metric("Gem P&L", f"€{avg_pnl:+.4f}")
+    c4.metric("Gem. P&L/trade", f"€{avg_pnl:+.4f}" if avg_pnl else "—")
 
-    # Stoplicht distribution
+    # Stoplicht-kleur verdeling
     dist = _q_stoplicht_distribution(coin)
     if dist:
         total_dist = sum(dist.values())
-        cols = st.columns(3)
-        for i, (c, label) in enumerate([("GROEN", "GROEN"), ("ORANJE", "ORANJE"), ("ROOD", "ROOD")]):
-            n = dist.get(c, 0)
+        st.caption("Verdeling van stoplicht-kleur over alle geëvalueerde windows:")
+        dc1, dc2, dc3 = st.columns(3)
+        for col_obj, (key, label, hex_c) in zip(
+            [dc1, dc2, dc3],
+            [("GROEN", "🟢 GROEN", "#4ade80"), ("ORANJE", "🟠 ORANJE", "#fb923c"), ("ROOD", "🔴 ROOD", "#f87171")],
+        ):
+            n = dist.get(key, 0)
             pct = round(n / total_dist * 100, 0) if total_dist else 0
-            cols[i].metric(label, f"{n} ({pct:.0f}%)")
+            col_obj.markdown(
+                f'<div style="background:#1e2330;border-radius:8px;padding:12px;text-align:center;">'
+                f'<div style="color:{hex_c};font-size:1.5em;font-weight:700;">{n}</div>'
+                f'<div style="color:#94a3b8;font-size:0.8em;">{label} · {pct:.0f}%</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
 
-    # Hold threshold info
+    # ── Hold threshold ─────────────────────────────────────────────────────────
     from src.stoplicht_scalper import _get_hold_threshold
     threshold = _get_hold_threshold(coin)
-    st.caption(f"Hold threshold: {threshold:.2f} (zelf-lerend — bijgesteld op basis van `held_to_end` resultaten)")
+    st.markdown("### Exit-parameters")
+    ec1, ec2, ec3 = st.columns(3)
+    ec1.metric("Hold drempel (mid)", f"{threshold:.2f}",
+               help="Als winnende kant ≥ deze waarde in fase 2 → hold tot $1 resolutie")
+    ec2.metric("Trail activatie", f"{cfg.get('trail_activate_cts', 5)}¢")
+    ec3.metric("Trail buffer", f"{cfg.get('trail_buffer_cts', 2)}¢")
+    st.caption("Hold drempel is zelf-lerend: daalt bij hoog held-to-end succespercentage, stijgt bij laag.")
 
     st.divider()
 
-    # Recent windows table
-    st.subheader("Recente windows")
+    # ── Recente windows ────────────────────────────────────────────────────────
+    st.markdown("### Recente windows")
     rows = _q_recent_windows(coin, limit=50)
     if not rows:
-        st.caption("Nog geen window data — scalper heeft nog geen windows verwerkt.")
+        st.caption("Nog geen window data — de scalper registreert hier elke window zodra hij actief is.")
         return
 
     df = pd.DataFrame(rows)
-
-    # Readable column names
     rename = {
         "window_start": "Start",
         "stoplicht": "Licht",
@@ -213,7 +293,6 @@ def scalper_panel() -> None:
     show_cols = [c for c in rename if c in df.columns]
     show = df[show_cols].rename(columns=rename).copy()
 
-    # Format
     for col in ["Entry", "Exit", "Hold thr."]:
         if col in show.columns:
             show[col] = show[col].apply(lambda x: f"{x:.3f}" if x is not None and x == x else "—")
@@ -225,7 +304,7 @@ def scalper_panel() -> None:
         show["Paper"] = show["Paper"].apply(lambda x: "ja" if x else "nee")
 
     try:
-        styled = show.style.applymap(_color_pnl, subset=["P&L (€)"])  # type: ignore[attr-defined]
+        styled = show.style.map(_color_pnl, subset=["P&L (€)"])
         st.dataframe(styled, hide_index=True, use_container_width=True)
     except Exception:
         st.dataframe(show, hide_index=True, use_container_width=True)

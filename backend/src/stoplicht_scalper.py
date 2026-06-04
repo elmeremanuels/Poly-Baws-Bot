@@ -282,8 +282,16 @@ async def scalper_loop(coin: str) -> None:
 
     while True:
         try:
+            # Always evaluate and save stoplicht state so the dashboard shows live data.
+            # Trading only happens in stoplicht_scalper mode.
+            try:
+                color, direction, score = await get_stoplicht(coin)
+                await _save_stoplicht_state(coin, color, direction, score)
+            except Exception:
+                pass
+
             if get_mode() != "stoplicht_scalper":
-                await asyncio.sleep(5)
+                await asyncio.sleep(poll_secs)
                 continue
 
             if risk.is_killed():

@@ -16,3 +16,11 @@ fastReruns = true               # skip intermediate state updates for quick reru
 [client]
 showErrorDetails = false        # hide raw Python tracebacks from end-user
 toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#4ade80"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1e2330"
+textColor = "#e2e8f0"
+font = "monospace"
