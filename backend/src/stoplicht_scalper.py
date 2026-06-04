@@ -72,6 +72,47 @@ def _paper_exit_price(token_direction: str, market: dict) -> float | None:
     return mid if mid and 0.01 < mid < 0.99 else None
 
 
+async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | None:
+    """Place a live limit-buy. Returns the limit price placed (used as entry for tracking)."""
+    from . import orders as _orders
+    token = market.get("yes_token") if token_dir == "YES" else market.get("no_token")
+    if not token:
+        return None
+    slippage = CONFIG.get("fees", {}).get("paper_slippage_per_share", 0.005)
+    ask = ws_client.get_best_ask(token)
+    if not (ask and 0.01 < ask < 0.99):
+        return None
+    price = round(min(0.99, ask + slippage), 3)
+    shares = round(size_eur / max(price, 0.01), 2)
+    if shares < 0.01:
+        return None
+    resp = await _orders.place_limit_order(token, "BUY", price, shares)
+    if resp and (resp.get("orderID") or resp.get("order_id")):
+        log.info("scalper_live_buy", token=token[:8], price=price, shares=shares)
+        return price
+    log.error("scalper_live_buy_failed", token=token[:8], resp=str(resp))
+    return None
+
+
+async def _live_exit(pos, market: dict) -> float:
+    """Place a live limit-sell with market-order fallback. Returns exit price used."""
+    from . import orders as _orders
+    token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
+    if not token:
+        return pos.entry_price
+    bid = ws_client.get_best_bid(token) or pos.peak_price or pos.entry_price
+    shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
+    if shares < 0.01:
+        return bid
+    resp = await _orders.place_limit_order(token, "SELL", bid, shares)
+    if resp and (resp.get("orderID") or resp.get("order_id")):
+        log.info("scalper_live_sell", token=token[:8], price=bid, shares=shares)
+    else:
+        await _orders.place_market_order(token, "SELL", shares)
+        log.warning("scalper_live_sell_mkt_fallback", token=token[:8], shares=shares)
+    return bid
+
+
 def _get_token_mid(token_direction: str, market: dict) -> float | None:
     token = market.get("yes_token") if token_direction == "YES" else market.get("no_token")
     return ws_client.get_mid_price(token) if token else None
@@ -118,7 +159,8 @@ async def _recalibrate_hold_threshold(coin: str) -> None:
 
 
 async def _phase1_tick(coin, market, positions, st, lead, secs_left,
-                       trail_activate, trail_buffer, hedge_enabled, hold_threshold, phase2_secs):
+                       trail_activate, trail_buffer, hedge_enabled, hold_threshold,
+                       phase2_secs, paper: bool = True):
     """Phase 1 tick: manage open positions + try new entries on full consensus."""
     sizes = get_position_sizes()
 
@@ -130,15 +172,21 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         # MOM reversal: stoplicht flipped to opposite direction with conviction
         new_dir = st.get("direction")
         if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
-            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price
+            else:
+                exit_p = await _live_exit(pos, market)
             pnl = positions.close_main(exit_p, "mom_reversal")
-            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left))
+            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left), paper=paper)
             return
 
         if should_exit and current_mid:
-            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            else:
+                exit_p = await _live_exit(pos, market)
             pnl = positions.close_main(exit_p, "trail_stop")
-            log.info("scalper_trail_exit", coin=coin, pnl=pnl, secs_left=round(secs_left))
+            log.info("scalper_trail_exit", coin=coin, pnl=pnl, secs_left=round(secs_left), paper=paper)
             return
 
     # ── Manage hedge position ──────────────────────────────────────────────────
@@ -146,7 +194,10 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         pos = positions.hedge
         should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
         if should_exit and current_mid:
-            exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            else:
+                exit_p = await _live_exit(pos, market)
             positions.close_hedge(exit_p, "trail_stop")
 
     # ── Open main position: full consensus + market confirmation ───────────────
@@ -154,11 +205,14 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         direction = st.get("direction")
         if direction:
             token_dir = "YES" if direction == "UP" else "NO"
-            entry_p = _paper_entry_price(token_dir, market)
+            if paper:
+                entry_p = _paper_entry_price(token_dir, market)
+            else:
+                entry_p = await _live_entry(token_dir, market, sizes["main_eur"])
             if entry_p:
                 positions.open_main(direction, entry_p, sizes["main_eur"])
                 log.info("scalper_entry", coin=coin, direction=direction,
-                         entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left))
+                         entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left), paper=paper)
 
     # ── Contrarian hedge: support wall in sight, enough time, market beweeglijk ─
     if (hedge_enabled
@@ -169,14 +223,18 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         bounce_dir = st.get("support_bounce_direction")
         if bounce_dir:
             token_dir = "YES" if bounce_dir == "UP" else "NO"
-            entry_p = _paper_entry_price(token_dir, market)
+            if paper:
+                entry_p = _paper_entry_price(token_dir, market)
+            else:
+                entry_p = await _live_entry(token_dir, market, sizes["hedge_eur"])
             if entry_p:
                 positions.open_hedge(bounce_dir, entry_p, sizes["hedge_eur"])
-                log.info("scalper_hedge_entry", coin=coin, direction=bounce_dir, entry=entry_p)
+                log.info("scalper_hedge_entry", coin=coin, direction=bounce_dir,
+                         entry=entry_p, paper=paper)
 
 
 async def _phase2_tick(coin, market, positions, st, lead, secs_left,
-                       trail_activate, trail_buffer, hold_threshold):
+                       trail_activate, trail_buffer, hold_threshold, paper: bool = True):
     """Phase 2 tick: hold if winning side strong, else take final position."""
     sizes = get_position_sizes()
 
@@ -187,7 +245,10 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
             if pos:
                 should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
                 if should_exit and current_mid:
-                    exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                    if paper:
+                        exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                    else:
+                        exit_p = await _live_exit(pos, market)
                     if slot == "main":
                         positions.close_main(exit_p, "trail_stop_p2")
                     else:
@@ -199,11 +260,14 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
         direction = st.get("direction")
         if direction:
             token_dir = "YES" if direction == "UP" else "NO"
-            entry_p = _paper_entry_price(token_dir, market)
+            if paper:
+                entry_p = _paper_entry_price(token_dir, market)
+            else:
+                entry_p = await _live_entry(token_dir, market, sizes["main_eur"])
             if entry_p:
                 positions.open_main(direction, entry_p, sizes["main_eur"])
                 log.info("scalper_phase2_entry", coin=coin, direction=direction,
-                         entry=entry_p, secs_left=round(secs_left))
+                         entry=entry_p, secs_left=round(secs_left), paper=paper)
 
     # Continue trailing existing positions
     for slot in ("main", "hedge"):
@@ -211,7 +275,10 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
         if pos:
             should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
             if should_exit and current_mid:
-                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                if paper:
+                    exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                else:
+                    exit_p = await _live_exit(pos, market)
                 if slot == "main":
                     positions.close_main(exit_p, "trail_stop_p2")
                 else:
@@ -239,7 +306,8 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
     last_st: dict = {}
 
     log.info("scalper_window_started", coin=coin, window_id=window_id,
-             window_end=str(window_end), paper=paper)
+             window_end=str(window_end), paper=paper,
+             mode="PAPER" if paper else "LIVE *** REAL ORDERS ***")
 
     while True:
         now = datetime.now(timezone.utc)
@@ -290,10 +358,10 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         if secs_left > phase2_secs:
             await _phase1_tick(coin, market, positions, st, lead, secs_left,
                                trail_activate, trail_buffer, hedge_enabled,
-                               hold_threshold, phase2_secs)
+                               hold_threshold, phase2_secs, paper)
         else:
             await _phase2_tick(coin, market, positions, st, lead, secs_left,
-                               trail_activate, trail_buffer, hold_threshold)
+                               trail_activate, trail_buffer, hold_threshold, paper)
 
         await asyncio.sleep(1.0)
 
@@ -301,7 +369,10 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
     for slot in ("main", "hedge"):
         pos = getattr(positions, slot)
         if pos:
-            exit_p = _paper_exit_price(pos.token_direction, market) or pos.entry_price
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or pos.entry_price
+            else:
+                exit_p = await _live_exit(pos, market)
             if slot == "main":
                 positions.close_main(exit_p, "force_exit")
             else:

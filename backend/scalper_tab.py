@@ -265,6 +265,7 @@ def scalper_panel() -> None:
                         try:
                             from src.commands import write_command
                             write_command("set_scalper_paper", {"paper_mode": False})
+                            st.toast("🚀 LIVE ingesteld — actief op volgend window", icon="✅")
                         except Exception as e:
                             st.error(str(e))
                 else:
@@ -272,6 +273,7 @@ def scalper_panel() -> None:
                         try:
                             from src.commands import write_command
                             write_command("set_scalper_paper", {"paper_mode": True})
+                            st.toast("📄 Paper ingesteld — actief op volgend window", icon="✅")
                         except Exception as e:
                             st.error(str(e))
 
