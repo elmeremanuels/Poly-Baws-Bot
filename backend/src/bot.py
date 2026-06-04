@@ -1378,6 +1378,18 @@ async def run_bot() -> None:
     except Exception:
         pass
 
+    # Restore mode from last session so the scalper/router keeps running after a restart.
+    # Stoplicht scalper always starts in paper mode regardless (paper_mode: true in config).
+    try:
+        from .db_sync import get_state as _gs_mode
+        from .state import set_mode as _sm
+        _saved_mode = _gs_mode("mode")
+        if _saved_mode and _saved_mode != get_mode():
+            _sm(_saved_mode)
+            log.info("bot_mode_restored_from_db", mode=_saved_mode)
+    except Exception:
+        pass
+
     log.info("bot_starting", mode=get_mode(), coins=COINS)
 
     # Retroactieve P&L-correctie: net_pnl = gross_pnl - fees_paid voor alle
