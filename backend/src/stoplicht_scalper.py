@@ -115,9 +115,26 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
     if force:
         # Window end: market order guarantees execution, no open orders left behind
         resp = await _orders.place_market_order(token, "SELL", shares)
-        if resp and (resp.get("orderID") or resp.get("order_id")):
+        order_id = resp.get("orderID") or resp.get("order_id") if resp else None
+        if order_id:
+            # Try to get actual fill price from order status for accurate P&L
+            import asyncio as _asyncio
+            await _asyncio.sleep(1.0)
+            order_info = await _orders.get_order(order_id)
+            if order_info:
+                raw = order_info if isinstance(order_info, dict) else {}
+                avg_price = (raw.get("avgPrice") or raw.get("avg_price")
+                             or raw.get("price") or raw.get("matchedPrice"))
+                try:
+                    fill_price = float(avg_price)
+                    if 0.0 < fill_price <= 1.0:
+                        log.info("scalper_live_sell_market", token=token[:8], shares=shares,
+                                 fill_price=fill_price, estimated_price=price, breakeven=breakeven)
+                        return fill_price
+                except (TypeError, ValueError):
+                    pass
             log.info("scalper_live_sell_market", token=token[:8], shares=shares,
-                     breakeven=breakeven)
+                     fill_price=price, breakeven=breakeven)
         else:
             log.error("scalper_force_sell_failed", token=token[:8], shares=shares)
     else:
