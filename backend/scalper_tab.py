@@ -264,16 +264,22 @@ def scalper_panel() -> None:
                     if st.button("🚀 Ga LIVE", key="sc_go_live", type="primary"):
                         try:
                             from src.commands import write_command
+                            from src.db_sync import set_dashboard_state as _set_scalper_state
+                            _set_scalper_state("scalper_paper_mode", "False")
                             write_command("set_scalper_paper", {"paper_mode": False})
                             st.toast("🚀 LIVE ingesteld — actief op volgend window", icon="✅")
+                            st.rerun()
                         except Exception as e:
                             st.error(str(e))
                 else:
                     if st.button("📄 Ga Paper", key="sc_go_paper"):
                         try:
                             from src.commands import write_command
+                            from src.db_sync import set_dashboard_state as _set_scalper_state
+                            _set_scalper_state("scalper_paper_mode", "True")
                             write_command("set_scalper_paper", {"paper_mode": True})
                             st.toast("📄 Paper ingesteld — actief op volgend window", icon="✅")
+                            st.rerun()
                         except Exception as e:
                             st.error(str(e))
 

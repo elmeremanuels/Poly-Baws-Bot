@@ -1379,7 +1379,6 @@ async def run_bot() -> None:
         pass
 
     # Restore mode from last session so the scalper/router keeps running after a restart.
-    # Stoplicht scalper always starts in paper mode regardless (paper_mode: true in config).
     try:
         from .db_sync import get_state as _gs_mode
         from .state import set_mode as _sm
@@ -1387,6 +1386,18 @@ async def run_bot() -> None:
         if _saved_mode and _saved_mode != get_mode():
             _sm(_saved_mode)
             log.info("bot_mode_restored_from_db", mode=_saved_mode)
+    except Exception:
+        pass
+
+    # Restore scalper paper_mode from last session. If the user set LIVE before the
+    # restart, keep it LIVE — don't silently fall back to paper on every redeploy.
+    try:
+        from .db_sync import get_state as _gs_scalper
+        _saved_scalper_paper = _gs_scalper("scalper_paper_mode")
+        if _saved_scalper_paper is not None:
+            _scalper_paper = _saved_scalper_paper.lower() != "false"
+            CONFIG.setdefault("stoplicht_scalper", {})["paper_mode"] = _scalper_paper
+            log.info("scalper_paper_mode_restored_from_db", paper=_scalper_paper)
     except Exception:
         pass
 
