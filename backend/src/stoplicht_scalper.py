@@ -273,6 +273,7 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
                 "position_direction":  pos.direction    if pos else None,
                 "position_entry":      pos.entry_price  if pos else None,
                 "position_peak":       pos.peak_price   if pos else None,
+                "position_size_eur":   pos.size_eur     if pos else None,
                 "trailing_active":     pos.trailing_active if pos else False,
                 "trades_in_window":    positions.trades_count,
                 "running_pnl":         positions.total_pnl,
