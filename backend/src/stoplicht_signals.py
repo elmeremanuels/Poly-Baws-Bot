@@ -89,14 +89,15 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None,
             "nearest_resistance": float|None,
         }
     """
-    color, yes_no_dir, score = await get_stoplicht(coin)
     c = _cache(coin)
+    direction_eng, score, signals = compute_direction(c)
 
-    with c.lock:
-        signals_dict = {}
-
-    # Re-extract signals for the dict
-    _, _, signals = compute_direction(c)
+    if direction_eng == "undecided" or score == 0.0:
+        yes_no_dir, color = None, "ROOD"
+    else:
+        yes_no_dir = "YES" if direction_eng == "up" else "NO"
+        green_thr, orange_thr = _thresholds()
+        color = "GROEN" if score >= green_thr else "ORANJE" if score >= orange_thr else "ROOD"
     ofi  = signals.get("spot_ofi")
     obi  = signals.get("obi")
     mom  = signals.get("mom")
