@@ -121,6 +121,24 @@ def _get_token_mid(token_direction: str, market: dict) -> float | None:
     return ws_client.get_mid_price(token) if token else None
 
 
+def _should_hold_for_spread(pos, market: dict) -> bool:
+    """True when spread ≥ spread_hold_cts AND position is on the winning side (mid > 0.50).
+    In that case selling at bid would waste the spread; holding to $1 resolution is better.
+    """
+    threshold = CONFIG.get("stoplicht_scalper", {}).get("spread_hold_cts", 4) / 100.0
+    token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
+    if not token:
+        return False
+    bid = ws_client.get_best_bid(token)
+    ask = ws_client.get_best_ask(token)
+    if bid is None or ask is None:
+        return False
+    if (ask - bid) < threshold:
+        return False
+    mid = ws_client.get_mid_price(token)
+    return bool(mid and mid > 0.50)
+
+
 def _tick_trailing(pos, market, trail_activate: float, trail_buffer: float):
     """Update trailing state. Returns (should_exit: bool, current_mid: float|None)."""
     current_mid = _get_token_mid(pos.token_direction, market)
@@ -175,18 +193,24 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         # MOM reversal: stoplicht flipped to opposite direction with conviction
         new_dir = st.get("direction")
         if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
-            be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
-            if paper:
-                exit_p = pos.entry_price if be else (
-                    _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
+            if _should_hold_for_spread(pos, market):
+                log.debug("scalper_hold_spread_mom", coin=coin, secs_left=round(secs_left))
             else:
-                exit_p = await _live_exit(pos, market, breakeven=be)
-            pnl = positions.close_main(exit_p, "mom_reversal_be" if be else "mom_reversal")
-            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
-                     paper=paper, breakeven=be)
+                be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
+                if paper:
+                    exit_p = pos.entry_price if be else (
+                        _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
+                else:
+                    exit_p = await _live_exit(pos, market, breakeven=be)
+                pnl = positions.close_main(exit_p, "mom_reversal_be" if be else "mom_reversal")
+                log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
+                         paper=paper, breakeven=be)
             return
 
         if should_exit and current_mid:
+            if _should_hold_for_spread(pos, market):
+                log.debug("scalper_hold_spread_trail", coin=coin, secs_left=round(secs_left))
+                return
             if paper:
                 exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
             else:
@@ -200,11 +224,14 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         pos = positions.hedge
         should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
         if should_exit and current_mid:
-            if paper:
-                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+            if _should_hold_for_spread(pos, market):
+                log.debug("scalper_hold_spread_hedge", coin=coin, secs_left=round(secs_left))
             else:
-                exit_p = await _live_exit(pos, market)
-            positions.close_hedge(exit_p, "trail_stop")
+                if paper:
+                    exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                else:
+                    exit_p = await _live_exit(pos, market)
+                positions.close_hedge(exit_p, "trail_stop")
 
     # ── ROOD = harde geen entry ────────────────────────────────────────────────
     if st.get("color") == "ROOD":
@@ -377,17 +404,23 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         await asyncio.sleep(1.0)
 
     # Force close remaining open positions at window end
-    # Als trailing nooit activeerde (7¢ niet gehaald) → break-even exit op entry price
     for slot in ("main", "hedge"):
         pos = getattr(positions, slot)
         if pos:
-            be = not pos.trailing_active
-            if paper:
-                exit_p = pos.entry_price if be else (
-                    _paper_exit_price(pos.token_direction, market) or pos.entry_price)
+            if _should_hold_for_spread(pos, market):
+                # Winning position + wide spread → hold to $1 resolution, no sell order
+                exit_p = 1.0
+                reason = "hold_resolution"
+                log.info("scalper_hold_resolution", coin=coin, slot=slot,
+                         entry=pos.entry_price, paper=paper)
             else:
-                exit_p = await _live_exit(pos, market, breakeven=be)
-            reason = "force_exit_be" if be else "force_exit"
+                be = not pos.trailing_active
+                if paper:
+                    exit_p = pos.entry_price if be else (
+                        _paper_exit_price(pos.token_direction, market) or pos.entry_price)
+                else:
+                    exit_p = await _live_exit(pos, market, breakeven=be)
+                reason = "force_exit_be" if be else "force_exit"
             if slot == "main":
                 positions.close_main(exit_p, reason)
             else:
