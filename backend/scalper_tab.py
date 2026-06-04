@@ -223,8 +223,8 @@ def scalper_panel() -> None:
     coin = cfg.get("coin", "BTC")
     paper = cfg.get("paper_mode", True)
 
-    from src.state import get_mode
-    current_mode = get_mode()
+    from src.db_sync import get_state as _get_state
+    current_mode = _get_state("mode") or "paper_hybrid"
     is_active = current_mode == "stoplicht_scalper"
 
     st.markdown("## 🚦 Stoplicht Scalper")
