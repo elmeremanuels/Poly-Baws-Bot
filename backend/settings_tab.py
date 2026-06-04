@@ -489,8 +489,8 @@ def _section_scalper(cfg: dict) -> None:
                                     value=int(s.get("trail_buffer_cts", 2)),
                                     step=1, key="sc_trail_buf")
 
-    st.caption(f"Markt filter: `{s.get('market_filter', 'btc-updown-15m')}` — "
-               "wijzig `market_filter` in config.yaml voor andere coin.")
+    st.caption(f"Markt filter: `{s.get('market_filter', 'btc-updown-5m')}` — "
+               "Polymarket biedt alleen 5-minuten BTC UP/DOWN markten.")
 
     if st.button("Scalper opslaan", key="save_scalper"):
         err = _save_sections({"stoplicht_scalper": {

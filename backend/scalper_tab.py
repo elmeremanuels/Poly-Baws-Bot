@@ -115,10 +115,10 @@ def scalper_panel() -> None:
     # ── Header ─────────────────────────────────────────────────────────────────
     st.markdown("## 🚦 Stoplicht Scalper")
     st.caption(
-        "**Strategie**: directionale 15-minuten scalper. Evalueert OFI + orderboek-imbalans + "
+        "**Strategie**: directionale 5-minuten scalper. Evalueert OFI + orderboek-imbalans + "
         "VWAP-momentum + perp OFI → kleur GROEN/ORANJE/ROOD. "
-        "Stapt in bij GROEN, trailing stop + momentum-gate tijdens de window, "
-        "houdt vast tot $1.00 als winnende kant ≥ 0.88 in de laatste 3 minuten."
+        "Stapt in bij GROEN (T-60s voor window), trailing stop + momentum-gate tijdens de window, "
+        "houdt vast tot $1.00 als winnende kant ≥ 0.88 in de laatste 90 seconden."
     )
     st.caption(
         "**Verschil met BGGDSB**: BGGDSB koopt beide kanten (straddle, hold to expiry). "
