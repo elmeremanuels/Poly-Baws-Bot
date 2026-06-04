@@ -209,7 +209,7 @@ def scalper_panel() -> None:
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.caption(f"Score {score:.3f} / 1.000 — wegingen: OFI 35% · OBI 28% · MOM 20% · Perp 12%")
+        st.caption(f"Score {score:.3f} / 1.000 — wegingen: OFI 35% · OBI 28% · MOM 20% · Perp 12% · CVD 5%")
     else:
         st.markdown(
             '<div style="background:#1e2330;border:1px solid #334155;border-radius:12px;'

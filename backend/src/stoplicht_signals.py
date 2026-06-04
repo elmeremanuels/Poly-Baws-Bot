@@ -1,17 +1,19 @@
 """Stoplicht signals for the Stoplicht Scalper mode.
 
-Three-color signal + direction based on:
-  OFI  — Order Flow Imbalance (spot Kraken trades, via signals.py)
-  OBI  — Order Book Imbalance (top-10 bid/ask depth, Kraken /Depth)
-  MOM  — VWAP momentum (regime._asset_prices deque, 45s window)
-  Perp — Perpetual OFI (Kraken futures, via signals.py)
+Five-signal directional indicator:
+  OFI  — Order Flow Imbalance (spot Kraken trades, 35%)
+  OBI  — Order Book Imbalance (top-25 bid/ask depth, 28%)
+  MOM  — VWAP momentum (regime._asset_prices deque, 45s window, 20%)
+  Perp — Perpetual OFI (Kraken futures, 12%)
+  CVD  — Cumulative Volume Delta slope (acceleration, 5%)
 
 Signal colors:
   GROEN  — combined score ≥ green_threshold (default 0.60)
   ORANJE — combined score ≥ orange_threshold (default 0.35)
   ROOD   — combined score < orange_threshold or no direction
 
-Direction: "YES" = bullish (bet price UP), "NO" = bearish (bet price DOWN).
+Support/Resistance wall detection uses 25-level order book depth,
+identical to the indicator_app (port 8502).
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ _DEPTH_CACHE_TTL = 2.0
 
 
 async def _fetch_kraken_depth(coin: str) -> dict | None:
-    """Fetch top-10 bid/ask levels from Kraken /Depth. Cached for 2 seconds."""
+    """Fetch top-25 bid/ask levels from Kraken /Depth. Cached for 2 seconds."""
     cached = _depth_cache.get(coin)
     if cached and time.time() - cached[0] < _DEPTH_CACHE_TTL:
         return cached[1]
@@ -50,7 +52,7 @@ async def _fetch_kraken_depth(coin: str) -> dict | None:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(
                 f"{_KRAKEN_REST}/Depth",
-                params={"pair": pair, "count": 10},
+                params={"pair": pair, "count": 25},
             )
         if r.status_code != 200:
             return None
@@ -84,6 +86,44 @@ def _compute_obi(book: dict) -> float | None:
         return None
 
 
+def _compute_book_walls(book: dict, wall_threshold: float = 1.8) -> tuple[list, list, float]:
+    """Detect large bid/ask clusters within 1.5% of current price.
+
+    Returns (supports, resistances, current_price).
+    Each entry: {"price": float, "vol": float}
+    Supports = bid walls below current price.
+    Resistances = ask walls above current price.
+    Mirrors indicator_app._book_walls() logic.
+    """
+    try:
+        bids = {float(p): float(v) for p, v, *_ in book.get("bids", [])[:25]}
+        asks = {float(p): float(v) for p, v, *_ in book.get("asks", [])[:25]}
+
+        if not bids or not asks:
+            return [], [], 0.0
+
+        best_bid = max(bids.keys())
+        best_ask = min(asks.keys())
+        current_price = (best_bid + best_ask) / 2
+
+        sup_bids = {p: v for p, v in bids.items()
+                    if current_price * 0.985 <= p < current_price}
+        res_asks = {p: v for p, v in asks.items()
+                    if current_price < p <= current_price * 1.015}
+
+        def walls(levels: dict, desc: bool) -> list:
+            if not levels:
+                return []
+            avg = sum(levels.values()) / len(levels)
+            out = [{"price": p, "vol": v}
+                   for p, v in levels.items() if v >= avg * wall_threshold]
+            return sorted(out, key=lambda x: x["price"], reverse=desc)
+
+        return walls(sup_bids, True), walls(res_asks, False), current_price
+    except Exception:
+        return [], [], 0.0
+
+
 def _compute_momentum(coin: str, window_secs: float = 45.0) -> float | None:
     """VWAP momentum from regime._asset_prices.
 
@@ -115,6 +155,33 @@ def _compute_momentum(coin: str, window_secs: float = 45.0) -> float | None:
     return max(-1.0, min(1.0, (r - e) / e * 100 / 0.05))
 
 
+def _compute_cvd_slope(coin: str, window_secs: float = 60.0) -> float | None:
+    """Cumulative Volume Delta slope — measures acceleration of net buy/sell pressure.
+
+    Splits window in halves: compares early vs late net signed volume.
+    Positive = buying accelerating; negative = selling accelerating.
+    Normalized by total volume: returns -1..+1.
+    Mirrors indicator_app._cvd_slope() logic using signals._trades buffer.
+    """
+    from . import signals as _sig
+
+    buf = _sig._trades.get(coin)
+    if not buf:
+        return None
+
+    now = time.time()
+    cutoff = now - window_secs
+    mid = cutoff + window_secs / 2
+
+    early = sum((q if b else -q) for ts, q, b in buf if cutoff <= ts < mid)
+    late = sum((q if b else -q) for ts, q, b in buf if ts >= mid)
+    total = sum(abs(q) for ts, q, _ in buf if ts >= cutoff)
+
+    if total < 1e-8:
+        return None
+    return max(-1.0, min(1.0, (late - early) / total))
+
+
 async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
     """Compute the stoplicht signal for a coin.
 
@@ -132,6 +199,7 @@ async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
     ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
     perp_ofi = _sig.get_perp_order_flow_imbalance(coin, window_secs=60.0)
     mom = _compute_momentum(coin, window_secs=45.0)
+    cvd = _compute_cvd_slope(coin, window_secs=60.0)
     book = await _fetch_kraken_depth(coin)
     obi = _compute_obi(book) if book else None
 
@@ -166,6 +234,13 @@ async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
         elif perp_ofi < 0.45:
             bear += min(0.12, (0.45 - perp_ofi) / 0.45 * 0.12)
 
+    # CVD slope — acceleration confirmation (5%)
+    if cvd is not None and abs(cvd) > 0.05:
+        if cvd > 0:
+            bull += min(0.05, abs(cvd) * 0.05)
+        else:
+            bear += min(0.05, abs(cvd) * 0.05)
+
     score = max(bull, bear)
 
     if score < 0.01:
@@ -185,6 +260,7 @@ async def get_stoplicht(coin: str) -> tuple[str, str | None, float]:
         coin=coin, color=color, direction=direction, score=round(score, 3),
         ofi=ofi, obi=round(obi, 3) if obi is not None else None,
         mom=round(mom, 3) if mom is not None else None,
+        cvd=round(cvd, 3) if cvd is not None else None,
     )
     return color, direction, round(score, 3)
 
@@ -197,13 +273,16 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None, no_token: 
             "color": "GROEN"/"ORANJE"/"ROOD",
             "direction": "UP"/"DOWN"/None,
             "score": float,
-            "consensus": bool,   # True = GROEN (all indicators aligned)
-            "confirmed": bool,   # market price moving in our direction
+            "consensus": bool,            # True = GROEN (all indicators aligned)
+            "confirmed": bool,            # market price moving in our direction
             "ofi": float|None,
             "obi": float|None,
             "mom": float|None,
-            "support_near": bool,
+            "cvd": float|None,
+            "support_near": bool,         # True = book wall within 0.35% of price
             "support_bounce_direction": "UP"/"DOWN"/None,
+            "nearest_support": float|None,  # price of nearest bid wall
+            "nearest_resistance": float|None, # price of nearest ask wall
         }
     """
     from . import signals as _sig
@@ -212,6 +291,7 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None, no_token: 
 
     ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
     mom = _compute_momentum(coin, window_secs=45.0)
+    cvd = _compute_cvd_slope(coin, window_secs=60.0)
     book = await _fetch_kraken_depth(coin)
     obi = _compute_obi(book) if book else None
 
@@ -229,31 +309,47 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None, no_token: 
             elif direction == "NO" and no_mid > 0.50:
                 confirmed = True
     elif direction:
-        # No tokens provided — use consensus as proxy for confirmed
         confirmed = consensus
 
-    # support_near: strong OBI vs opposing momentum = wall/bounce proxy
+    # Wall-based support/resistance detection (mirrors indicator_app logic)
     support_near = False
     support_bounce_direction = None
-    if obi is not None and mom is not None:
-        if obi > 0.65 and mom < -0.3:
-            support_near = True
-            support_bounce_direction = "UP"
-        elif obi < 0.35 and mom > 0.3:
-            support_near = True
-            support_bounce_direction = "DOWN"
+    nearest_support: float | None = None
+    nearest_resistance: float | None = None
+
+    if book:
+        supports, resistances, current_price = _compute_book_walls(book)
+        if current_price > 0:
+            if supports:
+                nearest_support = supports[0]["price"]
+                sup_pct = (current_price - nearest_support) / current_price * 100
+                if sup_pct < 0.35:
+                    support_near = True
+                    support_bounce_direction = "UP"
+
+            if resistances:
+                nearest_resistance = resistances[0]["price"]
+                res_pct = (nearest_resistance - current_price) / current_price * 100
+                if res_pct < 0.35:
+                    support_near = True
+                    support_bounce_direction = "DOWN"
+
+    scalper_dir = "UP" if direction == "YES" else ("DOWN" if direction == "NO" else None)
 
     return {
         "color": color,
-        "direction": "UP" if direction == "YES" else ("DOWN" if direction == "NO" else None),
+        "direction": scalper_dir,
         "score": score,
         "consensus": consensus,
         "confirmed": confirmed,
         "ofi": ofi,
         "obi": obi,
         "mom": mom,
+        "cvd": cvd,
         "support_near": support_near,
         "support_bounce_direction": support_bounce_direction,
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
     }
 
 
@@ -265,8 +361,13 @@ async def get_stoplicht_dashboard(coin: str) -> dict:
     color, direction, score = await get_stoplicht(coin)
     ofi = _sig.get_order_flow_imbalance(coin, window_secs=60.0)
     mom = _compute_momentum(coin, window_secs=45.0)
+    cvd = _compute_cvd_slope(coin, window_secs=60.0)
     book = await _fetch_kraken_depth(coin)
     obi = _compute_obi(book) if book else None
+
+    supports, resistances, current_price = (
+        _compute_book_walls(book) if book else ([], [], 0.0)
+    )
 
     return {
         "color": color,
@@ -275,5 +376,8 @@ async def get_stoplicht_dashboard(coin: str) -> dict:
         "ofi": ofi,
         "obi": obi,
         "mom": mom,
+        "cvd": cvd,
         "regime": _regime.get_current_regime(coin),
+        "nearest_support": supports[0]["price"] if supports else None,
+        "nearest_resistance": resistances[0]["price"] if resistances else None,
     }
