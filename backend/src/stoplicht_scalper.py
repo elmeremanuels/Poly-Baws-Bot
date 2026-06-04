@@ -94,9 +94,14 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
     return None
 
 
-async def _live_exit(pos, market: dict, breakeven: bool = False) -> float:
-    """Place a live limit-sell with market-order fallback. Returns exit price used.
-    breakeven=True: limit at entry_price (7¢ never reached → break-even exit)."""
+async def _live_exit(pos, market: dict, breakeven: bool = False,
+                    force: bool = False) -> float:
+    """Place a live sell. Returns exit price used.
+
+    force=True (window end): market order (FOK) for guaranteed fill.
+    force=False (mid-window): GTC limit first, market fallback only if limit fails to place.
+    breakeven=True: limit at entry_price.
+    """
     from . import orders as _orders
     token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
     if not token:
@@ -106,13 +111,23 @@ async def _live_exit(pos, market: dict, breakeven: bool = False) -> float:
     shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
     if shares < 0.01:
         return price
-    resp = await _orders.place_limit_order(token, "SELL", price, shares)
-    if resp and (resp.get("orderID") or resp.get("order_id")):
-        log.info("scalper_live_sell", token=token[:8], price=price, shares=shares,
-                 breakeven=breakeven)
+
+    if force:
+        # Window end: market order guarantees execution, no open orders left behind
+        resp = await _orders.place_market_order(token, "SELL", shares)
+        if resp and (resp.get("orderID") or resp.get("order_id")):
+            log.info("scalper_live_sell_market", token=token[:8], shares=shares,
+                     breakeven=breakeven)
+        else:
+            log.error("scalper_force_sell_failed", token=token[:8], shares=shares)
     else:
-        await _orders.place_market_order(token, "SELL", shares)
-        log.warning("scalper_live_sell_mkt_fallback", token=token[:8], shares=shares)
+        resp = await _orders.place_limit_order(token, "SELL", price, shares)
+        if resp and (resp.get("orderID") or resp.get("order_id")):
+            log.info("scalper_live_sell", token=token[:8], price=price, shares=shares,
+                     breakeven=breakeven)
+        else:
+            await _orders.place_market_order(token, "SELL", shares)
+            log.warning("scalper_live_sell_mkt_fallback", token=token[:8], shares=shares)
     return price
 
 
@@ -403,6 +418,15 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
 
         await asyncio.sleep(1.0)
 
+    # Cancel any open (unfilled GTC) orders before force-exit so tokens are free to sell
+    if not paper:
+        try:
+            from . import orders as _orders
+            await _orders.cancel_all_orders()
+            log.debug("scalper_window_orders_cancelled", coin=coin, window_id=window_id)
+        except Exception as _cancel_exc:
+            log.warning("scalper_cancel_orders_failed", coin=coin, error=str(_cancel_exc))
+
     # Force close remaining open positions at window end
     for slot in ("main", "hedge"):
         pos = getattr(positions, slot)
@@ -419,7 +443,8 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
                     exit_p = pos.entry_price if be else (
                         _paper_exit_price(pos.token_direction, market) or pos.entry_price)
                 else:
-                    exit_p = await _live_exit(pos, market, breakeven=be)
+                    # force=True → market order (FOK), no GTC order left open on Polymarket
+                    exit_p = await _live_exit(pos, market, breakeven=be, force=True)
                 reason = "force_exit_be" if be else "force_exit"
             if slot == "main":
                 positions.close_main(exit_p, reason)
