@@ -15,21 +15,48 @@ def _get_db_path():
     return Path(__file__).parent / CONFIG["logging"]["db_path"]
 
 
-@st.cache_data(ttl=3)
-def _q_stoplicht_state(coin: str) -> dict:
+def _db_state(key: str) -> str | None:
     import sqlite3
     try:
         con = sqlite3.connect(str(_get_db_path()))
         row = con.execute(
-            "SELECT value FROM dashboard_state WHERE key = ?",
-            (f"scalper_stoplicht_{coin}",)
+            "SELECT value FROM dashboard_state WHERE key = ?", (key,)
         ).fetchone()
         con.close()
-        if row and row[0]:
-            return json.loads(row[0])
+        return row[0] if row else None
     except Exception:
-        pass
+        return None
+
+
+@st.cache_data(ttl=3)
+def _q_stoplicht_state(coin: str) -> dict:
+    raw = _db_state(f"scalper_stoplicht_{coin}")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
     return {}
+
+
+@st.cache_data(ttl=2)
+def _q_window_state(coin: str) -> dict:
+    raw = _db_state(f"scalper_window_{coin}")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return {}
+
+
+@st.cache_data(ttl=10)
+def _q_portfolio() -> float:
+    raw = _db_state("portfolio_usdc")
+    try:
+        return float(raw) if raw else 0.0
+    except Exception:
+        return 0.0
 
 
 @st.cache_data(ttl=5)
@@ -41,7 +68,7 @@ def _q_recent_windows(coin: str, limit: int = 30) -> list[dict]:
         rows = con.execute("""
             SELECT window_id, coin, window_start, stoplicht, direction,
                    entry_price, exit_price, exit_reason, pnl_eur,
-                   hold_threshold_used, paper, created_at
+                   trades_in_window, hold_threshold_used, paper, created_at
             FROM window_tradelog
             WHERE coin = ?
             ORDER BY created_at DESC
@@ -60,10 +87,10 @@ def _q_stats(coin: str) -> dict:
         con = sqlite3.connect(str(_get_db_path()))
         row = con.execute("""
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN exit_reason NOT IN ('no_entry_signal','no_price_data','stoplicht_changed') THEN 1 ELSE 0 END) AS traded,
+                   SUM(CASE WHEN trades_in_window > 0 THEN 1 ELSE 0 END) AS traded,
                    SUM(CASE WHEN pnl_eur > 0 THEN 1 ELSE 0 END) AS wins,
                    ROUND(SUM(pnl_eur), 4) AS total_pnl,
-                   ROUND(AVG(CASE WHEN exit_reason NOT IN ('no_entry_signal','no_price_data','stoplicht_changed') THEN pnl_eur END), 4) AS avg_pnl
+                   ROUND(AVG(CASE WHEN trades_in_window > 0 THEN pnl_eur END), 4) AS avg_pnl
             FROM window_tradelog WHERE coin = ?
         """, (coin,)).fetchone()
         con.close()
@@ -102,11 +129,16 @@ def _color_pnl(val) -> str:
     return ""
 
 
+def _fmt_mid(v) -> str:
+    if v is None:
+        return "—"
+    return f"{v:.3f}"
+
+
 def scalper_panel() -> None:
     cfg = CONFIG.get("stoplicht_scalper", {})
     coin = cfg.get("coin", "BTC")
     paper = cfg.get("paper_mode", True)
-    enabled = cfg.get("enabled", False)
 
     from src.state import get_mode
     current_mode = get_mode()
@@ -115,36 +147,22 @@ def scalper_panel() -> None:
     # ── Header ─────────────────────────────────────────────────────────────────
     st.markdown("## 🚦 Stoplicht Scalper")
     st.caption(
-        "**Strategie**: directionale 5-minuten scalper. Evalueert OFI + orderboek-imbalans + "
-        "VWAP-momentum + perp OFI → kleur GROEN/ORANJE/ROOD. "
-        "Stapt in bij GROEN (T-60s voor window), trailing stop + momentum-gate tijdens de window, "
-        "houdt vast tot $1.00 als winnende kant ≥ 0.88 in de laatste 90 seconden."
-    )
-    st.caption(
-        "**Verschil met BGGDSB**: BGGDSB koopt beide kanten (straddle, hold to expiry). "
-        "De Scalper koopt slechts **één kant** (directional) en heeft een actieve exit-logica."
+        "**Strategie**: directionale 15-minuten scalper. OFI + OBI + MOM + Perp OFI + CVD + "
+        "S/R walls → GROEN/ORANJE/ROOD. Entree op GROEN + Polymarket bevestiging. "
+        "Trailing stop (5¢ activate / 2¢ buffer), MOM reversal exit, contrarian hedge bij book wall. "
+        "Phase 2 (laatste 3 min): hold als winnende kant ≥ 0.88, anders finale positie."
     )
 
     st.divider()
 
-    # ── Modus activatie ────────────────────────────────────────────────────────
-    if not is_active:
-        if current_mode in ("bggdsb_paper", "bggdsb_live"):
-            st.warning(
-                f"⚠️ Bot draait nu in **{current_mode}**. Schakel naar "
-                "`stoplicht_scalper` via de ⚙️ Instellingen tab of de sidebar.",
-                icon="🔄",
-            )
-        else:
-            st.info(
-                f"ℹ️ Bot draait nu in **{current_mode}**. "
-                "Schakel naar `stoplicht_scalper` via de sidebar om te starten met traden. "
-                "Het stoplicht hieronder wordt altijd live bijgehouden.",
-            )
-
-    mode_col, _ = st.columns([2, 3])
-    with mode_col:
+    # ── Modus activatie + portfolio ────────────────────────────────────────────
+    act_col, port_col = st.columns([3, 2])
+    with act_col:
         if not is_active:
+            if current_mode in ("bggdsb_paper", "bggdsb_live"):
+                st.warning(f"⚠️ Bot draait nu in **{current_mode}**.", icon="🔄")
+            else:
+                st.info(f"ℹ️ Bot draait nu in **{current_mode}**. Schakel via de sidebar.")
             if st.button("▶ Activeer Stoplicht Scalper", type="primary", key="sc_activate"):
                 try:
                     from src.commands import write_command
@@ -163,6 +181,98 @@ def scalper_panel() -> None:
                 except Exception as e:
                     st.error(str(e))
 
+    with port_col:
+        usdc = _q_portfolio()
+        if usdc > 0:
+            from src.stoplicht_scalper import _get_hold_threshold
+            sizing = cfg.get("sizing", {})
+            brackets = max(1, int(usdc // 100))
+            main_eur = brackets * float(sizing.get("main_pct_per_100", 5.0))
+            hedge_eur = brackets * float(sizing.get("hedge_pct_per_100", 1.0))
+            st.metric("Portfolio USDC", f"${usdc:,.2f}",
+                      help=f"Sizing: €{main_eur:.0f} main / €{hedge_eur:.0f} hedge per window")
+        else:
+            st.metric("Portfolio USDC", "—")
+
+    st.divider()
+
+    # ── Huidig window ──────────────────────────────────────────────────────────
+    st.markdown(f"### Huidig window — {coin}")
+    ws = _q_window_state(coin)
+    secs_left = ws.get("secs_left", 0)
+
+    if secs_left and secs_left > 0:
+        window_end_str = ws.get("window_end", "")
+        phase2 = ws.get("phase2", False)
+        yes_mid = ws.get("yes_mid")
+        no_mid  = ws.get("no_mid")
+        has_pos = ws.get("has_position", False)
+        pos_dir = ws.get("position_direction")
+        pos_entry = ws.get("position_entry")
+        pos_peak  = ws.get("position_peak")
+        trailing  = ws.get("trailing_active", False)
+        trades_n  = ws.get("trades_in_window", 0)
+        running_pnl = ws.get("running_pnl", 0.0)
+
+        phase_label = "🟡 Phase 2 — anticipatie" if phase2 else "🟢 Phase 1 — actief"
+        total_secs = cfg.get("phase2_secs", 180) + (secs_left if not phase2 else 0)
+        window_dur = 15 * 60
+        pct_done = max(0, min(100, int((window_dur - secs_left) / window_dur * 100)))
+
+        mins = secs_left // 60
+        secs = secs_left % 60
+        st.markdown(
+            f'<div style="background:#1e2330;border-radius:8px;padding:12px 16px;margin-bottom:8px;">'
+            f'<span style="font-size:1.1em;font-weight:700;color:#e2e8f0;">'
+            f'⏱ {mins}:{secs:02d} resterend</span>'
+            f'<span style="font-size:0.85em;color:#64748b;margin-left:12px;">{phase_label}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.progress(pct_done, text=f"{pct_done}% verstreken")
+
+        # YES / NO prices
+        w1, w2, w3, w4 = st.columns(4)
+        yes_color = "#4ade80" if (yes_mid and yes_mid > 0.50) else "#f87171"
+        no_color  = "#4ade80" if (no_mid  and no_mid  > 0.50) else "#f87171"
+        w1.metric("YES mid", _fmt_mid(yes_mid),
+                  help="Huidige mid-prijs van het YES-token op Polymarket")
+        w2.metric("NO mid", _fmt_mid(no_mid),
+                  help="Huidige mid-prijs van het NO-token op Polymarket")
+
+        if has_pos and pos_entry:
+            pos_pnl_pct = ((pos_peak or pos_entry) - pos_entry) / pos_entry * 100 if pos_entry else 0
+            w3.metric(
+                f"Positie ({pos_dir})",
+                f"{pos_entry:.3f}",
+                delta=f"piek {pos_peak:.3f}" if pos_peak else None,
+            )
+            w4.metric(
+                "Trailing",
+                "✅ Actief" if trailing else "⏳ Wacht",
+                help="Trailing stop activeert bij +5¢ boven entry",
+            )
+        else:
+            w3.metric("Positie", "— geen")
+            w4.metric("Trades", trades_n, help="Trades in dit window tot nu toe")
+
+        if running_pnl != 0.0:
+            pnl_col = "#4ade80" if running_pnl > 0 else "#f87171"
+            st.markdown(
+                f'<div style="font-size:0.9em;color:{pnl_col};margin-top:4px;">'
+                f'Lopend P&L: €{running_pnl:+.4f} ({trades_n} trades)'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(
+            '<div style="background:#1e2330;border:1px solid #334155;border-radius:8px;'
+            'padding:12px 16px;color:#64748b;">'
+            '⏳ Geen actief window — scalper wacht op de volgende 15m markt.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
     st.divider()
 
     # ── Live stoplicht indicator ────────────────────────────────────────────────
@@ -179,8 +289,9 @@ def scalper_panel() -> None:
         obi        = state.get("obi")
         mom        = state.get("mom")
         cvd        = state.get("cvd")
-        sup_price  = state.get("nearest_support")
-        res_price  = state.get("nearest_resistance")
+        cur_price  = state.get("current_price")
+        supports    = state.get("supports", [])
+        resistances = state.get("resistances", [])
 
         color_hex = {"GROEN": "#4ade80", "ORANJE": "#fb923c", "ROOD": "#f87171"}.get(color, "#888")
         color_bg  = {"GROEN": "#0d2b0d", "ORANJE": "#2b1a0d", "ROOD": "#2b0d0d"}.get(color, "#1a1a1a")
@@ -189,12 +300,14 @@ def scalper_panel() -> None:
 
         st.markdown(
             f'<div style="background:{color_bg};border:2px solid {color_hex};border-radius:12px;'
-            f'padding:20px 28px;margin-bottom:12px;">'
-            f'<span style="font-size:3em;font-weight:800;color:{color_hex};">{color}</span>'
-            f'<span style="font-size:1.1em;color:#94a3b8;margin-left:20px;">{verdict}</span>'
-            + (f'<span style="font-size:0.85em;color:{regime_color};margin-left:14px;'
-               f'background:{regime_color}22;padding:2px 8px;border-radius:4px;">{regime}</span>'
+            f'padding:16px 24px;margin-bottom:12px;display:flex;align-items:center;gap:16px;">'
+            f'<span style="font-size:2.8em;font-weight:800;color:{color_hex};">{color}</span>'
+            f'<span style="font-size:1em;color:#94a3b8;">{verdict}</span>'
+            + (f'<span style="font-size:0.85em;color:{regime_color};'
+               f'background:{regime_color}22;padding:2px 10px;border-radius:4px;">{regime}</span>'
                if regime else "")
+            + (f'<span style="font-size:0.85em;color:#64748b;margin-left:auto;">'
+               f'BTC ${cur_price:,.0f}</span>' if cur_price else "")
             + f'</div>',
             unsafe_allow_html=True,
         )
@@ -211,11 +324,10 @@ def scalper_panel() -> None:
             except Exception:
                 c4.metric("Bijgewerkt", updated_at[:19])
 
-        # Score progress bar
         bar_pct = min(100, int(score * 100))
         st.markdown(
-            f'<div style="background:#1e2330;border-radius:6px;height:10px;margin:4px 0 8px 0;">'
-            f'<div style="background:{color_hex};width:{bar_pct}%;height:10px;border-radius:6px;"></div>'
+            f'<div style="background:#1e2330;border-radius:6px;height:8px;margin:4px 0 10px 0;">'
+            f'<div style="background:{color_hex};width:{bar_pct}%;height:8px;border-radius:6px;"></div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -224,21 +336,51 @@ def scalper_panel() -> None:
         def _fmt(v):
             return f"{v:.3f}" if v is not None else "—"
 
-        sig_parts = [
-            f"OFI {_fmt(ofi)}",
-            f"OBI {_fmt(obi)}",
-            f"MOM {_fmt(mom)}",
-            f"CVD {_fmt(cvd)}",
-        ]
-        st.caption(" · ".join(sig_parts))
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("OFI", _fmt(ofi), help="Order Flow Imbalance spot (35%)")
+        sc2.metric("OBI", _fmt(obi), help="Order Book Imbalance top-10 (28%)")
+        sc3.metric("MOM", _fmt(mom), help="VWAP momentum 45s (20%)")
+        sc4.metric("CVD", _fmt(cvd), help="CVD slope acceleratie (5%)")
 
-        # S/R levels
-        if sup_price or res_price:
-            sr1, sr2 = st.columns(2)
-            if res_price:
-                sr1.metric("Weerstand", f"${res_price:,.0f}", help="Nearest ask wall binnen 1.5%")
-            if sup_price:
-                sr2.metric("Support", f"${sup_price:,.0f}", help="Nearest bid wall binnen 1.5%")
+        # S/R levels — mirroring indicator_app layout
+        if cur_price and (supports or resistances):
+            st.markdown("**S/R niveaus** (live book walls · dagelijkse OHLC pivots · VPOC nodes)")
+            src_color = {"wall": "#f87171", "vol": "#a78bfa", "gist.H": "#60a5fa",
+                         "gist.L": "#60a5fa", "dag H": "#34d399", "dag L": "#34d399"}
+
+            rows_html = []
+            for lvl in reversed(resistances[:2]):
+                clr = src_color.get(lvl["tag"], "#ef4444")
+                rows_html.append(
+                    f'<tr>'
+                    f'<td style="color:#ef4444;font-family:monospace;padding:2px 6px;">${lvl["price"]:,.0f}</td>'
+                    f'<td style="color:{clr};font-size:10px;padding:2px 4px;">{lvl["tag"]}</td>'
+                    f'<td style="color:#ef4444;text-align:right;padding:2px 6px;">+{lvl["pct"]:.2f}%</td>'
+                    f'</tr>'
+                )
+            rows_html.append(
+                f'<tr style="background:#2a2a3a;">'
+                f'<td style="color:#e2e8f0;font-family:monospace;font-weight:700;padding:3px 6px;">${cur_price:,.0f}</td>'
+                f'<td style="color:#64748b;font-size:10px;padding:3px 4px;">nu</td>'
+                f'<td></td></tr>'
+            )
+            for lvl in supports[:2]:
+                clr = src_color.get(lvl["tag"], "#22c55e")
+                rows_html.append(
+                    f'<tr>'
+                    f'<td style="color:#4ade80;font-family:monospace;padding:2px 6px;">${lvl["price"]:,.0f}</td>'
+                    f'<td style="color:{clr};font-size:10px;padding:2px 4px;">{lvl["tag"]}</td>'
+                    f'<td style="color:#4ade80;text-align:right;padding:2px 6px;">-{lvl["pct"]:.2f}%</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+                + "".join(rows_html) + "</table>",
+                unsafe_allow_html=True,
+            )
+        elif not supports and not resistances:
+            st.caption("S/R niveaus worden geladen (engine warmt ±2 min op voor OHLC pivots).")
+
     else:
         st.markdown(
             '<div style="background:#1e2330;border:1px solid #334155;border-radius:12px;'
@@ -263,13 +405,12 @@ def scalper_panel() -> None:
     c1.metric("Windows gehandeld", traded)
     c2.metric("Win rate", f"{win_rate:.1f}%")
     c3.metric("Totaal P&L", f"€{total_pnl:+.4f}")
-    c4.metric("Gem. P&L/trade", f"€{avg_pnl:+.4f}" if avg_pnl else "—")
+    c4.metric("Gem. P&L/window", f"€{avg_pnl:+.4f}" if avg_pnl else "—")
 
-    # Stoplicht-kleur verdeling
     dist = _q_stoplicht_distribution(coin)
     if dist:
         total_dist = sum(dist.values())
-        st.caption("Verdeling van stoplicht-kleur over alle geëvalueerde windows:")
+        st.caption("Verdeling stoplicht-kleur over geëvalueerde windows:")
         dc1, dc2, dc3 = st.columns(3)
         for col_obj, (key, label, hex_c) in zip(
             [dc1, dc2, dc3],
@@ -287,7 +428,7 @@ def scalper_panel() -> None:
 
     st.divider()
 
-    # ── Hold threshold ─────────────────────────────────────────────────────────
+    # ── Exit-parameters ────────────────────────────────────────────────────────
     from src.stoplicht_scalper import _get_hold_threshold
     threshold = _get_hold_threshold(coin)
     st.markdown("### Exit-parameters")
@@ -315,14 +456,14 @@ def scalper_panel() -> None:
         "entry_price": "Entry",
         "exit_price": "Exit",
         "exit_reason": "Reden",
+        "trades_in_window": "#",
         "pnl_eur": "P&L (€)",
-        "hold_threshold_used": "Hold thr.",
         "paper": "Paper",
     }
     show_cols = [c for c in rename if c in df.columns]
     show = df[show_cols].rename(columns=rename).copy()
 
-    for col in ["Entry", "Exit", "Hold thr."]:
+    for col in ["Entry", "Exit"]:
         if col in show.columns:
             show[col] = show[col].apply(lambda x: f"{x:.3f}" if x is not None and x == x else "—")
     if "P&L (€)" in show.columns:

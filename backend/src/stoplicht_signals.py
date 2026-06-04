@@ -163,12 +163,32 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None,
 
 
 async def get_stoplicht_dashboard(coin: str) -> dict:
-    """Stoplicht state dict for dashboard display."""
-    color, yes_no_dir, score = await get_stoplicht(coin)
-    c = _cache(coin)
+    """Stoplicht state dict for dashboard display.
 
-    _, _, signals = compute_direction(c)
+    Returns enriched S/R levels (top-3 each side) with source tag and distance %.
+    """
+    c = _cache(coin)
+    direction_eng, score, signals = compute_direction(c)
+
+    if direction_eng == "undecided" or score == 0.0:
+        yes_no_dir, color = None, "ROOD"
+    else:
+        yes_no_dir = "YES" if direction_eng == "up" else "NO"
+        green_thr, orange_thr = _thresholds()
+        color = "GROEN" if score >= green_thr else "ORANJE" if score >= orange_thr else "ROOD"
+
     price, supports, resistances = compile_levels(c)
+
+    def _enrich(levels: list, is_support: bool) -> list:
+        out = []
+        for lvl in levels[:3]:
+            p = lvl["price"]
+            pct = ((price - p) / price * 100 if is_support else (p - price) / price * 100) if price > 0 else 0.0
+            src = lvl.get("src", "?")
+            label = lvl.get("label", "")
+            tag = label if src == "ohlc" else ("wall" if src == "book" else "vol")
+            out.append({"price": p, "tag": tag, "pct": round(pct, 2)})
+        return out
 
     return {
         "color": color,
@@ -179,6 +199,9 @@ async def get_stoplicht_dashboard(coin: str) -> dict:
         "mom": signals.get("mom"),
         "cvd": signals.get("cvd"),
         "regime": signals.get("regime", "UNKNOWN"),
+        "current_price": round(price, 0) if price else None,
+        "supports": _enrich(supports, True),
+        "resistances": _enrich(resistances, False),
         "nearest_support":    supports[0]["price"]    if supports    else None,
         "nearest_resistance": resistances[0]["price"] if resistances else None,
     }

@@ -257,6 +257,29 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
 
         lead = get_winning_side(yes_token, no_token)
 
+        # Save live window state for dashboard (time remaining, prices, position)
+        try:
+            yes_mid = ws_client.get_mid_price(yes_token)
+            no_mid  = ws_client.get_mid_price(no_token)
+            pos = positions.main
+            await save_dashboard_state(f"scalper_window_{coin}", json.dumps({
+                "window_id":  window_id,
+                "window_end": window_end.isoformat(),
+                "secs_left":  round(secs_left),
+                "phase2":     secs_left <= phase2_secs,
+                "yes_mid":    yes_mid,
+                "no_mid":     no_mid,
+                "has_position":        pos is not None,
+                "position_direction":  pos.direction    if pos else None,
+                "position_entry":      pos.entry_price  if pos else None,
+                "position_peak":       pos.peak_price   if pos else None,
+                "trailing_active":     pos.trailing_active if pos else False,
+                "trades_in_window":    positions.trades_count,
+                "running_pnl":         positions.total_pnl,
+            }))
+        except Exception:
+            pass
+
         # Snapshot at Phase 2 boundary
         if winning_mid_at_phase2 is None and secs_left <= phase2_secs:
             if lead:
@@ -284,6 +307,11 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
                 positions.close_hedge(exit_p, "force_exit")
 
     total_pnl = positions.total_pnl
+    closed = positions._closed
+    entry_price = closed[0]["entry"] if closed else None
+    exit_price  = closed[-1]["exit"] if closed else None
+    exit_reason = closed[-1]["reason"] if closed else None
+
     log.info("scalper_window_closed", coin=coin, window_id=window_id,
              pnl=total_pnl, trades=positions.trades_count, paper=paper)
 
@@ -294,6 +322,9 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         "window_end": window_end.isoformat(),
         "stoplicht": last_st.get("color", "ROOD"),
         "direction": last_st.get("direction"),
+        "entry_price": entry_price,
+        "exit_price":  exit_price,
+        "exit_reason": exit_reason,
         "pnl_eur": total_pnl,
         "hold_threshold_used": hold_threshold,
         "paper": 1 if paper else 0,
@@ -301,6 +332,15 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         "winning_mid_at_phase2": winning_mid_at_phase2,
         "direction_at_phase2": direction_at_phase2,
     })
+
+    # Clear live window state
+    try:
+        await save_dashboard_state(f"scalper_window_{coin}", json.dumps({
+            "secs_left": 0, "window_id": window_id,
+            "window_end": window_end.isoformat(),
+        }))
+    except Exception:
+        pass
 
     await _recalibrate_hold_threshold(coin)
 
