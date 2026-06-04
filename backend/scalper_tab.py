@@ -28,7 +28,7 @@ def _db_state(key: str) -> str | None:
         return None
 
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=2)
 def _q_stoplicht_state(coin: str) -> dict:
     raw = _db_state(f"scalper_stoplicht_{coin}")
     if raw:
@@ -39,7 +39,7 @@ def _q_stoplicht_state(coin: str) -> dict:
     return {}
 
 
-@st.cache_data(ttl=2)
+@st.cache_data(ttl=1)
 def _q_window_state(coin: str) -> dict:
     raw = _db_state(f"scalper_window_{coin}")
     if raw:
@@ -217,6 +217,7 @@ def _color_pnl(val) -> str:
 
 # ── Main panel ──────────────────────────────────────────────────────────────────
 
+@st.fragment(run_every=2)
 def scalper_panel() -> None:
     cfg  = CONFIG.get("stoplicht_scalper", {})
     coin = cfg.get("coin", "BTC")
@@ -238,7 +239,7 @@ def scalper_panel() -> None:
                     from src.commands import write_command
                     write_command("set_mode", {"mode": "stoplicht_scalper"})
                     st.success("Modus → stoplicht_scalper")
-                    st.rerun()
+                    st.rerun(scope="app")
                 except Exception as e:
                     st.error(str(e))
         else:
@@ -247,7 +248,7 @@ def scalper_panel() -> None:
                 try:
                     from src.commands import write_command
                     write_command("set_mode", {"mode": "paper_hybrid"})
-                    st.rerun()
+                    st.rerun(scope="app")
                 except Exception as e:
                     st.error(str(e))
 
