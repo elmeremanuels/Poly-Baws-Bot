@@ -94,23 +94,26 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
     return None
 
 
-async def _live_exit(pos, market: dict) -> float:
-    """Place a live limit-sell with market-order fallback. Returns exit price used."""
+async def _live_exit(pos, market: dict, breakeven: bool = False) -> float:
+    """Place a live limit-sell with market-order fallback. Returns exit price used.
+    breakeven=True: limit at entry_price (7¢ never reached → break-even exit)."""
     from . import orders as _orders
     token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
     if not token:
         return pos.entry_price
-    bid = ws_client.get_best_bid(token) or pos.peak_price or pos.entry_price
+    price = pos.entry_price if breakeven else (
+        ws_client.get_best_bid(token) or pos.peak_price or pos.entry_price)
     shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
     if shares < 0.01:
-        return bid
-    resp = await _orders.place_limit_order(token, "SELL", bid, shares)
+        return price
+    resp = await _orders.place_limit_order(token, "SELL", price, shares)
     if resp and (resp.get("orderID") or resp.get("order_id")):
-        log.info("scalper_live_sell", token=token[:8], price=bid, shares=shares)
+        log.info("scalper_live_sell", token=token[:8], price=price, shares=shares,
+                 breakeven=breakeven)
     else:
         await _orders.place_market_order(token, "SELL", shares)
         log.warning("scalper_live_sell_mkt_fallback", token=token[:8], shares=shares)
-    return bid
+    return price
 
 
 def _get_token_mid(token_direction: str, market: dict) -> float | None:
@@ -172,12 +175,15 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         # MOM reversal: stoplicht flipped to opposite direction with conviction
         new_dir = st.get("direction")
         if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
+            be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
             if paper:
-                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price
+                exit_p = pos.entry_price if be else (
+                    _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
             else:
-                exit_p = await _live_exit(pos, market)
-            pnl = positions.close_main(exit_p, "mom_reversal")
-            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left), paper=paper)
+                exit_p = await _live_exit(pos, market, breakeven=be)
+            pnl = positions.close_main(exit_p, "mom_reversal_be" if be else "mom_reversal")
+            log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
+                     paper=paper, breakeven=be)
             return
 
         if should_exit and current_mid:
@@ -199,6 +205,10 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
             else:
                 exit_p = await _live_exit(pos, market)
             positions.close_hedge(exit_p, "trail_stop")
+
+    # ── ROOD = harde geen entry ────────────────────────────────────────────────
+    if st.get("color") == "ROOD":
+        return
 
     # ── Open main position: full consensus + market confirmation ───────────────
     if positions.can_open_main() and st.get("consensus") and st.get("confirmed"):
@@ -256,7 +266,8 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
         return
 
     # No hold signal — take final directional position if consensus, no current position
-    if positions.can_open_main() and st.get("consensus"):
+    # ROOD = harde geen entry, ook in Phase 2
+    if positions.can_open_main() and st.get("consensus") and st.get("color") != "ROOD":
         direction = st.get("direction")
         if direction:
             token_dir = "YES" if direction == "UP" else "NO"
@@ -366,17 +377,21 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
         await asyncio.sleep(1.0)
 
     # Force close remaining open positions at window end
+    # Als trailing nooit activeerde (7¢ niet gehaald) → break-even exit op entry price
     for slot in ("main", "hedge"):
         pos = getattr(positions, slot)
         if pos:
+            be = not pos.trailing_active
             if paper:
-                exit_p = _paper_exit_price(pos.token_direction, market) or pos.entry_price
+                exit_p = pos.entry_price if be else (
+                    _paper_exit_price(pos.token_direction, market) or pos.entry_price)
             else:
-                exit_p = await _live_exit(pos, market)
+                exit_p = await _live_exit(pos, market, breakeven=be)
+            reason = "force_exit_be" if be else "force_exit"
             if slot == "main":
-                positions.close_main(exit_p, "force_exit")
+                positions.close_main(exit_p, reason)
             else:
-                positions.close_hedge(exit_p, "force_exit")
+                positions.close_hedge(exit_p, reason)
 
     total_pnl = positions.total_pnl
     closed = positions._closed

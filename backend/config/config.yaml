@@ -315,7 +315,7 @@ stoplicht_scalper:
   entry_cutoff_secs: 30               # skip window als < 30s resterend
   phase2_secs: 180                    # schakel naar Phase 2 bij ≤ 3 min resterend
   hold_threshold_init: 0.88           # mid-prijs winnende kant ≥ dit = hou tot $1
-  trail_activate_cts: 5               # trailing activeert bij +5¢ winst
+  trail_activate_cts: 7               # trailing activeert bij +7¢ winst; zonder 7¢ = break-even exit
   trail_buffer_cts: 2                 # 2¢ onder piek = stop
   green_threshold: 0.60               # gecombineerde score ≥ 0.60 = GROEN
   orange_threshold: 0.35              # score 0.35–0.59 = ORANJE
