@@ -221,11 +221,17 @@ def _color_pnl(val) -> str:
 def scalper_panel() -> None:
     cfg  = CONFIG.get("stoplicht_scalper", {})
     coin = cfg.get("coin", "BTC")
-    paper = cfg.get("paper_mode", True)
 
     from src.db_sync import get_state as _get_state
     current_mode = _get_state("mode") or "paper_hybrid"
     is_active = current_mode == "stoplicht_scalper"
+
+    # Paper mode: bot process is authoritative; dashboard_state is the bridge
+    paper_raw = _db_state("scalper_paper_mode")
+    if paper_raw is not None:
+        paper = paper_raw.lower() != "false"
+    else:
+        paper = cfg.get("paper_mode", True)
 
     st.markdown("## 🚦 Stoplicht Scalper")
 
@@ -238,19 +244,36 @@ def scalper_panel() -> None:
                 try:
                     from src.commands import write_command
                     write_command("set_mode", {"mode": "stoplicht_scalper"})
-                    st.success("Modus → stoplicht_scalper")
                     st.rerun(scope="app")
                 except Exception as e:
                     st.error(str(e))
         else:
-            st.success(f"✅ Actief — {coin} {'📄 paper' if paper else '💶 LIVE'}")
-            if st.button("⏸ Pauzeer", key="sc_deactivate"):
-                try:
-                    from src.commands import write_command
-                    write_command("set_mode", {"mode": "paper_hybrid"})
-                    st.rerun(scope="app")
-                except Exception as e:
-                    st.error(str(e))
+            mode_label = "📄 PAPER" if paper else "💶 LIVE"
+            st.success(f"✅ Actief — {coin} {mode_label}")
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("⏸ Pauzeer", key="sc_deactivate"):
+                    try:
+                        from src.commands import write_command
+                        write_command("set_mode", {"mode": "paper_hybrid"})
+                        st.rerun(scope="app")
+                    except Exception as e:
+                        st.error(str(e))
+            with b2:
+                if paper:
+                    if st.button("🚀 Ga LIVE", key="sc_go_live", type="primary"):
+                        try:
+                            from src.commands import write_command
+                            write_command("set_scalper_paper", {"paper_mode": False})
+                        except Exception as e:
+                            st.error(str(e))
+                else:
+                    if st.button("📄 Ga Paper", key="sc_go_paper"):
+                        try:
+                            from src.commands import write_command
+                            write_command("set_scalper_paper", {"paper_mode": True})
+                        except Exception as e:
+                            st.error(str(e))
 
     with port_col:
         usdc = _q_portfolio()

@@ -340,6 +340,12 @@ async def _run_command(command: str, payload: dict) -> None:
         await save_dashboard_state("router_paper_mode", str(paper))
         log.info("router_paper_mode_set", paper=paper)
 
+    elif command == "set_scalper_paper":
+        paper = bool(payload.get("paper_mode", True))
+        CONFIG.setdefault("stoplicht_scalper", {})["paper_mode"] = paper
+        await save_dashboard_state("scalper_paper_mode", str(paper))
+        log.info("scalper_paper_mode_set", paper=paper)
+
     elif command == "apply_router_config":
         r = CONFIG.setdefault("router", {})
         for key in ("signal_min_conviction", "straddle_min_conviction",
