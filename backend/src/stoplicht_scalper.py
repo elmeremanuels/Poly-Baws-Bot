@@ -133,7 +133,8 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
     resp = await _orders.place_market_order(token, "SELL", shares, order_type="FAK")
     order_id = (resp.get("order_id") or resp.get("orderID")) if resp else None
     if not order_id:
-        log.error("scalper_sell_failed", token=token[:8], shares=shares, force=force)
+        log.error("scalper_sell_failed", token=token[:8], shares=shares, force=force,
+                  resp=str(resp)[:200] if resp else None)
         return 0.0, est_price
 
     import asyncio as _asyncio
@@ -143,8 +144,15 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
     fill_price = est_price
     order_info = await _orders.get_order(order_id)
     if isinstance(order_info, dict):
-        matched = (order_info.get("size_matched") or order_info.get("sizeMatched")
-                   or order_info.get("matched_size"))
+        # Try all known Polymarket CLOB field names for matched quantity
+        matched = (order_info.get("size_matched")
+                   or order_info.get("sizeMatched")
+                   or order_info.get("matched_size")
+                   or order_info.get("matchedSize")
+                   or order_info.get("sizeFilled")
+                   or order_info.get("size_filled")
+                   or order_info.get("amount_filled")
+                   or order_info.get("amountFilled"))
         if matched is not None:
             try:
                 filled_shares = float(matched)
@@ -158,12 +166,17 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
                 fill_price = ap
         except (TypeError, ValueError):
             pass
+        log.debug("scalper_sell_order_info", token=token[:8], order_id=order_id,
+                  info_keys=list(order_info.keys()), matched=matched,
+                  status=order_info.get("status"))
 
     # Fallback to the POST response status when get_order gave no matched size.
     if filled_shares is None:
         raw = (resp or {}).get("raw") or {}
         status = str(raw.get("status") or (resp or {}).get("status") or "").lower()
         filled_shares = shares if status in ("matched", "filled") else 0.0
+        log.debug("scalper_sell_status_fallback", token=token[:8], status=status,
+                  filled_shares=filled_shares, raw_keys=list(raw.keys()) if raw else [])
 
     log.info("scalper_live_sell_market", token=token[:8], requested=shares,
              filled=round(filled_shares, 2), fill_price=round(fill_price, 4),
@@ -279,31 +292,26 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         pos = positions.main
         should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
 
-        # MOM reversal: stoplicht flipped to opposite direction with conviction
+        # MOM reversal: stoplicht flipped to opposite direction with conviction.
+        # No spread-hold here: Phase 1 is active scalping — signals always fire.
         new_dir = st.get("direction")
         if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
-            if _should_hold_for_spread(pos, market):
-                log.debug("scalper_hold_spread_mom", coin=coin, secs_left=round(secs_left))
+            be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
+            reason = "mom_reversal_be" if be else "mom_reversal"
+            if paper:
+                exit_p = pos.entry_price if be else (
+                    _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
+                pnl = positions.close_main(exit_p, reason)
+                log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
+                         paper=paper, breakeven=be)
             else:
-                be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
-                reason = "mom_reversal_be" if be else "mom_reversal"
-                if paper:
-                    exit_p = pos.entry_price if be else (
-                        _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
-                    pnl = positions.close_main(exit_p, reason)
-                    log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
+                filled, avg = await _live_exit(pos, market, breakeven=be)
+                if _apply_live_exit(positions, "main", pos, filled, avg, reason):
+                    log.info("scalper_mom_exit", coin=coin, secs_left=round(secs_left),
                              paper=paper, breakeven=be)
-                else:
-                    filled, avg = await _live_exit(pos, market, breakeven=be)
-                    if _apply_live_exit(positions, "main", pos, filled, avg, reason):
-                        log.info("scalper_mom_exit", coin=coin, secs_left=round(secs_left),
-                                 paper=paper, breakeven=be)
             return
 
         if should_exit and current_mid:
-            if _should_hold_for_spread(pos, market):
-                log.debug("scalper_hold_spread_trail", coin=coin, secs_left=round(secs_left))
-                return
             if paper:
                 exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
                 pnl = positions.close_main(exit_p, "trail_stop")
@@ -319,15 +327,12 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         pos = positions.hedge
         should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
         if should_exit and current_mid:
-            if _should_hold_for_spread(pos, market):
-                log.debug("scalper_hold_spread_hedge", coin=coin, secs_left=round(secs_left))
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                positions.close_hedge(exit_p, "trail_stop")
             else:
-                if paper:
-                    exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
-                    positions.close_hedge(exit_p, "trail_stop")
-                else:
-                    filled, avg = await _live_exit(pos, market)
-                    _apply_live_exit(positions, "hedge", pos, filled, avg, "trail_stop")
+                filled, avg = await _live_exit(pos, market)
+                _apply_live_exit(positions, "hedge", pos, filled, avg, "trail_stop")
 
     # ── ROOD = harde geen entry ────────────────────────────────────────────────
     if st.get("color") == "ROOD":
