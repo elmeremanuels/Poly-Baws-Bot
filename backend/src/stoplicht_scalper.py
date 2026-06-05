@@ -378,7 +378,7 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
             and snap.get("confidence", 0) >= 0.35):
         snap_dir   = snap["hedge_direction"]  # opposite of the snap
         token_dir  = "YES" if snap_dir == "UP" else "NO"
-        snap_size  = round(sizes["main_eur"] * 0.50, 2)
+        snap_size  = round(sizes["main_eur"] * 0.20, 2)
         if paper:
             entry_p = _paper_entry_price(token_dir, market)
         else:

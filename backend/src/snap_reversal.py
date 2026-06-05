@@ -18,11 +18,11 @@ import threading
 import time
 from dataclasses import dataclass
 
-SNAP_MIN_PCT     = 0.18    # min % move in SNAP_WINDOW_SECS to register a snap
-SNAP_WINDOW_SECS = 60      # look-back window to measure the price change
+SNAP_MIN_PCT     = 0.60    # min % move in SNAP_WINDOW_SECS to register a snap
+SNAP_WINDOW_SECS = 30      # look-back window to measure the price change
 SNAP_LOOKBACK_H  = 8       # how long snap events are remembered
 SNAP_FRESH_SECS  = 90      # a snap must be < this old to trigger a hedge
-ROUND_NEAR_PCT   = 0.40    # within 0.40% of a round level = "near round"
+ROUND_NEAR_PCT   = 0.50    # within 0.50% of a round level = "near round"
 MIN_CONFIDENCE   = 0.35    # confidence floor to emit a hedge signal
 
 
@@ -120,11 +120,15 @@ class SnapReversalDetector:
         if now - latest.ts > SNAP_FRESH_SECS:
             return None
 
+        # Only trigger when snap happened at a psychologically significant level
+        if not latest.near_round:
+            return None
+
         prior = [e for e in events[:-1] if e.direction == latest.direction]
         if not prior:
             return None
 
-        confidence = min(1.0, latest.magnitude_pct / 0.50)
+        confidence = min(1.0, latest.magnitude_pct / 1.0)
         if confidence < MIN_CONFIDENCE:
             return None
 
