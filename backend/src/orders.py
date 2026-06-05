@@ -285,6 +285,25 @@ async def get_open_positions() -> list[dict]:
         return []
 
 
+async def get_token_balance(token_id: str) -> float:
+    """Return held balance for a specific token. Returns 0.0 if not found.
+
+    Used to detect externally-sold positions: if the bot thinks a position is
+    open but the on-chain balance is 0, the user sold it manually on Polymarket.
+    """
+    positions = await get_open_positions()
+    tid_lower = token_id.lower()
+    for p in positions:
+        aid = (p.get("asset_id") or p.get("token_id") or p.get("tokenId")
+               or p.get("conditionId") or "")
+        if aid.lower() == tid_lower:
+            try:
+                return float(p.get("size") or p.get("amount") or p.get("balance") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
 async def get_balance() -> float | None:
     """Get USDC balance.
 

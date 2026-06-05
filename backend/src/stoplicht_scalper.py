@@ -535,11 +535,22 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
             continue
 
         # Live: FAK sweep. Whatever can't be sold (no bids) settles at $1/$0.
+        tok = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
         filled, avg = await _live_exit(pos, market, breakeven=be, force=True)
         if _apply_live_exit(positions, slot, pos, filled, avg, reason):
             continue
-        # Remainder unsold — it goes to binary resolution, not a fictional sell.
-        tok = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
+
+        # 0 fill — check on-chain balance: if tokens are gone, user sold manually.
+        if tok and not paper:
+            from . import orders as _orders_bal
+            actual_balance = await _orders_bal.get_token_balance(tok)
+            if actual_balance < 0.01:
+                log.info("scalper_position_externally_closed", coin=coin, slot=slot,
+                         entry=pos.entry_price, booked_at="entry_price")
+                _close_slot(positions, slot, pos.entry_price, "externally_closed")
+                continue
+
+        # Remainder unsold and still on-chain — book at binary resolution.
         res_mid = ws_client.get_mid_price(tok) if tok else None
         res_price = 1.0 if (res_mid is not None and res_mid >= 0.5) else 0.0
         log.info("scalper_exit_to_resolution", coin=coin, slot=slot,
