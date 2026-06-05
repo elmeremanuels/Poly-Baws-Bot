@@ -738,7 +738,7 @@ async def _bggdsb_window_hold_task(window_key: str) -> None:
                      yes_spend=yes_spend, no_spend=no_spend,
                      yes_shares=yes_shares, no_shares=no_shares,
                      phase=st.get("phase", "holding"))
-            from .state import register_window_trade, update_trade_field, persist_trade as _persist
+            from .state import register_window_trade, update_trade_field, persist_trade as _persist, get_active_trades
             register_window_trade(st["coin"], st.get("window_ts", ""))
 
             # P&L = winner_shares × €1.00 - total_spend (correct uitbetalingsformule).
