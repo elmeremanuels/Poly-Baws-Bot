@@ -144,6 +144,10 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None,
 
     scalper_dir = "UP" if yes_no_dir == "YES" else ("DOWN" if yes_no_dir == "NO" else None)
 
+    # Snap reversal signal
+    from .snap_reversal import get_detector as _snap_det
+    snap_hedge = _snap_det(coin).hedge_signal()
+
     return {
         "color": color,
         "direction": scalper_dir,
@@ -159,6 +163,7 @@ async def get_stoplicht_dict(coin: str, yes_token: str | None = None,
         "support_bounce_direction": support_bounce_direction,
         "nearest_support": nearest_support,
         "nearest_resistance": nearest_resistance,
+        "snap_hedge": snap_hedge,
     }
 
 

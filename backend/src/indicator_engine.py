@@ -338,6 +338,13 @@ async def _poll_loop(c: Cache) -> None:
                         while c.prices and c.prices[0][0] < cutoff: c.prices.popleft()
                         if c.prices: c.current_price = c.prices[-1][1]
                         c.spot_ok = True; c.last_poll_ts = now
+                # Feed snap reversal detector outside the lock
+                if c.current_price:
+                    try:
+                        from .snap_reversal import get_detector as _snap_det
+                        _snap_det(c.coin).update(c.current_price)
+                    except Exception:
+                        pass
             except Exception:
                 with c.lock: c.spot_ok = False
 

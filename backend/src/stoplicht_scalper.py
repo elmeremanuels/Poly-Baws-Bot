@@ -370,6 +370,29 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
                 log.info("scalper_hedge_entry", coin=coin, direction=bounce_dir,
                          entry=entry_p, paper=paper)
 
+    # ── Snap reversal hedge: confirmed hard BTC move → bet on reversal ─────────
+    snap = st.get("snap_hedge")
+    if (snap and hedge_enabled
+            and positions.can_open_hedge()
+            and secs_left > phase2_secs + 30
+            and snap.get("confidence", 0) >= 0.35):
+        snap_dir   = snap["hedge_direction"]  # opposite of the snap
+        token_dir  = "YES" if snap_dir == "UP" else "NO"
+        snap_size  = round(sizes["main_eur"] * 0.50, 2)
+        if paper:
+            entry_p = _paper_entry_price(token_dir, market)
+        else:
+            entry_p = await _live_entry(token_dir, market, snap_size)
+        if entry_p:
+            positions.open_hedge(snap_dir, entry_p, snap_size)
+            log.info("scalper_snap_hedge", coin=coin, direction=snap_dir,
+                     snap_direction=snap.get("snap_direction"),
+                     magnitude=snap.get("snap_magnitude"),
+                     near_round=snap.get("near_round"),
+                     confidence=snap.get("confidence"),
+                     prior_count=snap.get("prior_count"),
+                     size_eur=snap_size, paper=paper)
+
 
 async def _phase2_tick(coin, market, positions, st, lead, secs_left,
                        trail_activate, trail_buffer, hold_threshold, paper: bool = True):

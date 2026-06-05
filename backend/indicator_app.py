@@ -254,3 +254,61 @@ def _panel() -> None:
 
 
 _panel()
+
+
+# ── Snap reversal events ───────────────────────────────────────────────────────
+
+def _snap_section() -> None:
+    from src.snap_reversal import get_detector
+    det    = get_detector("BTC")
+    events = det.recent_events()
+    signal = det.hedge_signal()
+
+    if not events and signal is None:
+        return
+
+    now = time.time()
+    st.markdown(
+        "<div style='margin-top:8px;font-size:11px;color:#f59e0b;font-weight:700;"
+        "letter-spacing:.05em;'>⚡ SNAP REVERSALS (8h)</div>",
+        unsafe_allow_html=True,
+    )
+
+    if signal:
+        arrow = "▲" if signal["hedge_direction"] == "UP" else "▼"
+        st.markdown(
+            f"<div style='background:#f59e0b22;border:1px solid #f59e0b;border-radius:6px;"
+            f"padding:6px 8px;font-size:11px;color:#f59e0b;margin:2px 0 4px;'>"
+            f"<b>⚡ HEDGE SIGNAAL</b> {arrow} {signal['hedge_direction']} — "
+            f"snap {signal['snap_direction']} {signal['snap_magnitude']:.2f}% — "
+            f"conf {signal['confidence']:.0%} — {signal['prior_count']}× bevestigd"
+            f"{'  @' + str(int(signal['near_round'])) if signal.get('near_round') else ''}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    rows = []
+    for e in reversed(events[-8:]):
+        age  = now - e.ts
+        mins = int(age // 60)
+        secs = int(age % 60)
+        age_s = f"{mins}m{secs:02d}s"
+        arrow = "▲" if e.direction == "UP" else "▼"
+        clr   = "#22c55e" if e.direction == "UP" else "#ef4444"
+        rnd   = f" @{int(e.near_round)}" if e.near_round else ""
+        rows.append(
+            f"<tr><td style='color:{clr};font-weight:700;'>{arrow} {e.direction}</td>"
+            f"<td style='color:#ddd;'>{e.magnitude_pct:.2f}%</td>"
+            f"<td style='color:#888;'>{age_s}{rnd}</td></tr>"
+        )
+
+    if rows:
+        st.markdown(
+            "<table style='width:100%;font-size:10px;font-family:monospace;"
+            "border-collapse:collapse;'>"
+            + "".join(rows) + "</table>",
+            unsafe_allow_html=True,
+        )
+
+
+_snap_section()
