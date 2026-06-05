@@ -110,11 +110,11 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
 
 async def _live_exit(pos, market: dict, breakeven: bool = False,
                     force: bool = False) -> float:
-    """Place a live sell. Returns exit price used.
+    """Place a live market sell (FOK). Returns exit price used.
 
-    force=True (window end): market order (FOK) for guaranteed fill.
-    force=False (mid-window): GTC limit first, market fallback only if limit fails to place.
-    breakeven=True: limit at entry_price.
+    All exits use market orders to guarantee execution — a GTC limit that
+    fails to fill leaves tokens stranded on Polymarket while the bot marks
+    the position as closed.
     """
     from . import orders as _orders
     token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
@@ -125,44 +125,33 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
     shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
     min_order_value = CONFIG.get("stoplicht_scalper", {}).get("min_order_value", 1.10)
     if shares < 0.01 or shares * price < min_order_value:
-        # Order too small for Polymarket ($1 min) — return price as-is (position tracked as closed)
         log.warning("scalper_exit_below_min_order", token=token[:8],
                     value=round(shares * price, 3), min=min_order_value)
         return price
 
-    if force:
-        # Window end: market order guarantees execution, no open orders left behind
-        resp = await _orders.place_market_order(token, "SELL", shares)
-        order_id = resp.get("orderID") or resp.get("order_id") if resp else None
-        if order_id:
-            # Try to get actual fill price from order status for accurate P&L
-            import asyncio as _asyncio
-            await _asyncio.sleep(1.0)
-            order_info = await _orders.get_order(order_id)
-            if order_info:
-                raw = order_info if isinstance(order_info, dict) else {}
-                avg_price = (raw.get("avgPrice") or raw.get("avg_price")
-                             or raw.get("price") or raw.get("matchedPrice"))
-                try:
-                    fill_price = float(avg_price)
-                    if 0.0 < fill_price <= 1.0:
-                        log.info("scalper_live_sell_market", token=token[:8], shares=shares,
-                                 fill_price=fill_price, estimated_price=price, breakeven=breakeven)
-                        return fill_price
-                except (TypeError, ValueError):
-                    pass
-            log.info("scalper_live_sell_market", token=token[:8], shares=shares,
-                     fill_price=price, breakeven=breakeven)
-        else:
-            log.error("scalper_force_sell_failed", token=token[:8], shares=shares)
+    resp = await _orders.place_market_order(token, "SELL", shares)
+    order_id = resp.get("orderID") or resp.get("order_id") if resp else None
+    if order_id:
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.0)
+        order_info = await _orders.get_order(order_id)
+        if order_info:
+            raw = order_info if isinstance(order_info, dict) else {}
+            avg_price = (raw.get("avgPrice") or raw.get("avg_price")
+                         or raw.get("price") or raw.get("matchedPrice"))
+            try:
+                fill_price = float(avg_price)
+                if 0.0 < fill_price <= 1.0:
+                    log.info("scalper_live_sell_market", token=token[:8], shares=shares,
+                             fill_price=fill_price, estimated_price=price,
+                             force=force, breakeven=breakeven)
+                    return fill_price
+            except (TypeError, ValueError):
+                pass
+        log.info("scalper_live_sell_market", token=token[:8], shares=shares,
+                 fill_price=price, force=force, breakeven=breakeven)
     else:
-        resp = await _orders.place_limit_order(token, "SELL", price, shares)
-        if resp and (resp.get("orderID") or resp.get("order_id")):
-            log.info("scalper_live_sell", token=token[:8], price=price, shares=shares,
-                     breakeven=breakeven)
-        else:
-            await _orders.place_market_order(token, "SELL", shares)
-            log.warning("scalper_live_sell_mkt_fallback", token=token[:8], shares=shares)
+        log.error("scalper_sell_failed", token=token[:8], shares=shares, force=force)
     return price
 
 
