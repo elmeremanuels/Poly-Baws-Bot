@@ -87,6 +87,7 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
     sc_cfg = CONFIG.get("stoplicht_scalper", {})
     entry_min = sc_cfg.get("entry_price_min", 0.20)
     entry_max = sc_cfg.get("entry_price_max", 0.80)
+    min_order_value = sc_cfg.get("min_order_value", 1.10)
     ask = ws_client.get_best_ask(token)
     if not (ask and entry_min <= ask <= entry_max):
         if ask:
@@ -95,7 +96,9 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
         return None
     price = round(min(entry_max, ask + slippage), 3)
     shares = round(size_eur / max(price, 0.01), 2)
-    if shares < 0.01:
+    if shares < 0.01 or shares * price < min_order_value:
+        log.warning("scalper_entry_below_min_order", token=token[:8],
+                    value=round(shares * price, 3), min=min_order_value)
         return None
     resp = await _orders.place_limit_order(token, "BUY", price, shares)
     if resp and (resp.get("orderID") or resp.get("order_id")):
@@ -120,7 +123,11 @@ async def _live_exit(pos, market: dict, breakeven: bool = False,
     price = pos.entry_price if breakeven else (
         ws_client.get_best_bid(token) or pos.peak_price or pos.entry_price)
     shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
-    if shares < 0.01:
+    min_order_value = CONFIG.get("stoplicht_scalper", {}).get("min_order_value", 1.10)
+    if shares < 0.01 or shares * price < min_order_value:
+        # Order too small for Polymarket ($1 min) — return price as-is (position tracked as closed)
+        log.warning("scalper_exit_below_min_order", token=token[:8],
+                    value=round(shares * price, 3), min=min_order_value)
         return price
 
     if force:
