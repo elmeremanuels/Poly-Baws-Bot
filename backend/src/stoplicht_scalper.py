@@ -54,11 +54,16 @@ def _paper_entry_price(token_direction: str, market: dict) -> float | None:
     if not token:
         return None
     slippage = CONFIG.get("fees", {}).get("paper_slippage_per_share", 0.005)
+    sc_cfg = CONFIG.get("stoplicht_scalper", {})
+    entry_min = sc_cfg.get("entry_price_min", 0.20)
+    entry_max = sc_cfg.get("entry_price_max", 0.80)
     ask = ws_client.get_best_ask(token)
-    if ask and 0.01 < ask < 0.99:
-        return min(0.99, ask + slippage)
+    if ask and entry_min <= ask <= entry_max:
+        return min(entry_max, ask + slippage)
     mid = ws_client.get_mid_price(token)
-    return mid if mid and 0.01 < mid < 0.99 else None
+    if mid and entry_min <= mid <= entry_max:
+        return mid
+    return None
 
 
 def _paper_exit_price(token_direction: str, market: dict) -> float | None:
@@ -79,10 +84,16 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
     if not token:
         return None
     slippage = CONFIG.get("fees", {}).get("paper_slippage_per_share", 0.005)
+    sc_cfg = CONFIG.get("stoplicht_scalper", {})
+    entry_min = sc_cfg.get("entry_price_min", 0.20)
+    entry_max = sc_cfg.get("entry_price_max", 0.80)
     ask = ws_client.get_best_ask(token)
-    if not (ask and 0.01 < ask < 0.99):
+    if not (ask and entry_min <= ask <= entry_max):
+        if ask:
+            log.warning("scalper_entry_price_guard", token=token[:8], ask=round(ask, 4),
+                        min=entry_min, max=entry_max)
         return None
-    price = round(min(0.99, ask + slippage), 3)
+    price = round(min(entry_max, ask + slippage), 3)
     shares = round(size_eur / max(price, 0.01), 2)
     if shares < 0.01:
         return None

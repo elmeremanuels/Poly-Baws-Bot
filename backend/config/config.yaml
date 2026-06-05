@@ -314,6 +314,8 @@ stoplicht_scalper:
   entry_start_secs: 600               # start evalueren 10 min voor window-start
   entry_cutoff_secs: 30               # skip window als < 30s resterend
   phase2_secs: 180                    # schakel naar Phase 2 bij ≤ 3 min resterend
+  entry_price_min: 0.20               # geen entry als token < 20¢ (markt al te ver bewogen)
+  entry_price_max: 0.80               # geen entry als token > 80¢ (markt al te ver bewogen)
   hold_threshold_init: 0.88           # mid-prijs winnende kant ≥ dit = hou tot $1
   trail_activate_cts: 7               # trailing activeert bij +7¢ winst; zonder 7¢ = break-even exit
   trail_buffer_cts: 2                 # 2¢ onder piek = stop
