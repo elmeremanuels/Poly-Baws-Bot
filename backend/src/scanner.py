@@ -254,22 +254,21 @@ def get_tradeable_market(coin: str) -> dict | None:
 
 
 async def get_next_scalper_market(coin: str, filter_slug: str) -> dict | None:
-    """Fetch the next upcoming market for the Stoplicht Scalper (uses custom filter_slug).
+    """Fetch the next upcoming or currently active market for the Stoplicht Scalper.
 
-    This bypasses the per-coin _market_cache so the scalper can use a different
-    duration slug (e.g. 'btc-updown-15m') without affecting the straddle bot.
+    Returns the soonest market whose window has not yet ended (window_end > now).
+    This includes already-started windows so the bot can resume after a restart.
     """
     markets = await _fetch_markets_for_coin(coin, filter_slug)
     now = datetime.now(timezone.utc)
-    upcoming = [
+    active_or_upcoming = [
         m for m in markets
-        if m.get("window_start") and m["window_start"] > now
-        and m.get("window_end") and m["window_end"] > now
+        if m.get("window_end") and m["window_end"] > now
     ]
-    if not upcoming:
+    if not active_or_upcoming:
         return None
-    upcoming.sort(key=lambda m: m["window_start"])
-    market = upcoming[0]
+    active_or_upcoming.sort(key=lambda m: m.get("window_start") or now)
+    market = active_or_upcoming[0]
     # Subscribe tokens so ws_client can provide real-time prices
     tokens = [t for t in (market.get("yes_token"), market.get("no_token")) if t]
     if tokens:
