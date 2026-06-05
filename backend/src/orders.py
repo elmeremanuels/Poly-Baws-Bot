@@ -192,8 +192,19 @@ async def place_limit_order(
         return None
 
 
-async def place_market_order(token_id: str, side: str, size: float) -> dict | None:
+async def place_market_order(token_id: str, side: str, size: float,
+                             order_type: str = "FAK") -> dict | None:
+    """Place a market order.
+
+    order_type:
+      FAK (default) — Fill-And-Kill: sweep all available liquidity NOW, kill the
+        remainder. Used for SELLs/exits so a thin orderbook never causes a total
+        failure (FOK raises "no match" if the full size can't fill in one shot,
+        which would strand tokens while the bot thinks it sold).
+      FOK — Fill-Or-Kill: all-or-nothing. Only safe when full liquidity is certain.
+    """
     from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType
+    _otype = {"FAK": OrderType.FAK, "FOK": OrderType.FOK}.get(order_type, OrderType.FAK)
     try:
         client = get_client()
         order_args = MarketOrderArgsV2(
@@ -201,11 +212,12 @@ async def place_market_order(token_id: str, side: str, size: float) -> dict | No
             amount=size,
             side=side,
         )
-        resp = await _run_sync(client.create_and_post_market_order, order_args, None, OrderType.FOK)
+        resp = await _run_sync(client.create_and_post_market_order, order_args, None, _otype)
         order_id = resp.get("orderID") or resp.get("order_id")
         if not order_id:
             log.error("market_order_no_id", token_id=token_id, side=side, size=size, resp=resp)
-        log.info("market_order_placed", token_id=token_id, side=side, size=size, order_id=order_id)
+        log.info("market_order_placed", token_id=token_id, side=side, size=size,
+                 order_type=order_type, order_id=order_id)
         return {"order_id": order_id, "status": resp.get("status"), "raw": resp}
     except Exception as e:
         if _is_maker_not_allowed(e):

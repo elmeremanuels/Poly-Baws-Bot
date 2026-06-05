@@ -109,50 +109,100 @@ async def _live_entry(token_dir: str, market: dict, size_eur: float) -> float | 
 
 
 async def _live_exit(pos, market: dict, breakeven: bool = False,
-                    force: bool = False) -> float:
-    """Place a live market sell (FOK). Returns exit price used.
+                    force: bool = False) -> tuple[float, float]:
+    """Place a live FAK market sell. Returns (filled_shares, avg_price).
 
-    All exits use market orders to guarantee execution — a GTC limit that
-    fails to fill leaves tokens stranded on Polymarket while the bot marks
-    the position as closed.
+    FAK (Fill-And-Kill) sweeps the available bid liquidity immediately and kills
+    the remainder, so a thin orderbook yields a *partial* fill instead of a total
+    FOK failure that would strand tokens. filled_shares == 0 means nothing was
+    sold — the caller MUST keep the position open and retry, never book it closed.
     """
     from . import orders as _orders
     token = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
     if not token:
-        return pos.entry_price
-    price = pos.entry_price if breakeven else (
+        return 0.0, pos.entry_price
+    est_price = pos.entry_price if breakeven else (
         ws_client.get_best_bid(token) or pos.peak_price or pos.entry_price)
     shares = round(pos.size_eur / max(pos.entry_price, 0.01), 2)
     min_order_value = CONFIG.get("stoplicht_scalper", {}).get("min_order_value", 1.10)
-    if shares < 0.01 or shares * price < min_order_value:
+    if shares < 0.01 or shares * est_price < min_order_value:
         log.warning("scalper_exit_below_min_order", token=token[:8],
-                    value=round(shares * price, 3), min=min_order_value)
-        return price
+                    value=round(shares * est_price, 3), min=min_order_value)
+        return 0.0, est_price
 
-    resp = await _orders.place_market_order(token, "SELL", shares)
-    order_id = resp.get("orderID") or resp.get("order_id") if resp else None
-    if order_id:
-        import asyncio as _asyncio
-        await _asyncio.sleep(1.0)
-        order_info = await _orders.get_order(order_id)
-        if order_info:
-            raw = order_info if isinstance(order_info, dict) else {}
-            avg_price = (raw.get("avgPrice") or raw.get("avg_price")
-                         or raw.get("price") or raw.get("matchedPrice"))
-            try:
-                fill_price = float(avg_price)
-                if 0.0 < fill_price <= 1.0:
-                    log.info("scalper_live_sell_market", token=token[:8], shares=shares,
-                             fill_price=fill_price, estimated_price=price,
-                             force=force, breakeven=breakeven)
-                    return fill_price
-            except (TypeError, ValueError):
-                pass
-        log.info("scalper_live_sell_market", token=token[:8], shares=shares,
-                 fill_price=price, force=force, breakeven=breakeven)
-    else:
+    resp = await _orders.place_market_order(token, "SELL", shares, order_type="FAK")
+    order_id = (resp.get("order_id") or resp.get("orderID")) if resp else None
+    if not order_id:
         log.error("scalper_sell_failed", token=token[:8], shares=shares, force=force)
-    return price
+        return 0.0, est_price
+
+    import asyncio as _asyncio
+    await _asyncio.sleep(1.0)
+
+    filled_shares: float | None = None
+    fill_price = est_price
+    order_info = await _orders.get_order(order_id)
+    if isinstance(order_info, dict):
+        matched = (order_info.get("size_matched") or order_info.get("sizeMatched")
+                   or order_info.get("matched_size"))
+        if matched is not None:
+            try:
+                filled_shares = float(matched)
+            except (TypeError, ValueError):
+                filled_shares = None
+        avg = (order_info.get("avgPrice") or order_info.get("avg_price")
+               or order_info.get("price") or order_info.get("matchedPrice"))
+        try:
+            ap = float(avg)
+            if 0.0 < ap <= 1.0:
+                fill_price = ap
+        except (TypeError, ValueError):
+            pass
+
+    # Fallback to the POST response status when get_order gave no matched size.
+    if filled_shares is None:
+        raw = (resp or {}).get("raw") or {}
+        status = str(raw.get("status") or (resp or {}).get("status") or "").lower()
+        filled_shares = shares if status in ("matched", "filled") else 0.0
+
+    log.info("scalper_live_sell_market", token=token[:8], requested=shares,
+             filled=round(filled_shares, 2), fill_price=round(fill_price, 4),
+             force=force, breakeven=breakeven)
+    return filled_shares, fill_price
+
+
+def _close_slot(positions, slot: str, exit_price: float, reason: str) -> float:
+    if slot == "main":
+        return positions.close_main(exit_price, reason)
+    return positions.close_hedge(exit_price, reason)
+
+
+def _apply_live_exit(positions, slot: str, pos, filled_shares: float,
+                     avg_price: float, reason: str) -> bool:
+    """Close/reduce a slot based on the ACTUAL fill. Returns True if fully closed.
+
+    filled_shares <= 0  → nothing sold; keep position open for retry (return False).
+    filled ≥ 95% req    → full close at avg_price.
+    partial             → reduce position to the unsold remainder, retry next tick.
+    """
+    requested = pos.size_eur / max(pos.entry_price, 0.01)
+    if filled_shares <= 0:
+        log.warning("scalper_exit_unfilled_retry", slot=slot, reason=reason,
+                    requested=round(requested, 2))
+        return False
+    if filled_shares >= requested * 0.95:
+        if slot == "main":
+            positions.close_main(avg_price, reason)
+        else:
+            positions.close_hedge(avg_price, reason)
+        return True
+    if slot == "main":
+        positions.reduce_main(filled_shares, avg_price, reason + "_partial")
+    else:
+        positions.reduce_hedge(filled_shares, avg_price, reason + "_partial")
+    log.info("scalper_exit_partial", slot=slot, reason=reason,
+             filled=round(filled_shares, 2), requested=round(requested, 2))
+    return False
 
 
 def _get_token_mid(token_direction: str, market: dict) -> float | None:
@@ -236,14 +286,18 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
                 log.debug("scalper_hold_spread_mom", coin=coin, secs_left=round(secs_left))
             else:
                 be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
+                reason = "mom_reversal_be" if be else "mom_reversal"
                 if paper:
                     exit_p = pos.entry_price if be else (
                         _paper_exit_price(pos.token_direction, market) or current_mid or pos.entry_price)
+                    pnl = positions.close_main(exit_p, reason)
+                    log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
+                             paper=paper, breakeven=be)
                 else:
-                    exit_p = await _live_exit(pos, market, breakeven=be)
-                pnl = positions.close_main(exit_p, "mom_reversal_be" if be else "mom_reversal")
-                log.info("scalper_mom_exit", coin=coin, pnl=pnl, secs_left=round(secs_left),
-                         paper=paper, breakeven=be)
+                    filled, avg = await _live_exit(pos, market, breakeven=be)
+                    if _apply_live_exit(positions, "main", pos, filled, avg, reason):
+                        log.info("scalper_mom_exit", coin=coin, secs_left=round(secs_left),
+                                 paper=paper, breakeven=be)
             return
 
         if should_exit and current_mid:
@@ -252,10 +306,12 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
                 return
             if paper:
                 exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                pnl = positions.close_main(exit_p, "trail_stop")
+                log.info("scalper_trail_exit", coin=coin, pnl=pnl, secs_left=round(secs_left), paper=paper)
             else:
-                exit_p = await _live_exit(pos, market)
-            pnl = positions.close_main(exit_p, "trail_stop")
-            log.info("scalper_trail_exit", coin=coin, pnl=pnl, secs_left=round(secs_left), paper=paper)
+                filled, avg = await _live_exit(pos, market)
+                if _apply_live_exit(positions, "main", pos, filled, avg, "trail_stop"):
+                    log.info("scalper_trail_exit", coin=coin, secs_left=round(secs_left), paper=paper)
             return
 
     # ── Manage hedge position ──────────────────────────────────────────────────
@@ -268,9 +324,10 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
             else:
                 if paper:
                     exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                    positions.close_hedge(exit_p, "trail_stop")
                 else:
-                    exit_p = await _live_exit(pos, market)
-                positions.close_hedge(exit_p, "trail_stop")
+                    filled, avg = await _live_exit(pos, market)
+                    _apply_live_exit(positions, "hedge", pos, filled, avg, "trail_stop")
 
     # ── ROOD = harde geen entry ────────────────────────────────────────────────
     if st.get("color") == "ROOD":
@@ -323,12 +380,13 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
                 if should_exit and current_mid:
                     if paper:
                         exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                        if slot == "main":
+                            positions.close_main(exit_p, "trail_stop_p2")
+                        else:
+                            positions.close_hedge(exit_p, "trail_stop_p2")
                     else:
-                        exit_p = await _live_exit(pos, market)
-                    if slot == "main":
-                        positions.close_main(exit_p, "trail_stop_p2")
-                    else:
-                        positions.close_hedge(exit_p, "trail_stop_p2")
+                        filled, avg = await _live_exit(pos, market)
+                        _apply_live_exit(positions, slot, pos, filled, avg, "trail_stop_p2")
         return
 
     # No hold signal — take final directional position if consensus, no current position
@@ -354,12 +412,10 @@ async def _phase2_tick(coin, market, positions, st, lead, secs_left,
             if should_exit and current_mid:
                 if paper:
                     exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                    _close_slot(positions, slot, exit_p, "trail_stop_p2")
                 else:
-                    exit_p = await _live_exit(pos, market)
-                if slot == "main":
-                    positions.close_main(exit_p, "trail_stop_p2")
-                else:
-                    positions.close_hedge(exit_p, "trail_stop_p2")
+                    filled, avg = await _live_exit(pos, market)
+                    _apply_live_exit(positions, slot, pos, filled, avg, "trail_stop_p2")
 
 
 async def _run_window(coin: str, market: dict, paper: bool) -> None:
@@ -454,26 +510,36 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
     # Force close remaining open positions at window end
     for slot in ("main", "hedge"):
         pos = getattr(positions, slot)
-        if pos:
-            if _should_hold_for_spread(pos, market):
-                # Winning position + wide spread → hold to $1 resolution, no sell order
-                exit_p = 1.0
-                reason = "hold_resolution"
-                log.info("scalper_hold_resolution", coin=coin, slot=slot,
-                         entry=pos.entry_price, paper=paper)
-            else:
-                be = not pos.trailing_active
-                if paper:
-                    exit_p = pos.entry_price if be else (
-                        _paper_exit_price(pos.token_direction, market) or pos.entry_price)
-                else:
-                    # force=True → market order (FOK), no GTC order left open on Polymarket
-                    exit_p = await _live_exit(pos, market, breakeven=be, force=True)
-                reason = "force_exit_be" if be else "force_exit"
-            if slot == "main":
-                positions.close_main(exit_p, reason)
-            else:
-                positions.close_hedge(exit_p, reason)
+        if not pos:
+            continue
+
+        if _should_hold_for_spread(pos, market):
+            # Winning position + wide spread → hold to $1 resolution, no sell order
+            log.info("scalper_hold_resolution", coin=coin, slot=slot,
+                     entry=pos.entry_price, paper=paper)
+            _close_slot(positions, slot, 1.0, "hold_resolution")
+            continue
+
+        be = not pos.trailing_active
+        reason = "force_exit_be" if be else "force_exit"
+
+        if paper:
+            exit_p = pos.entry_price if be else (
+                _paper_exit_price(pos.token_direction, market) or pos.entry_price)
+            _close_slot(positions, slot, exit_p, reason)
+            continue
+
+        # Live: FAK sweep. Whatever can't be sold (no bids) settles at $1/$0.
+        filled, avg = await _live_exit(pos, market, breakeven=be, force=True)
+        if _apply_live_exit(positions, slot, pos, filled, avg, reason):
+            continue
+        # Remainder unsold — it goes to binary resolution, not a fictional sell.
+        tok = market.get("yes_token") if pos.token_direction == "YES" else market.get("no_token")
+        res_mid = ws_client.get_mid_price(tok) if tok else None
+        res_price = 1.0 if (res_mid is not None and res_mid >= 0.5) else 0.0
+        log.info("scalper_exit_to_resolution", coin=coin, slot=slot,
+                 entry=pos.entry_price, resolves_to=res_price, paper=paper)
+        _close_slot(positions, slot, res_price, "resolution")
 
     total_pnl = positions.total_pnl
     closed = positions._closed

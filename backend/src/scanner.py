@@ -256,14 +256,20 @@ def get_tradeable_market(coin: str) -> dict | None:
 async def get_next_scalper_market(coin: str, filter_slug: str) -> dict | None:
     """Fetch the next upcoming or currently active market for the Stoplicht Scalper.
 
-    Returns the soonest market whose window has not yet ended (window_end > now).
-    This includes already-started windows so the bot can resume after a restart.
+    Returns the soonest market whose window has not yet ended (window_end > now)
+    AND that has not already been traded. Including active-but-untraded windows
+    lets the bot resume after a restart; excluding already-traded windows stops
+    the loop from getting stuck re-returning the same active window it already
+    claimed (which blocked it from advancing to the next window).
     """
+    from .state import has_traded_window
     markets = await _fetch_markets_for_coin(coin, filter_slug)
     now = datetime.now(timezone.utc)
     active_or_upcoming = [
         m for m in markets
         if m.get("window_end") and m["window_end"] > now
+        and m.get("window_start")
+        and not has_traded_window(coin, m["window_start"].isoformat())
     ]
     if not active_or_upcoming:
         return None

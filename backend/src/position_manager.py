@@ -58,6 +58,39 @@ class WindowPositions:
         self.hedge = None
         return pnl
 
+    def reduce_main(self, filled_shares: float, exit_price: float,
+                    reason: str = "partial_exit") -> float:
+        """Book a partial sell of `filled_shares` at `exit_price`, shrink the position.
+
+        Used when a live exit only partially fills (thin orderbook). The unsold
+        remainder stays open for a retry on the next tick. If the remainder is
+        negligible the position is fully closed.
+        """
+        return self._reduce("main", filled_shares, exit_price, reason)
+
+    def reduce_hedge(self, filled_shares: float, exit_price: float,
+                     reason: str = "partial_exit") -> float:
+        return self._reduce("hedge", filled_shares, exit_price, reason)
+
+    def _reduce(self, slot: str, filled_shares: float, exit_price: float,
+                reason: str) -> float:
+        pos = getattr(self, slot)
+        if not pos or filled_shares <= 0 or pos.entry_price <= 0:
+            return 0.0
+        cur_shares = pos.size_eur / pos.entry_price
+        sell = min(filled_shares, cur_shares)
+        pnl = _calc_pnl_shares(pos.entry_price, exit_price, sell)
+        self._closed.append({"slot": slot, "direction": pos.direction,
+                             "entry": pos.entry_price, "exit": exit_price,
+                             "size_eur": round(sell * pos.entry_price, 4),
+                             "pnl": pnl, "reason": reason})
+        remaining = cur_shares - sell
+        if remaining <= 0.01:
+            setattr(self, slot, None)
+        else:
+            pos.size_eur = round(remaining * pos.entry_price, 4)
+        return pnl
+
     @property
     def total_pnl(self) -> float:
         return round(sum(t["pnl"] for t in self._closed), 4)
@@ -71,8 +104,16 @@ def _calc_pnl(pos: Position, exit_price: float) -> float:
     if pos.entry_price <= 0:
         return 0.0
     shares = pos.size_eur / pos.entry_price
-    gross = (exit_price - pos.entry_price) * shares
-    fee_entry = 0.018 * min(pos.entry_price, 1 - pos.entry_price) / 0.5 * pos.size_eur
+    return _calc_pnl_shares(pos.entry_price, exit_price, shares)
+
+
+def _calc_pnl_shares(entry_price: float, exit_price: float, shares: float) -> float:
+    """PnL for selling `shares` bought at `entry_price`, exited at `exit_price`."""
+    if entry_price <= 0 or shares <= 0:
+        return 0.0
+    size_eur = shares * entry_price
+    gross = (exit_price - entry_price) * shares
+    fee_entry = 0.018 * min(entry_price, 1 - entry_price) / 0.5 * size_eur
     fee_exit = (0.018 * min(exit_price, 1 - exit_price) / 0.5 * (shares * exit_price)
                 if exit_price < 1.0 else 0.0)
     return round(gross - fee_entry - fee_exit, 4)
