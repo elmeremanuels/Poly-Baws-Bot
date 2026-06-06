@@ -306,6 +306,37 @@ whale_tracker:
     is5minfixedyet: "0x2bc01f3ad80e31f5bf3d80775b044f0c67797871"
     whale_2c5a: "0x2c5aad8f0a9fb039bf4417250b52a62c3b95ef11"
 
+hyperliquid_trader:
+  enabled: false
+  paper_mode: true                    # altijd paper starten; zet op false voor live orders
+  private_key: "${HYPERLIQUID_PRIVATE_KEY}"  # of zet in backend/config/.env
+
+  # Trading
+  leverage: 5                         # 1–50; begin laag (5×)
+  poll_interval_secs: 10              # hoe vaak het signaal wordt geëvalueerd
+  paper_size_usdc: 10.0               # fictieve inleg per trade in paper mode
+
+  # Entry
+  entry_score_min: 0.65               # minimale stoplicht-score (groen = ≥ 0.60)
+  green_threshold: 0.60               # grens voor "consensus" = GROEN
+  mom_reversal_score: 0.40            # minimumscore om positie te draaien
+
+  # Exit — uitgedrukt in % van entry-prijs (niet in ¢)
+  trail_activate_pct: 0.40            # trailing activeert bij +0.40% winst (~$240 op BTC @60k)
+  trail_buffer_pct: 0.20              # stop bij 0.20% terug van piek (~$120 op BTC @60k)
+  profit_target_pct: 0.50             # direct sluiten bij +0.50% winst
+
+  # Positiegroottes
+  sizing:
+    main_pct_per_100: 5.0             # 5% van USDC-saldo per trade als margin
+  min_order_size_coin: 0.001          # minimale BTC-positie (Hyperliquid minimum)
+
+  # Coins
+  coins:
+    BTC:  { enabled: true }
+    ETH:  { enabled: false }
+    SOL:  { enabled: false }
+
 stoplicht_scalper:
   enabled: false
   coin: "BTC"                         # welke coin te traden
