@@ -1,0 +1,21 @@
+[Unit]
+Description=Poly-Baws-Bot — Hyperliquid Perpetual Trader
+After=network.target poly-baws-indicator.service
+
+[Service]
+Type=simple
+User=polybot
+Group=polybot
+WorkingDirectory=/opt/poly-baws-bot/backend
+Environment=PYTHONPATH=/opt/poly-baws-bot/backend
+EnvironmentFile=/opt/poly-baws-bot/backend/config/.env
+ExecStart=/opt/poly-baws-bot/venv/bin/python -m src.hl_main
+Restart=on-failure
+RestartSec=10s
+MemoryMax=300M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=poly-baws-hyperliquid
+
+[Install]
+WantedBy=multi-user.target
