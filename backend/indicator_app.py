@@ -17,10 +17,14 @@ Usage:
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
 
+import httpx
 import streamlit as st
 
 # Allow importing from src/ when run as a top-level Streamlit script
@@ -35,6 +39,8 @@ from src.indicator_engine import (  # noqa: E402
     compute_book_walls,
     compute_vpoc_levels,
 )
+
+_CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 
 
 # ── Cache (delegated to shared engine, shared across both apps in same process) ─
@@ -254,6 +260,105 @@ def _panel() -> None:
 
 
 _panel()
+
+
+# ── Claude advies (1× per 5 minuten) ─────────────────────────────────────────
+
+def _call_claude(direction: str, score: float, d: dict,
+                 price: float, supports: list, resistances: list, regime: str) -> dict:
+    """Synchrone call naar Claude Haiku 4.5. Retourneert dict met verdict/confidence/reason."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"verdict": "—", "confidence": 0.0, "reason": "ANTHROPIC_API_KEY niet ingesteld."}
+
+    def _fmt(v) -> str:
+        return f"{v:.3f}" if v is not None else "n/b"
+
+    sup_str = f"${supports[0]['price']:,.0f}"  if supports    else "—"
+    res_str = f"${resistances[0]['price']:,.0f}" if resistances else "—"
+
+    user_msg = (
+        f"BTC perpetual Hyperliquid signalen:\n"
+        f"Richting={direction} Score={score:.2f} Regime={regime}\n"
+        f"OFI={_fmt(d.get('spot_ofi'))} OBI={_fmt(d.get('obi'))} "
+        f"MOM={_fmt(d.get('mom'))} CVD={_fmt(d.get('cvd'))}\n"
+        f"Prijs=${price:,.0f} Support={sup_str} Weerstand={res_str}\n\n"
+        'Antwoord uitsluitend als JSON: {"verdict":"LONG"|"SHORT"|"FLAT",'
+        '"confidence":0.0-1.0,"reason":"max 2 zinnen"}'
+    )
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                _CLAUDE_URL,
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 150,
+                    "system": (
+                        "Je bent een BTC perpetuals handelaar op Hyperliquid. "
+                        "OFI>0=koopdruck, CVD negatief=netto verkoop, score 0–1 is "
+                        "gewogen signaalsterkte. Geef advies als JSON, altijd geldig JSON."
+                    ),
+                    "messages": [{"role": "user", "content": user_msg}],
+                },
+            )
+        resp.raise_for_status()
+        text = resp.json()["content"][0]["text"]
+        m = re.search(r'\{[^{}]+\}', text, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+    except Exception as exc:
+        return {"verdict": "—", "confidence": 0.0, "reason": f"Fout: {str(exc)[:100]}"}
+    return {"verdict": "—", "confidence": 0.0, "reason": "Ongeldig antwoord van Claude."}
+
+
+@st.fragment(run_every=300)
+def _claude_panel() -> None:
+    with cache.lock:
+        s_ok  = cache.spot_ok
+        n     = len(cache.spot)
+    if not s_ok or n < 20:
+        return
+
+    direction, score, d = compute_direction(cache)
+    price, supports, resistances = compile_levels(cache)
+    with cache.lock:
+        regime = cache.regime
+
+    result     = _call_claude(direction, score, d, price, supports, resistances, regime)
+    verdict    = result.get("verdict", "—")
+    confidence = float(result.get("confidence", 0.0))
+    reason     = result.get("reason", "")
+
+    vclr  = {"LONG": "#22c55e", "SHORT": "#ef4444", "FLAT": "#f97316"}.get(verdict, "#555")
+    arrow = {"LONG": "▲",       "SHORT": "▼",       "FLAT": "◆"}.get(verdict, "")
+    ts    = time.strftime("%H:%M")
+
+    st.markdown(f"""
+<div style="background:{vclr}18;border:2px solid {vclr};border-radius:10px;
+            padding:10px 8px 8px;text-align:center;font-family:system-ui;margin-top:8px;">
+  <div style="font-size:10px;color:#888;margin-bottom:4px;letter-spacing:.04em;">
+    🤖 CLAUDE ADVIES &nbsp;·&nbsp; {int(confidence * 100)}% overtuiging
+  </div>
+  <div style="font-size:26px;font-weight:800;color:{vclr};line-height:1.1;">
+    {arrow} {verdict}
+  </div>
+  <div style="font-size:10px;color:#bbb;margin-top:6px;text-align:left;
+              line-height:1.45;padding:0 2px;">
+    {reason}
+  </div>
+  <div style="font-size:9px;color:#444;margin-top:5px;border-top:1px solid #2a2a2a;
+              padding-top:3px;">
+    ⟳ elke 5 min &nbsp;·&nbsp; {ts}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+
+_claude_panel()
 
 
 # ── Snap reversal events ───────────────────────────────────────────────────────
