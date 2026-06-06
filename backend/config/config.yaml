@@ -319,6 +319,7 @@ stoplicht_scalper:
   hold_threshold_init: 0.88           # mid-prijs winnende kant ≥ dit = hou tot $1
   trail_activate_cts: 7               # trailing activeert bij +7¢ winst; zonder 7¢ = break-even exit
   trail_buffer_cts: 2                 # 2¢ onder piek = stop
+  profit_target_cts: 5               # pak winst bij +5¢ boven entry; 0 = uitgeschakeld
   spread_hold_cts: 4                  # spread ≥ 4¢ + winnende kant → vasthouden tot resolutie
   green_threshold: 0.60               # gecombineerde score ≥ 0.60 = GROEN
   orange_threshold: 0.35              # score 0.35–0.59 = ORANJE

@@ -292,6 +292,25 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
         pos = positions.main
         should_exit, current_mid = _tick_trailing(pos, market, trail_activate, trail_buffer)
 
+        # Profit target: pak winst zodra prijs X¢ boven entry zit.
+        # Hogere prioriteit dan trail/MOM: winst is winst, sluit direct.
+        # Na sluiting doet de volgende tick een nieuwe entry als signaal nog GROEN is.
+        profit_target = CONFIG.get("stoplicht_scalper", {}).get("profit_target_cts", 0) / 100.0
+        if profit_target > 0 and current_mid and current_mid >= pos.entry_price + profit_target:
+            if paper:
+                exit_p = _paper_exit_price(pos.token_direction, market) or current_mid
+                pnl = positions.close_main(exit_p, "profit_target")
+                log.info("scalper_profit_target", coin=coin, pnl=pnl,
+                         entry=pos.entry_price, exit=exit_p,
+                         target_cts=round(profit_target * 100, 2), paper=paper)
+            else:
+                filled, avg = await _live_exit(pos, market)
+                if _apply_live_exit(positions, "main", pos, filled, avg, "profit_target"):
+                    log.info("scalper_profit_target", coin=coin,
+                             entry=pos.entry_price, fill=round(avg, 4),
+                             target_cts=round(profit_target * 100, 2), paper=paper)
+            return
+
         # MOM reversal: stoplicht flipped to opposite direction with conviction.
         # No spread-hold here: Phase 1 is active scalping — signals always fire.
         new_dir = st.get("direction")
