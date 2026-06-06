@@ -512,9 +512,34 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
     direction_at_phase2: str | None = None
     last_st: dict = {}
 
+    # ── Positieherstel na herstart ─────────────────────────────────────────────
+    # Als de bot herstart terwijl een window actief was, staan de tokens nog
+    # op Polymarket maar is positions leeg. Check de open posities en herstel.
+    if not paper:
+        try:
+            from . import orders as _orders_rec
+            open_pos = await _orders_rec.get_open_positions()
+            for p in open_pos:
+                asset = str(p.get("asset_id") or p.get("token_id") or "")
+                size  = float(p.get("size") or p.get("amount") or 0)
+                avg_p = float(p.get("avg_price") or p.get("avgPrice") or 0)
+                if size < 0.01 or avg_p <= 0:
+                    continue
+                if asset.lower() == yes_token.lower() and positions.main is None:
+                    positions.open_main("UP", avg_p, round(size * avg_p, 4))
+                    log.info("scalper_position_recovered", coin=coin, slot="main",
+                             direction="UP", entry=avg_p, size=size, token=asset[:8])
+                elif asset.lower() == no_token.lower() and positions.main is None:
+                    positions.open_main("DOWN", avg_p, round(size * avg_p, 4))
+                    log.info("scalper_position_recovered", coin=coin, slot="main",
+                             direction="DOWN", entry=avg_p, size=size, token=asset[:8])
+        except Exception as _rec_exc:
+            log.warning("scalper_position_recovery_failed", coin=coin, error=str(_rec_exc))
+
     log.info("scalper_window_started", coin=coin, window_id=window_id,
              window_end=str(window_end), paper=paper,
-             mode="PAPER" if paper else "LIVE *** REAL ORDERS ***")
+             mode="PAPER" if paper else "LIVE *** REAL ORDERS ***",
+             recovered=positions.main is not None)
 
     while True:
         now = datetime.now(timezone.utc)
