@@ -357,8 +357,36 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
     if st.get("color") == "ROOD":
         return
 
-    # ── Open main position: full consensus + market confirmation ───────────────
-    if positions.can_open_main() and st.get("consensus") and st.get("confirmed"):
+    # ── Open main position ─────────────────────────────────────────────────────
+    # Entry-criteria zijn tweelaags:
+    #
+    # Eerste trade dit window (positions._closed leeg):
+    #   - consensus (GROEN) + confirmed (Polymarket mid bevestigt richting)
+    #   - score ≥ entry_score_min (default 0.65, boven GROEN-drempel van 0.60)
+    #   - |mom| ≥ entry_mom_min (default 0.10) — momentum must be meaningfully directional
+    #
+    # Her-entry na profit_target/trail_stop binnen hetzelfde window:
+    #   - alleen consensus (GROEN) — confirmed vereist niet, signaal volstaat
+    #   - score en mom-drempel blijven gelden
+    #
+    # Ratio: de eerste entry filtert ruis (confirmed voorkomt tegendraadse entries).
+    # Na een succesvolle trade is het signaal al bewezen; confirmed is dan te streng.
+    sc_cfg = CONFIG.get("stoplicht_scalper", {})
+    entry_score_min = sc_cfg.get("entry_score_min", 0.65)
+    entry_mom_min   = sc_cfg.get("entry_mom_min", 0.10)
+    score = st.get("score", 0)
+    mom   = st.get("mom")
+    mom_ok = mom is not None and abs(mom) >= entry_mom_min
+    had_trade = len(positions._closed) > 0  # herentry na eerder trade dit window
+
+    entry_ok = (
+        st.get("consensus")
+        and score >= entry_score_min
+        and mom_ok
+        and (had_trade or st.get("confirmed"))
+    )
+
+    if positions.can_open_main() and entry_ok:
         direction = st.get("direction")
         if direction:
             token_dir = "YES" if direction == "UP" else "NO"
@@ -369,7 +397,9 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
             if entry_p:
                 positions.open_main(direction, entry_p, sizes["main_eur"])
                 log.info("scalper_entry", coin=coin, direction=direction,
-                         entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left), paper=paper)
+                         entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left),
+                         score=round(score, 3), mom=round(mom, 3) if mom else None,
+                         reentry=had_trade, paper=paper)
 
     # ── Contrarian hedge: support wall in sight, enough time, market beweeglijk ─
     if (hedge_enabled
