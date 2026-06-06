@@ -325,8 +325,8 @@ stoplicht_scalper:
   poll_interval_secs: 10              # poll interval in seconden
   hedge_enabled: true                 # contrarian micro-hedge aan/uit
   sizing:
-    main_pct_per_100: 15.0            # €15 hoofdpositie per €100 portfolio
-    hedge_pct_per_100: 3.0            # €3 hedge per €100 portfolio (20% van main)
+    main_pct_per_100: 5.0             # €5 hoofdpositie per €100 portfolio
+    hedge_pct_per_100: 1.0            # €1 hedge per €100 portfolio (20% van main)
   coins:
     BTC:  { enabled: true }
     ETH:  { enabled: true }
