@@ -373,16 +373,14 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
     # Na een succesvolle trade is het signaal al bewezen; confirmed is dan te streng.
     sc_cfg = CONFIG.get("stoplicht_scalper", {})
     entry_score_min = sc_cfg.get("entry_score_min", 0.65)
-    entry_mom_min   = sc_cfg.get("entry_mom_min", 0.10)
-    score = st.get("score", 0)
-    mom   = st.get("mom")
-    mom_ok = mom is not None and abs(mom) >= entry_mom_min
-    had_trade = len(positions._closed) > 0  # herentry na eerder trade dit window
+    score     = st.get("score", 0)
+    had_trade = positions.trades_count > 0  # her-entry na eerder trade dit window
 
+    # Eerste entry: consensus + confirmed + score ≥ min
+    # Her-entry na profit_target/trail_stop: alleen consensus + score (confirmed te streng)
     entry_ok = (
         st.get("consensus")
         and score >= entry_score_min
-        and mom_ok
         and (had_trade or st.get("confirmed"))
     )
 
@@ -398,8 +396,7 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
                 positions.open_main(direction, entry_p, sizes["main_eur"])
                 log.info("scalper_entry", coin=coin, direction=direction,
                          entry=entry_p, size=sizes["main_eur"], secs_left=round(secs_left),
-                         score=round(score, 3), mom=round(mom, 3) if mom else None,
-                         reentry=had_trade, paper=paper)
+                         score=round(score, 3), reentry=had_trade, paper=paper)
 
     # ── Contrarian hedge: support wall in sight, enough time, market beweeglijk ─
     if (hedge_enabled

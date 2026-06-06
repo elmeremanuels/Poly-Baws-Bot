@@ -323,8 +323,7 @@ stoplicht_scalper:
   spread_hold_cts: 4                  # spread ≥ 4¢ + winnende kant → vasthouden tot resolutie
   green_threshold: 0.60               # gecombineerde score ≥ 0.60 = GROEN
   orange_threshold: 0.35              # score 0.35–0.59 = ORANJE
-  entry_score_min: 0.65              # minimale score voor een nieuwe entry (boven GROEN)
-  entry_mom_min: 0.10                # minimale |momentum| voor entry (0=uitgeschakeld)
+  entry_score_min: 0.65              # minimale score voor een nieuwe entry (boven GROEN-drempel van 0.60)
   poll_interval_secs: 10              # poll interval in seconden
   hedge_enabled: true                 # contrarian micro-hedge aan/uit
   sizing:
