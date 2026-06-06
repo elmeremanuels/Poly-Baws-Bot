@@ -326,6 +326,7 @@ stoplicht_scalper:
   entry_score_min: 0.65              # minimale score voor een nieuwe entry (boven GROEN-drempel van 0.60)
   poll_interval_secs: 10              # poll interval in seconden
   hedge_enabled: true                 # contrarian micro-hedge aan/uit
+  claude_entry_filter: true           # Claude Haiku pre-entry narratief filter (eerste entry per window)
   sizing:
     main_pct_per_100: 5.0             # €5 hoofdpositie per €100 portfolio
     hedge_pct_per_100: 1.0            # €1 hedge per €100 portfolio (20% van main)

@@ -26,6 +26,7 @@ from .position_manager import WindowPositions, get_position_sizes
 from .distance_proxy import get_winning_side
 
 _hold_thresholds: dict[str, float] = {}
+_entry_filter_cache: dict[str, str] = {}  # window_id|direction → go/hold/block
 
 
 async def _save_stoplicht_state(coin: str, st_dict: dict) -> None:
@@ -281,6 +282,71 @@ async def _recalibrate_hold_threshold(coin: str) -> None:
         log.debug("scalper_recalibrate_error", coin=coin, error=str(exc))
 
 
+async def _claude_entry_filter(
+    coin: str, direction: str, score: float, price: float,
+    secs_left: float, question: str, window_id: str,
+) -> str:
+    """Pre-entry Claude Haiku 4.5 filter. Returns 'go', 'hold', or 'block'.
+
+    Called once per window+direction pair (cached). Detects obvious narrative mismatches
+    that quantitative signals cannot see. Defaults to 'go' on any error or timeout.
+    """
+    import os
+    import httpx as _httpx
+
+    cache_key = f"{window_id}|{direction}"
+    if cache_key in _entry_filter_cache:
+        return _entry_filter_cache[cache_key]
+
+    if not CONFIG.get("stoplicht_scalper", {}).get("claude_entry_filter", True):
+        return "go"
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
+        return "go"
+
+    system = (
+        "You are a pre-trade validator for a Polymarket 15-minute binary scalper. "
+        "The scalper uses quantitative signals (order-flow imbalance, momentum, CVD). "
+        "Your job: flag only extreme narrative mismatches. Default to GO."
+    )
+    user = (
+        f"Market question: {question}\n"
+        f"Coin: {coin} | Signal direction: {direction} | Score: {score:.2f} | "
+        f"Current token price: {price:.2f} | Seconds remaining: {secs_left:.0f}\n\n"
+        f"Reply with exactly one word — GO (proceed), HOLD (skip, neutral signal), "
+        f"or BLOCK (clear narrative reason {direction} is wrong in next 15 min)."
+    )
+
+    verdict = "go"
+    try:
+        async with _httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 5,
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                },
+            )
+        resp.raise_for_status()
+        word = resp.json()["content"][0]["text"].strip().upper().split()[0]
+        if word in ("GO", "HOLD", "BLOCK"):
+            verdict = word.lower()
+    except Exception as exc:
+        log.debug("scalper_claude_filter_error", coin=coin, error=str(exc)[:120])
+
+    _entry_filter_cache[cache_key] = verdict
+    log.info("scalper_claude_filter", coin=coin, direction=direction,
+             score=round(score, 3), price=round(price, 3), verdict=verdict)
+    return verdict
+
+
 async def _phase1_tick(coin, market, positions, st, lead, secs_left,
                        trail_activate, trail_buffer, hedge_enabled, hold_threshold,
                        phase2_secs, paper: bool = True):
@@ -395,6 +461,21 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
     if positions.can_open_main() and entry_ok:
         direction = st.get("direction")
         if direction:
+            # Claude pre-entry filter: eerste entry per window+richting.
+            # Her-entries slaan de filter over — signaal is al bewezen.
+            if not had_trade:
+                token_dir_cf = "YES" if direction == "UP" else "NO"
+                cf_price = _get_token_mid(token_dir_cf, market) or 0.5
+                cf_verdict = await _claude_entry_filter(
+                    coin=coin, direction=direction, score=score,
+                    price=cf_price, secs_left=secs_left,
+                    question=market.get("question", ""),
+                    window_id=positions.window_id,
+                )
+                if cf_verdict == "block":
+                    log.info("scalper_entry_claude_blocked", coin=coin,
+                             direction=direction, score=round(score, 3))
+                    return
             token_dir = "YES" if direction == "UP" else "NO"
             if paper:
                 entry_p = _paper_entry_price(token_dir, market)
