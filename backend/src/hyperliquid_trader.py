@@ -203,7 +203,9 @@ async def _tick(coin: str, paper: bool) -> None:
     direction, score, signals, price = _get_signal(coin)
 
     if price is None:
-        return  # nog geen data
+        log.info("hl_tick_no_data", coin=coin,
+                 hint="wacht op Kraken-data (~20s na start)")
+        return
 
     pos = _positions.get(coin)
     consensus = score >= green_threshold and direction is not None
@@ -221,11 +223,10 @@ async def _tick(coin: str, paper: bool) -> None:
         opp = "DOWN" if pos.direction == "LONG" else "UP"
         if direction == opp and score >= mom_rev_score:
             # Houd vast als trailing nooit actief was én positie staat al op verlies
-            # (zelfde logica als stoplicht_scalper MOM-reversal fix)
             if not pos.trailing_active and pos.pnl_pct(price) < 0:
-                log.debug("hl_mom_reversal_hold", coin=coin,
-                          price=round(price, 2), entry=round(pos.entry_price, 2),
-                          pnl_pct=round(pos.pnl_pct(price), 3))
+                log.info("hl_mom_reversal_hold", coin=coin,
+                         price=round(price, 2), entry=round(pos.entry_price, 2),
+                         pnl_pct=round(pos.pnl_pct(price), 3))
                 return
             await _exit(coin, "mom_reversal", price, paper)
             return
@@ -235,11 +236,11 @@ async def _tick(coin: str, paper: bool) -> None:
             await _exit(coin, "trail_stop", price, paper)
             return
 
-        # Log elke minuut de live positiestatus
+        # Positiestatus elke ~60s
         if int(time.time()) % 60 < 10:
-            log.debug("hl_position_status", coin=coin, direction=pos.direction,
-                      price=round(price, 2), pnl_pct=round(pos.pnl_pct(price), 3),
-                      trailing=pos.trailing_active)
+            log.info("hl_position_status", coin=coin, direction=pos.direction,
+                     price=round(price, 2), pnl_pct=round(pos.pnl_pct(price), 3),
+                     trailing=pos.trailing_active)
 
     # ── Open nieuwe positie ───────────────────────────────────────────────────
     elif consensus and score >= entry_score_min and direction:
@@ -247,9 +248,17 @@ async def _tick(coin: str, paper: bool) -> None:
         if confirmed:
             await _enter(coin, direction, price, paper)
         else:
-            log.debug("hl_entry_unconfirmed", coin=coin, direction=direction,
-                      score=round(score, 3),
-                      ofi=signals.get("spot_ofi"), obi=signals.get("obi"))
+            log.info("hl_entry_unconfirmed", coin=coin, direction=direction,
+                     score=round(score, 3),
+                     ofi=round(signals.get("spot_ofi") or 0, 3),
+                     obi=round(signals.get("obi") or 0, 3))
+    else:
+        # Geen consensus — log elke ~30s zodat de gebruiker weet dat het draait
+        if int(time.time()) % 30 < 10:
+            log.info("hl_tick_waiting", coin=coin,
+                     direction=direction or "undecided",
+                     score=round(score, 3),
+                     price=round(price, 2))
 
 
 # ── Hoofd-loop ─────────────────────────────────────────────────────────────────
