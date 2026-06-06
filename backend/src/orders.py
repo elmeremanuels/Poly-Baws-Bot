@@ -285,6 +285,53 @@ async def get_open_positions() -> list[dict]:
         return []
 
 
+async def get_recent_activity(hours: int = 4) -> list[dict]:
+    """Fetch recent trade activity from Polymarket Data API.
+
+    Used to find the actual fill price when a position was sold manually
+    on Polymarket so P&L can be booked at the real price instead of entry.
+    """
+    try:
+        import httpx as _httpx
+        client = get_client()
+        proxy = get_env("POLYMARKET_PROXY_ADDRESS")
+        address = proxy or (client.signer.address() if client.signer else None)
+        if not address:
+            return []
+        async with _httpx.AsyncClient(timeout=20) as http:
+            resp = await http.get(
+                "https://data-api.polymarket.com/activity",
+                params={"user": address, "limit": 500},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        log.error("get_activity_failed", error=str(e))
+        return []
+
+
+def find_sell_price_in_activity(activity: list[dict], token_id: str) -> float | None:
+    """Search recent activity for the most recent SELL of a specific token.
+
+    Returns the average sell price if found, else None.
+    """
+    tid_lower = token_id.lower()
+    sells = []
+    for item in activity:
+        side = str(item.get("side") or item.get("type") or "").upper()
+        asset = str(item.get("asset_id") or item.get("token_id") or
+                    item.get("tokenId") or item.get("conditionId") or "").lower()
+        if "SELL" in side and asset == tid_lower:
+            try:
+                price = float(item.get("price") or item.get("avg_price") or 0)
+                if 0 < price <= 1.0:
+                    sells.append(price)
+            except (TypeError, ValueError):
+                pass
+    return round(sum(sells) / len(sells), 4) if sells else None
+
+
 async def get_token_balance(token_id: str) -> float:
     """Return held balance for a specific token. Returns 0.0 if not found.
 

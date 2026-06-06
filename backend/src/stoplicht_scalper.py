@@ -568,9 +568,14 @@ async def _run_window(coin: str, market: dict, paper: bool) -> None:
             from . import orders as _orders_bal
             actual_balance = await _orders_bal.get_token_balance(tok)
             if actual_balance < 0.01:
+                # Fetch actual sell price from Polymarket activity so P&L is correct.
+                activity = await _orders_bal.get_recent_activity(hours=4)
+                actual_price = _orders_bal.find_sell_price_in_activity(activity, tok)
+                book_price = actual_price if actual_price else pos.entry_price
                 log.info("scalper_position_externally_closed", coin=coin, slot=slot,
-                         entry=pos.entry_price, booked_at="entry_price")
-                _close_slot(positions, slot, pos.entry_price, "externally_closed")
+                         entry=pos.entry_price, actual_sell=actual_price,
+                         booked_at=round(book_price, 4))
+                _close_slot(positions, slot, book_price, "externally_closed")
                 continue
 
         # Remainder unsold and still on-chain — book at binary resolution.
