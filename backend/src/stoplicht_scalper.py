@@ -313,9 +313,17 @@ async def _phase1_tick(coin, market, positions, st, lead, secs_left,
 
         # MOM reversal: stoplicht flipped to opposite direction with conviction.
         # No spread-hold here: Phase 1 is active scalping — signals always fire.
+        # Exception: als trailing nooit actief was EN prijs staat al onder entry, houdt
+        # de bot de positie vast. Stoplicht-richting heeft meer voorspellende waarde
+        # dan een tijdelijke MOM-dip; verliezen op dit niveau worden niet gefixeerd.
         new_dir = st.get("direction")
         if new_dir and new_dir != pos.direction and st.get("score", 0) >= 0.40:
             be = not pos.trailing_active  # trailing nooit bereikt → break-even exit
+            if be and current_mid is not None and current_mid < pos.entry_price:
+                log.debug("scalper_mom_reversal_hold", coin=coin,
+                          current=round(current_mid, 4), entry=pos.entry_price,
+                          secs_left=round(secs_left))
+                return
             reason = "mom_reversal_be" if be else "mom_reversal"
             if paper:
                 exit_p = pos.entry_price if be else (
