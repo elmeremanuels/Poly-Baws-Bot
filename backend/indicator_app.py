@@ -30,6 +30,7 @@ import streamlit as st
 # Allow importing from src/ when run as a top-level Streamlit script
 sys.path.insert(0, str(Path(__file__).parent))
 
+from src.config_loader import CONFIG  # noqa: E402  — laadt ook dotenv/.env
 from src.indicator_engine import (  # noqa: E402
     Cache,
     get_cache,
@@ -267,8 +268,8 @@ _panel()
 def _call_claude(direction: str, score: float, d: dict,
                  price: float, supports: list, resistances: list, regime: str) -> dict:
     """Synchrone call naar Claude Haiku 4.5. Retourneert dict met verdict/confidence/reason."""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
         return {"verdict": "—", "confidence": 0.0, "reason": "ANTHROPIC_API_KEY niet ingesteld."}
 
     def _fmt(v) -> str:
