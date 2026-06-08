@@ -42,6 +42,10 @@ class HLPosition:
 
 _positions: dict[str, HLPosition | None] = {}
 
+# Cache: voorkomt dat Claude meerdere keren wordt aangeroepen voor hetzelfde signaal.
+# Sleutel: coin|direction|prijsniveau (per $500 bucket) — vervalt na 5 minuten.
+_claude_cache: dict[str, tuple[str, float]] = {}  # key → (verdict, timestamp)
+
 
 # ── Config helper ──────────────────────────────────────────────────────────────
 
@@ -49,12 +53,106 @@ def _cfg() -> dict:
     return CONFIG.get("hyperliquid_trader", {})
 
 
+# ── Claude pre-entry filter ────────────────────────────────────────────────────
+
+async def _claude_filter(
+    coin: str, direction: str, score: float, price: float,
+    signals: dict, supports: list, resistances: list, regime: str,
+) -> str:
+    """Roept Claude Haiku 4.5 aan vóór elke entry. Retourneert 'go', 'hold' of 'block'.
+
+    Cache per coin+richting+prijsniveau (per $500), geldig 5 minuten.
+    Bij elke fout of timeout: retourneert 'go' (blokkeert nooit ten onrechte).
+    """
+    import os
+    import json as _json
+    import re as _re
+    import httpx as _httpx
+
+    if not _cfg().get("claude_entry_filter", True):
+        return "go"
+
+    api_key = os.getenv("ANTHROPIC_API_KEY") or CONFIG.get("claude", {}).get("api_key", "")
+    if not api_key or api_key.startswith("${"):
+        return "go"
+
+    # Cache-sleutel: coin + richting + prijsbucket van $500
+    price_bucket = int(price / 500) * 500
+    cache_key = f"{coin}|{direction}|{price_bucket}"
+    cached = _claude_cache.get(cache_key)
+    if cached and (time.time() - cached[1]) < 300:  # 5 minuten geldig
+        log.info("hl_claude_filter_cached", coin=coin, direction=direction,
+                 verdict=cached[0])
+        return cached[0]
+
+    def _fmt(v) -> str:
+        return f"{v:.3f}" if v is not None else "n/b"
+
+    sup_str = f"${supports[0]['price']:,.0f}"   if supports    else "—"
+    res_str = f"${resistances[0]['price']:,.0f}" if resistances else "—"
+    ofi     = _fmt(signals.get("spot_ofi"))
+    obi     = _fmt(signals.get("obi"))
+    mom     = _fmt(signals.get("mom"))
+    cvd     = _fmt(signals.get("cvd"))
+
+    system = (
+        "Je bent een pre-trade validator voor een BTC perpetual futures scalper op Hyperliquid. "
+        "De scalper gebruikt kwantitatieve signalen (OFI >0.55=bullish, OBI >0.60=bullish, "
+        "MOM >0=bullish, CVD >0=bullish). Blokkeer alleen bij een duidelijke narratieve reden "
+        "waarom de richting waarschijnlijk fout is. Standaard is GO."
+    )
+    user = (
+        f"Coin: {coin} | Richting: {direction} | Score: {score:.2f} | Regime: {regime}\n"
+        f"OFI={ofi} OBI={obi} MOM={mom} CVD={cvd}\n"
+        f"Prijs: ${price:,.0f} | Support: {sup_str} | Weerstand: {res_str}\n\n"
+        f'Antwoord uitsluitend als JSON: {{"verdict":"GO"|"HOLD"|"BLOCK",'
+        f'"confidence":0.0-1.0,"reason":"max 2 zinnen"}}'
+    )
+
+    verdict = "go"
+    try:
+        async with _httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 120,
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                },
+            )
+        resp.raise_for_status()
+        text = resp.json()["content"][0]["text"]
+        m = _re.search(r'\{[^{}]+\}', text, _re.DOTALL)
+        if m:
+            data = _json.loads(m.group())
+            word = str(data.get("verdict", "GO")).upper()
+            if word in ("GO", "HOLD", "BLOCK"):
+                verdict = word.lower()
+            confidence = float(data.get("confidence", 1.0))
+            reason = data.get("reason", "")
+            log.info("hl_claude_filter", coin=coin, direction=direction,
+                     score=round(score, 3), verdict=verdict,
+                     confidence=round(confidence, 2), reason=reason)
+    except Exception as exc:
+        log.info("hl_claude_filter_error", coin=coin, error=str(exc)[:100],
+                 fallback="go")
+
+    _claude_cache[cache_key] = (verdict, time.time())
+    return verdict
+
+
 # ── Signal helpers ─────────────────────────────────────────────────────────────
 
-def _get_signal(coin: str) -> tuple[str | None, float, dict, float | None]:
+def _get_signal(coin: str) -> tuple[str | None, float, dict, float | None, list, list]:
     """Haal stoplicht-signaal op uit indicator_engine cache.
 
-    Retourneert (direction, score, signals, price).
+    Retourneert (direction, score, signals, price, supports, resistances).
     direction: "UP" | "DOWN" | None
     """
     cache = get_cache(coin)
@@ -67,7 +165,7 @@ def _get_signal(coin: str) -> tuple[str | None, float, dict, float | None]:
     elif direction_eng == "down":
         direction = "DOWN"
 
-    return direction, score, signals, (price if price and price > 0 else None)
+    return direction, score, signals, (price if price and price > 0 else None), supports, resistances
 
 
 def _is_confirmed(direction: str, signals: dict) -> bool:
@@ -200,7 +298,8 @@ async def _tick(coin: str, paper: bool) -> None:
     profit_target    = cfg.get("profit_target_pct", 0.50)    # % gain = direct sluiten
     mom_rev_score    = cfg.get("mom_reversal_score", 0.40)   # minimumscore voor MOM-reversal
 
-    direction, score, signals, price = _get_signal(coin)
+    direction, score, signals, price, supports, resistances = _get_signal(coin)
+    regime = signals.get("regime", "UNKNOWN") if signals else "UNKNOWN"
 
     if price is None:
         log.info("hl_tick_no_data", coin=coin,
@@ -246,7 +345,16 @@ async def _tick(coin: str, paper: bool) -> None:
     elif consensus and score >= entry_score_min and direction:
         confirmed = _is_confirmed(direction, signals)
         if confirmed:
-            await _enter(coin, direction, price, paper)
+            # Claude pre-entry filter: blokkeert bij narratieve mismatch
+            cf = await _claude_filter(
+                coin, direction, score, price,
+                signals, supports, resistances, regime,
+            )
+            if cf == "block":
+                log.info("hl_entry_claude_blocked", coin=coin,
+                         direction=direction, score=round(score, 3))
+            else:
+                await _enter(coin, direction, price, paper)
         else:
             log.info("hl_entry_unconfirmed", coin=coin, direction=direction,
                      score=round(score, 3),
