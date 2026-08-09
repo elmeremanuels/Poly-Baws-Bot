@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 from .config_loader import CONFIG
@@ -216,6 +217,24 @@ def _calc_pnl_usdc(pos: HLPosition, exit_price: float) -> float:
     return notional * (pos.entry_price - exit_price) / pos.entry_price
 
 
+# ── Volatiliteits-regime sizing ─────────────────────────────────────────────────
+# Enige factor die de hele edge-hunt statistisch overleefde (ANOVA p=1.7e-8):
+# BTC beweegt in het weekend ~27% minder dan op weekdagen (za/zo ~2.2% vs ~3.0%).
+# Minder beweging = minder scalp-kans + dunnere orderbooks → kleiner inzetten.
+# Geen richtingvoorspelling; puur inzet-grootte koppelen aan wanneer er iets valt te halen.
+
+def _vol_regime_multiplier() -> tuple[float, str]:
+    """Sizing-multiplier op basis van dag-van-week (UTC). Retourneert (mult, label)."""
+    sz = _cfg().get("sizing", {})
+    if not sz.get("vol_sizing_enabled", True):
+        return 1.0, "uit"
+    weekend_mult = sz.get("weekend_multiplier", 0.6)  # ~vol-ratio, iets conservatiever
+    dow = datetime.now(timezone.utc).weekday()  # 0=maandag … 5=za, 6=zo
+    if dow >= 5:
+        return weekend_mult, "weekend"
+    return 1.0, "weekdag"
+
+
 # ── Entry / exit ───────────────────────────────────────────────────────────────
 
 async def _enter(coin: str, direction: str, current_price: float, paper: bool) -> bool:
@@ -223,12 +242,13 @@ async def _enter(coin: str, direction: str, current_price: float, paper: bool) -
     cfg = _cfg()
     leverage = cfg.get("leverage", 5)
     main_pct = cfg.get("sizing", {}).get("main_pct_per_100", 5.0)
+    vol_mult, vol_label = _vol_regime_multiplier()
     is_long = direction == "UP"
 
     if paper:
         slippage = 0.0005  # 0.05% simulatie-slippage
         fill = current_price * (1 + slippage if is_long else 1 - slippage)
-        size_usdc = cfg.get("paper_size_usdc", 10.0)
+        size_usdc = cfg.get("paper_size_usdc", 10.0) * vol_mult
         size_coin = round((size_usdc * leverage) / fill, 6)
     else:
         from . import hyperliquid_orders as _hl
@@ -236,7 +256,7 @@ async def _enter(coin: str, direction: str, current_price: float, paper: bool) -
         if balance < 5.0:
             log.warning("hl_balance_too_low", balance=round(balance, 2))
             return False
-        size_usdc = balance * main_pct / 100
+        size_usdc = balance * main_pct / 100 * vol_mult
         size_coin = round((size_usdc * leverage) / current_price, 6)
         min_size = cfg.get("min_order_size_coin", 0.001)
         if size_coin < min_size:
@@ -257,7 +277,8 @@ async def _enter(coin: str, direction: str, current_price: float, paper: bool) -
     _positions[coin] = pos
     log.info("hl_entry", coin=coin, direction=direction,
              price=round(pos.entry_price, 2), size_usdc=round(size_usdc, 2),
-             size_coin=size_coin, leverage=leverage, paper=paper)
+             size_coin=size_coin, leverage=leverage,
+             vol_regime=vol_label, vol_mult=vol_mult, paper=paper)
     return True
 
 

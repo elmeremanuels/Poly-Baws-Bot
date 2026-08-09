@@ -329,6 +329,8 @@ hyperliquid_trader:
   # Positiegroottes
   sizing:
     main_pct_per_100: 5.0             # 5% van USDC-saldo per trade als margin
+    vol_sizing_enabled: true          # kleiner inzetten in het rustige weekend
+    weekend_multiplier: 0.6           # za/zo inzet × dit (data: weekend ~27% minder beweging)
   min_order_size_coin: 0.001          # minimale BTC-positie (Hyperliquid minimum)
   claude_entry_filter: true           # Claude Haiku pre-entry filter (false = uitschakelen)
 
